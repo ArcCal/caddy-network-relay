@@ -1,0 +1,59 @@
+# Lint and test on every push and pull request; build Caddy with the plugin
+# for Linux x86_64 and arm64.
+name: test
+
+on:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md", "docs/**"]
+  pull_request:
+    paths-ignore: ["**.md", "docs/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: lint and test (Go 1.26)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
+      - run: go vet ./...
+      - run: go test -race -count=1 ./...
+      - run: shellcheck -S warning -e SC1111,SC1091 deploy/install.sh
+      - run: python3 deploy/test_install.py -v
+
+  go127:
+    name: test (Go 1.27)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.27"
+      # With -tags http2legacy the plugin enables extended CONNECT itself;
+      # without it, Go 1.27 needs GODEBUG=http2xconnect=1.
+      - run: GOTOOLCHAIN=local go test -count=1 -tags http2legacy ./...
+      - run: GOTOOLCHAIN=local GODEBUG=http2xconnect=1 go test -count=1 -run 'HTTP2Ext|TCP|Masque|HTTP3|Caddyfile|Target' ./...
+
+  build:
+    name: build ${{ matrix.arch }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: CGO_ENABLED=0 GOARCH=${{ matrix.arch }} go build -tags http2legacy -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
+      - uses: actions/upload-artifact@v4
+        with:
+          name: caddy-network-relay-linux-${{ matrix.arch }}
+          path: caddy

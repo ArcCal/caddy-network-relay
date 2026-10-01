@@ -1,0 +1,5 @@
+/caddy
+/cmd/caddy/caddy
+*.mobileconfig
+__pycache__/
+*.pyc
