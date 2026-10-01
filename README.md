@@ -260,6 +260,12 @@ systemctl daemon-reload && deluser --system caddy
 
 ## 已经在用 Caddy：手动集成
 
+### 直接下载编译好的程序
+
+每次推送到 `main`，GitHub Actions 都会测试并编译；打一个版本标签还会生成 Release。在仓库页面 **Releases** 里下载 `caddy-network-relay-<版本>-linux-amd64.tar.gz`（x86_64 服务器）或 `-linux-arm64.tar.gz`（ARM 服务器；`-darwin-arm64` 是给 Mac 上跑 `check` 用的），解压得到一个 `caddy`，放到 `/usr/local/bin/caddy` 即可，不需要在服务器上编译。仓库是私有的，所以要在浏览器里登录后下载，再上传到服务器。
+
+发布一个版本：在本地 `git tag v1.0.0 && git push origin v1.0.0`，或者在 GitHub 的 **Actions → release → Run workflow** 里填一个已有的标签。
+
 ### 编译
 
 需要 Go 1.26（`go.mod` 里写着具体版本，`GOTOOLCHAIN=auto` 时会自动下载）：
