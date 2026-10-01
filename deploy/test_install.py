@@ -1,0 +1,286 @@
+#!/usr/bin/env python3
+"""Tests deploy/install.sh in a scratch directory.
+
+System commands (apt-get, systemctl, ss, curl, ...) are replaced by stubs
+that record their calls; the Caddy binary is the real one built from this
+source, except that `validate` and `network-relay check` (which need a
+running system) are simulated. Run: python3 deploy/test_install.py
+"""
+
+import os
+from pathlib import Path
+import plistlib
+import shutil
+import stat
+import subprocess
+import tempfile
+import unittest
+
+SRC = Path(__file__).resolve().parent.parent
+INSTALL = SRC / 'deploy/install.sh'
+REAL_CADDY = None
+
+STUBS = {
+    'apt-get': 'exit 0',
+    'dpkg': '[ -n "$FAKE_APT_CADDY" ] && exit 0; exit 1',
+    'systemctl': r'''
+echo "systemctl $*" >> "$LOG"
+case "$1 $2" in
+  "is-active --quiet")
+    unit=$3
+    [ -e "$STATE/active-$unit" ] && exit 0; exit 3 ;;
+  "restart caddy")
+    [ -n "$FAKE_START_FAILS" ] && { rm -f "$STATE/active-caddy"; exit 0; }
+    touch "$STATE/active-caddy" ;;
+  "disable --now")
+    rm -f "$STATE/active-$3" ;;
+esac
+exit 0''',
+    'journalctl': 'exit 0',
+    'ss': 'printf "%s\\n" "$FAKE_SS"',
+    'curl': r'''
+case "$*" in
+  *ipify*|*ifconfig.me*) echo "$FAKE_IP" ;;
+  *) exec /usr/bin/curl "$@" ;;
+esac''',
+    'getent': r'''
+case "$1" in
+  ahostsv4) [ -n "$FAKE_DNS" ] && echo "$FAKE_DNS   STREAM $2"; exit 0 ;;
+  passwd) [ -e "$STATE/user-caddy" ] && exit 0; exit 2 ;;
+esac''',
+    'adduser': 'touch "$STATE/user-caddy"; echo "adduser $*" >> "$LOG"',
+    'runuser': 'shift 3; exec "$@"',  # runuser -u caddy -- cmd...
+    'chown': 'exit 0',
+    'sysctl': '[ "$1" = -n ] && echo 212992; exit 0',
+    'tailscale': 'echo 100.64.0.7',
+}
+
+FAKE_CADDY = r'''#!/bin/sh
+# The real binary, except for the parts that need a running system.
+case "$1 $2" in
+  "validate --config") echo "validate" >> "$LOG"; [ -n "$FAKE_INVALID" ] && exit 1; exit 0 ;;
+  "network-relay check") cat > /dev/null; echo "check $*" >> "$LOG"; [ -n "$FAKE_CHECK_FAILS" ] && { echo "FAIL HTTP/3"; exit 1; }; echo "all checks passed"; exit 0 ;;
+esac
+exec "$REAL_CADDY" "$@"
+'''
+
+FAKE_GO = r'''#!/bin/sh
+# go build ... -o OUT ./cmd/caddy
+echo "go $*" >> "$LOG"
+while [ $# -gt 0 ]; do
+  if [ "$1" = -o ]; then cp "$FAKE_CADDY_SCRIPT" "$2"; chmod 755 "$2"; fi
+  shift
+done
+'''
+
+
+def setUpModule():
+    global REAL_CADDY
+    out = Path(tempfile.mkdtemp()) / 'caddy'
+    subprocess.run(['go', 'build', '-tags', 'http2legacy', '-o', str(out), './cmd/caddy'], cwd=SRC, check=True)
+    REAL_CADDY = out
+
+
+class InstallTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.dir)
+        self.root = self.dir / 'root'
+        self.root.mkdir()
+        self.state = self.dir / 'state'
+        self.state.mkdir()
+        self.log = self.dir / 'calls.log'
+        self.log.touch()
+        bin_dir = self.dir / 'bin'
+        bin_dir.mkdir()
+        for name, body in STUBS.items():
+            p = bin_dir / name
+            p.write_text('#!/bin/sh\n' + body + '\n')
+            p.chmod(0o755)
+        self.fake_caddy = self.dir / 'fake-caddy'
+        self.fake_caddy.write_text(FAKE_CADDY)
+        self.fake_caddy.chmod(0o755)
+        fake_go = self.dir / 'fake-go'
+        fake_go.write_text(FAKE_GO)
+        fake_go.chmod(0o755)
+        self.env = {
+            'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+            'HOME': str(self.dir),
+            'RELAY_TEST_ROOT': str(self.root),
+            'RELAY_TEST_GO': str(fake_go),
+            'FAKE_CADDY_SCRIPT': str(self.fake_caddy),
+            'REAL_CADDY': str(REAL_CADDY),
+            'LOG': str(self.log),
+            'STATE': str(self.state),
+            'FAKE_IP': '203.0.113.9',
+            'FAKE_DNS': '203.0.113.9',
+            'FAKE_SS': '',
+            'RELAY_TEST_SLEEP': '0',
+            'RELAY_TEST_TRIES': '2',
+        }
+
+    def install(self, *args, ok=True, **env):
+        e = dict(self.env, **env)
+        r = subprocess.run(['bash', str(INSTALL), *args], env=e, capture_output=True, text=True, timeout=120)
+        if ok is not None and (r.returncode == 0) != ok:
+            self.fail(f'exit {r.returncode}\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}')
+        return r
+
+    def path(self, p):
+        return self.root / p.lstrip('/')
+
+    def calls(self):
+        return self.log.read_text()
+
+    def files(self):
+        return sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*') if p.is_file())
+
+    def fresh(self, *args, **env):
+        return self.install('--domain', 'Relay.Example.COM', '--user', 'iphone', '--no-gfwlist', *args, **env)
+
+    def test_fresh_install(self):
+        r = self.fresh('--email', 'me@example.org')
+        caddyfile = self.path('/etc/caddy/Caddyfile').read_text()
+        self.assertIn('# domain: relay.example.com', caddyfile)
+        self.assertIn('relay.example.com, :443 {', caddyfile)
+        self.assertIn('email me@example.org', caddyfile)
+        self.assertRegex(caddyfile, r'user iphone \$argon2id\$v=19\$m=19456,t=2,p=1\$\S+\$\S+')
+        # The generated Caddyfile is valid for the real adapter.
+        a = subprocess.run([str(REAL_CADDY), 'adapt', '--config', str(self.path('/etc/caddy/Caddyfile'))],
+                           capture_output=True, text=True)
+        self.assertEqual(a.returncode, 0, a.stderr)
+        self.assertIn('"handler":"network_relay"', a.stdout)
+
+        password_file = self.path('/etc/caddy/relay/iphone.password')
+        password = password_file.read_text().strip()
+        self.assertEqual(len(password), 24)
+        self.assertEqual(stat.S_IMODE(password_file.stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.path('/etc/caddy/relay').stat().st_mode), 0o700)
+        self.assertNotIn(password, r.stdout + r.stderr, 'the password is never printed')
+
+        for name, toggle in [('relay.example.com-iphone.mobileconfig', None),
+                             ('relay.example.com-iphone-global.mobileconfig', False)]:
+            p = self.path('/etc/caddy/relay/' + name)
+            self.assertEqual(stat.S_IMODE(p.stat().st_mode), 0o600)
+            payload = plistlib.loads(p.read_bytes())['PayloadContent'][0]
+            relay = payload['Relays'][0]
+            self.assertEqual(relay['HTTP3RelayURL'],
+                             'https://relay.example.com/.well-known/masque/udp/{target_host}/{target_port}/')
+            self.assertIn(password.encode(), __import__('base64').b64decode(
+                relay['AdditionalHTTPHeaderFields']['Authorization'].split()[1]))
+            self.assertEqual(payload.get('UIToggleEnabled'), toggle)
+            self.assertEqual(payload['ExcludedDomains'], ['relay.example.com'])
+            self.assertIn('google.com', payload['MatchDomains'])
+        global_domains = plistlib.loads(self.path(
+            '/etc/caddy/relay/relay.example.com-iphone-global.mobileconfig').read_bytes())['PayloadContent'][0]['MatchDomains']
+        self.assertIn('spotify.com', global_domains)
+
+        self.assertTrue(self.path('/usr/local/bin/caddy').exists())
+        unit = self.path('/etc/systemd/system/caddy.service').read_text()
+        self.assertIn('ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile', unit)
+        self.assertIn('GODEBUG=http2xconnect=1', unit)
+        self.assertIn('net.core.rmem_max = 7500000', self.path('/etc/sysctl.d/60-caddy-network-relay.conf').read_text())
+        self.assertTrue(self.path('/var/www/relay/index.html').exists())
+        calls = self.calls()
+        self.assertIn('-tags http2legacy', calls)
+        self.assertIn('systemctl enable caddy', calls)
+        self.assertIn('systemctl restart caddy', calls)
+        self.assertIn('adduser --system --group --home /var/lib/caddy', calls)
+        self.assertIn('check network-relay check --server relay.example.com --address 127.0.0.1 --user iphone', calls)
+        self.assertIn('scp root@100.64.0.7:', r.stdout)
+
+    def test_upgrade_keeps_everything(self):
+        self.fresh()
+        caddyfile = self.path('/etc/caddy/Caddyfile').read_text()
+        password = self.path('/etc/caddy/relay/iphone.password').read_text()
+        profile = self.path('/etc/caddy/relay/relay.example.com-iphone-global.mobileconfig').read_bytes()
+        self.log.write_text('')
+        self.path('/usr/local/bin/caddy').write_text('old binary')
+        # An upgrade needs no DNS: here the domain no longer resolves.
+        self.install(FAKE_DNS='', FAKE_SS='tcp LISTEN 0 4096 *:443 *:* users:(("caddy",pid=1,fd=3))')
+        self.assertEqual(self.path('/etc/caddy/Caddyfile').read_text(), caddyfile)
+        self.assertEqual(self.path('/etc/caddy/relay/iphone.password').read_text(), password)
+        self.assertEqual(self.path('/etc/caddy/relay/relay.example.com-iphone-global.mobileconfig').read_bytes(), profile)
+        self.assertNotEqual(self.path('/usr/local/bin/caddy').read_text(), 'old binary')
+        self.assertNotIn('adduser', self.calls())
+        # Same domain and user may be given again; different ones are refused.
+        self.install('--domain', 'relay.example.com', '--user', 'iphone')
+        r = self.install('--domain', 'other.example.com', ok=False)
+        self.assertIn('不能改成 other.example.com', r.stderr)
+        r = self.install('--user', 'ipad', ok=False)
+        self.assertIn('已有用户 iphone', r.stderr)
+
+    def test_refusals_change_nothing(self):
+        cases = [
+            ({}, ['--domain', 'relay.example.com'], {'FAKE_DNS': '198.51.100.1'}, '没有指向这台机器'),
+            ({}, ['--domain', 'relay.example.com'], {'FAKE_DNS': ''}, '还没有 DNS 记录'),
+            ({}, ['--domain', 'relay.example.com'],
+             {'FAKE_SS': 'tcp LISTEN 0 511 0.0.0.0:80 0.0.0.0:* users:(("nginx",pid=9,fd=6))'}, '端口被别的程序占用'),
+            ({}, ['--domain', 'relay.example.com'], {'FAKE_APT_CADDY': '1'}, 'apt 的 caddy'),
+            ({}, [], {}, '第一次安装要写域名'),
+            ({}, ['--domain', 'not a domain'], {}, '不是域名'),
+            ({}, ['--domain', 'relay.example.com', '--user', '.bad'], {}, '用户名'),
+            ({}, ['--domain', 'relay.example.com', '--email', 'nope'], {}, '不是邮箱'),
+            ({'active-network-relay': ''}, ['--domain', 'relay.example.com'], {}, '--replace-network-relay'),
+        ]
+        for state, args, env, message in cases:
+            with self.subTest(message):
+                for f in self.state.iterdir():
+                    f.unlink()
+                for name in state:
+                    (self.state / name).touch()
+                r = self.install(*args, ok=False, **env)
+                self.assertIn(message, r.stderr)
+                self.assertEqual(self.files(), [], 'nothing was written')
+
+    def test_foreign_caddyfile_is_left_alone(self):
+        p = self.path('/etc/caddy/Caddyfile')
+        p.parent.mkdir(parents=True)
+        p.write_text('example.com {\n\trespond hi\n}\n')
+        r = self.install('--domain', 'relay.example.com', ok=False)
+        self.assertIn('不是本脚本生成的', r.stderr)
+        self.assertEqual(p.read_text(), 'example.com {\n\trespond hi\n}\n')
+
+    def test_replaces_the_rust_relay(self):
+        (self.state / 'active-network-relay').touch()
+        self.fresh('--replace-network-relay',
+                   FAKE_SS='tcp LISTEN 0 4096 *:443 *:* users:(("network-relay",pid=7,fd=9))')
+        self.assertIn('systemctl disable --now network-relay', self.calls())
+
+    def test_failed_start_rolls_back(self):
+        r = self.fresh(ok=False, FAKE_START_FAILS='1')
+        self.assertIn('安装失败，已恢复', r.stderr)
+        self.assertFalse(self.path('/etc/caddy/Caddyfile').exists())
+        self.assertFalse(self.path('/usr/local/bin/caddy').exists())
+        self.assertIn('systemctl disable --now caddy', self.calls())
+        # A later run is a fresh install again.
+        self.fresh()
+        self.assertTrue(self.path('/etc/caddy/Caddyfile').exists())
+
+    def test_failed_upgrade_restores_the_old_binary(self):
+        self.fresh()
+        self.path('/usr/local/bin/caddy').write_text('#!/bin/sh\necho old\n')
+        r = self.install(ok=False, FAKE_START_FAILS='1')
+        self.assertIn('旧版本继续运行', r.stderr)
+        self.assertEqual(self.path('/usr/local/bin/caddy').read_text(), '#!/bin/sh\necho old\n')
+        self.assertTrue(self.path('/etc/caddy/Caddyfile').exists())
+
+    def test_invalid_config_stops_before_installing(self):
+        r = self.fresh(ok=False, FAKE_INVALID='1')
+        self.assertIn('配置检查没通过', r.stderr)
+        self.assertFalse(self.path('/usr/local/bin/caddy').exists())
+        self.assertNotIn('systemctl restart', self.calls())
+        # Nothing that would make the next run look like an upgrade.
+        self.assertFalse(self.path('/etc/caddy/Caddyfile').exists())
+        self.assertFalse(self.path('/etc/caddy/relay/iphone.password').exists())
+        self.fresh()
+
+    def test_failed_self_check_keeps_the_service(self):
+        r = self.fresh(ok=False, FAKE_CHECK_FAILS='1')
+        self.assertIn('本机自检没有全部通过', r.stdout)
+        self.assertTrue((self.state / 'active-caddy').exists())
+        self.assertTrue(self.path('/etc/caddy/relay/relay.example.com-iphone-global.mobileconfig').exists())
+
+
+if __name__ == '__main__':
+    unittest.main()

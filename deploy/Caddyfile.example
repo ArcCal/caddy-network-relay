@@ -1,0 +1,25 @@
+# Caddy with the network_relay plugin: a relay for Apple's Network Relay
+# (iPhone, iPad, Mac) behind an ordinary website.
+#
+# Replace relay.example.com with your domain, and create users with
+#     caddy network-relay passwd --name iphone
+{
+	# Optional: an address for Let's Encrypt to write to about your
+	# certificate.
+	# email you@example.com
+}
+
+# The ":443" next to the domain is required: a device's CONNECT request
+# names the destination (for example www.google.com:443) as its host, so a
+# site that only matches relay.example.com would never see it.
+relay.example.com, :443 {
+	network_relay {
+		# One line per device: user <name> <hash from `caddy network-relay passwd`>
+		user iphone $argon2id$v=19$m=19456,t=2,p=1$REPLACE$REPLACE
+	}
+
+	# Everything else, including requests without the right password, is
+	# answered by the website.
+	root * /var/www/relay
+	file_server
+}
