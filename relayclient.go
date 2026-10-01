@@ -34,6 +34,9 @@ type relayClient struct {
 	// NoDatagrams makes the HTTP/3 client not negotiate HTTP Datagrams,
 	// so UDP goes in capsules.
 	NoDatagrams bool
+	// PacketConn, when set, carries the QUIC connection (tests use it to
+	// impair the network).
+	PacketConn net.PacketConn
 }
 
 // stream is an open TCP tunnel.
@@ -117,7 +120,18 @@ type h3Conn struct {
 
 func (c *relayClient) dialH3(ctx context.Context) (*h3Conn, error) {
 	qconf := &quic.Config{EnableDatagrams: !c.NoDatagrams, InitialPacketSize: 1350}
-	conn, err := quic.DialAddr(ctx, c.Address, c.tlsConfig(http3.NextProtoH3), qconf)
+	var conn *quic.Conn
+	var err error
+	if c.PacketConn != nil {
+		addr, rerr := net.ResolveUDPAddr("udp", c.Address)
+		if rerr != nil {
+			return nil, rerr
+		}
+		tr := &quic.Transport{Conn: c.PacketConn}
+		conn, err = tr.Dial(ctx, addr, c.tlsConfig(http3.NextProtoH3), qconf)
+	} else {
+		conn, err = quic.DialAddr(ctx, c.Address, c.tlsConfig(http3.NextProtoH3), qconf)
+	}
 	if err != nil {
 		return nil, err
 	}
