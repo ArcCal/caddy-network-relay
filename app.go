@@ -144,7 +144,8 @@ func (a *App) Start() error {
 		}
 		tlsConf := http3.ConfigureTLSConfig(s.srv.TLSConnPolicies.TLSConfig(a.ctx))
 		s.h3 = &http3.Server{
-			Handler:         s.srv,
+			Handler:         h3Handler{next: s.srv},
+			ConnContext:     withQUICConn,
 			EnableDatagrams: true,
 			MaxHeaderBytes:  s.srv.MaxHeaderBytes,
 			IdleTimeout:     time.Duration(s.srv.IdleTimeout),
@@ -255,7 +256,8 @@ var endpoints = struct {
 // device is a stream), large flow-control windows, and an initial packet
 // size of 1350 bytes: relayed QUIC packets are at least 1200 bytes (RFC
 // 9000 §14.1) and need room for the outer QUIC header, the DATAGRAM frame
-// and the context ID.
+// and the context ID. No 0-RTT: a replayed CONNECT would open a second
+// tunnel.
 func quicConfig() *quic.Config {
 	return &quic.Config{
 		EnableDatagrams:                true,
@@ -267,6 +269,11 @@ func quicConfig() *quic.Config {
 		InitialConnectionReceiveWindow: 4 << 20,
 		MaxConnectionReceiveWindow:     32 << 20,
 		MaxIdleTimeout:                 5 * time.Minute,
+		// QUIC closes a connection after MaxIdleTimeout without packets,
+		// whatever streams are open; tunnels can be idle for longer (an
+		// idle TCP connection inside the relay). TCP keepalives do the same
+		// for HTTP/2 connections (Go sends them every 15 seconds).
+		KeepAlivePeriod: 30 * time.Second,
 	}
 }
 

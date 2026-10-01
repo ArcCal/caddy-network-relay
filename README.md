@@ -320,12 +320,15 @@ relay.example.com, :443 {
 
 | 情况 | 状态 | `Proxy-Status` 的 `error=` |
 |---|---|---|
-| 目标格式不对、带了请求体的 CONNECT-UDP | 400 | `http_request_error` |
+| 目标格式不对；CONNECT-UDP 带了内容头或请求体；HTTP/1.1 的 CONNECT-UDP 不是 GET 或 `Connection` 里没有 `Upgrade` | 400 | `http_request_error` |
+| CONNECT-UDP 的路径不是 `udp_template` | 404 | — |
 | 端口被封；用户刚被删除 | 403 | `http_request_denied` |
 | 地址被封 | 403 | `destination_ip_prohibited` |
 | 域名解析失败 / 超时（5 秒） | 502 / 504 | `dns_error` / `dns_timeout` |
 | 连接被拒绝 / 超时 / 不可达 | 502 / 504 / 502 | `connection_refused` / `connection_timeout` / `destination_unavailable` |
 | 超过 `max_tunnels` | 503 | `connection_limit_reached` |
+
+隧道建立后出了问题（目标断开、目标端口不可达、设备发来畸形数据），按 RFC 9114 / 9297 / 9298 复位流或关闭连接；每种情况用哪个错误码，见[设计文档](docs/design.md)。
 
 只有通过了认证的请求才会看到这些；没有密码的请求只看到网站。
 

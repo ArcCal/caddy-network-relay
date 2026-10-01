@@ -15,3 +15,7 @@ import (
 func http2ExtendedConnect() bool {
 	return strings.Contains(os.Getenv("GODEBUG"), "http2xconnect=1")
 }
+
+// goH2ClientExtendedConnect: Go 1.27's HTTP/2 client rejects the
+// :protocol pseudo-header, so `check` cannot test UDP over HTTP/2.
+const goH2ClientExtendedConnect = false

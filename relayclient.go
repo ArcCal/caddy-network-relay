@@ -191,22 +191,56 @@ func (c *relayClient) openUDPH3(ctx context.Context, h *h3Conn, host, port strin
 		return nil, err
 	}
 	if !c.NoDatagrams && h.cc.Settings().EnableDatagrams {
-		return &h3Datagrams{str}, nil
+		return newH3Datagrams(str), nil
 	}
 	return newCapsuleConn(h3Stream{str}), nil
 }
 
-type h3Datagrams struct{ str *http3.RequestStream }
+// h3Datagrams carries UDP payloads as HTTP Datagrams. It also reads the
+// request stream (capsules, or its end), so a tunnel the relay closes is
+// noticed.
+type h3Datagrams struct {
+	str  *http3.RequestStream
+	done chan struct{}
+	err  error
+}
+
+func newH3Datagrams(str *http3.RequestStream) *h3Datagrams {
+	d := &h3Datagrams{str: str, done: make(chan struct{})}
+	go func() {
+		err := readCapsules(str, func([]byte) {})
+		if err == nil {
+			err = io.EOF
+		}
+		d.err = err
+		close(d.done)
+	}()
+	return d
+}
 
 func (d *h3Datagrams) Send(p []byte) error {
 	return d.str.SendDatagram(append([]byte{0}, p...))
 }
 
 func (d *h3Datagrams) Receive(ctx context.Context) ([]byte, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-d.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 	for {
 		b, err := d.str.ReceiveDatagram(ctx)
 		if err != nil {
-			return nil, err
+			select {
+			case <-d.done:
+				return nil, d.err
+			default:
+				return nil, err
+			}
 		}
 		id, n, err := quicvarint.Parse(b)
 		if err == nil && id == 0 {
@@ -284,6 +318,9 @@ func (c *relayClient) openTCPH2(ctx context.Context, h *h2Conn, target string) (
 }
 
 func (c *relayClient) openUDPH2(ctx context.Context, h *h2Conn, host, port string) (packetConn, error) {
+	if !goH2ClientExtendedConnect {
+		return nil, errors.New("this build cannot send extended CONNECT over HTTP/2: build with Go 1.26 or -tags http2legacy")
+	}
 	path, err := c.udpPath(host, port)
 	if err != nil {
 		return nil, err
