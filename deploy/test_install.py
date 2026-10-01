@@ -97,6 +97,7 @@ class InstallTest(unittest.TestCase):
             p = bin_dir / name
             p.write_text('#!/bin/sh\n' + body + '\n')
             p.chmod(0o755)
+        (self.dir / 'os-release-default').write_text('ID=ubuntu\nVERSION_ID="24.04"\nPRETTY_NAME="Ubuntu 24.04"\n')
         self.fake_caddy = self.dir / 'fake-caddy'
         self.fake_caddy.write_text(FAKE_CADDY)
         self.fake_caddy.chmod(0o755)
@@ -115,6 +116,7 @@ class InstallTest(unittest.TestCase):
             'FAKE_IP': '203.0.113.9',
             'FAKE_DNS': '203.0.113.9',
             'FAKE_SS': '',
+            'RELAY_TEST_OS_RELEASE': str(self.dir / 'os-release-default'),
             'RELAY_TEST_SLEEP': '0',
             'RELAY_TEST_TRIES': '2',
         }
@@ -232,6 +234,26 @@ class InstallTest(unittest.TestCase):
                 r = self.install(*args, ok=False, **env)
                 self.assertIn(message, r.stderr)
                 self.assertEqual(self.files(), [], 'nothing was written')
+
+    def test_supported_systems(self):
+        for pretty, accepted in [
+            ('ID=debian\nVERSION_ID="12"\n', True), ('ID=debian\nVERSION_ID="13"\n', True),
+            ('ID=debian\nVERSION_ID="14"\n', True), ('ID=debian\n', True),  # testing/unstable
+            ('ID=ubuntu\nVERSION_ID="22.04"\n', True), ('ID=ubuntu\nVERSION_ID="24.04"\n', True),
+            ('ID=ubuntu\nVERSION_ID="26.04"\n', True), ('ID=ubuntu\nVERSION_ID="27.04"\n', True),
+            ('ID=debian\nVERSION_ID="11"\n', False), ('ID=ubuntu\nVERSION_ID="20.04"\n', False),
+            ('ID=fedora\nVERSION_ID="42"\n', False), ('ID=alpine\nVERSION_ID="3.21"\n', False),
+        ]:
+            with self.subTest(pretty.replace('\n', ' ')):
+                osr = self.dir / 'os-release'
+                osr.write_text(pretty + 'PRETTY_NAME="test system"\n')
+                # A system that is refused stops before the DNS check; one that
+                # is accepted goes on and fails at the missing domain.
+                r = self.install(ok=False, RELAY_TEST_OS_RELEASE=str(osr))
+                if accepted:
+                    self.assertIn('第一次安装要写域名', r.stderr)
+                else:
+                    self.assertIn('只支持 Debian 12 及以后', r.stderr)
 
     def test_foreign_caddyfile_is_left_alone(self):
         p = self.path('/etc/caddy/Caddyfile')

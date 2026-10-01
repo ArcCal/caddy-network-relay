@@ -1,6 +1,6 @@
 # 部署并在真机上测试
 
-从零开始：一台 Ubuntu 22.04/24.04 或 Debian 12/13 的 x86_64 VPS，到 iPhone/Mac 实际走中继上网。每一步都写了“应该看到什么”和“不对怎么办”。全程大约 30 分钟，其中编译 5–15 分钟。
+从零开始：一台 Ubuntu（22.04 及以后）或 Debian（12 及以后）的 x86_64 VPS，到 iPhone/Mac 实际走中继上网。每一步都写了“应该看到什么”和“不对怎么办”。全程大约 30 分钟，其中编译 5–15 分钟。
 
 下文的 `relay.example.com` 换成你的域名，`服务器IP` 换成 VPS 的公网 IPv4。
 
@@ -8,7 +8,7 @@
 
 | 需要 | 检查方法 |
 |---|---|
-| VPS：Ubuntu 22.04/24.04 或 Debian 12/13，x86_64，≥ 1 GB 内存，≥ 3 GB 空闲磁盘 | 登录后 `cat /etc/os-release \| head -2`、`free -m`、`df -h /` |
+| VPS：Ubuntu 22.04 及以后或 Debian 12 及以后，x86_64，≥ 1 GB 内存，≥ 3 GB 空闲磁盘 | 登录后 `cat /etc/os-release \| head -2`、`free -m`、`df -h /` |
 | 域名的 A 记录指向 VPS | 在 Mac 上 `dig +short relay.example.com`，输出等于服务器 IP。Cloudflare 必须是“仅 DNS”（灰色云朵） |
 | 云防火墙放行 TCP 80、TCP 443、UDP 443 | 云服务商控制台的安全组/防火墙规则。**UDP 443 最容易漏** |
 | 443 端口没被占用 | VPS 上 `sudo ss -lntup \| grep ':443\|:80'` 没有输出（有 nginx/apache 就先停掉） |

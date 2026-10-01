@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Installs or upgrades Caddy with the network_relay plugin on Debian 12/13
-# or Ubuntu 22.04/24.04 (x86_64 or arm64), from the source directory this
-# script is in.
+# Installs or upgrades Caddy with the network_relay plugin on Debian 12 or
+# newer and Ubuntu 22.04 or newer (x86_64 or arm64), from the source
+# directory this script is in.
 #
 # First install:
 #     sudo bash deploy/install.sh --domain relay.example.com [--user iphone] [--email you@example.com]
@@ -64,13 +64,21 @@ done
 [[ $EUID == 0 || -n $ROOT ]] || die '请用 root 运行：先 sudo -i，再运行本脚本。'
 grep -q '^module github.com/arccal/caddy-network-relay$' "$SRC/go.mod" 2>/dev/null \
     || die "找不到源码：请在解压后的 caddy-network-relay 目录里运行 bash deploy/install.sh。"
-if [[ -z $ROOT ]]; then
-    . /etc/os-release
-    case "${ID:-} ${VERSION_ID:-}" in
-        "debian 12"|"debian 13"|"ubuntu 22.04"|"ubuntu 24.04") ;;
-        *) die "只支持 Debian 12/13 和 Ubuntu 22.04/24.04（这台是 ${PRETTY_NAME:-未知系统}）。" ;;
-    esac
-fi
+# Debian 12 or newer, Ubuntu 22.04 or newer: anything with systemd, apt and
+# a glibc the static binary does not even need. Newer releases are accepted
+# as they come out.
+. "${RELAY_TEST_OS_RELEASE:-/etc/os-release}"
+os_ok=0
+os_version=${VERSION_ID:-}
+os_major=${os_version%%.*}
+case ${ID:-} in
+    debian)
+        # Debian testing/unstable have no VERSION_ID; they are newer than any release.
+        if [[ -z $os_version ]] || { [[ $os_major =~ ^[0-9]+$ ]] && ((os_major >= 12)); }; then os_ok=1; fi ;;
+    ubuntu)
+        if [[ $os_version =~ ^[0-9]+\.[0-9]+$ ]] && ((os_major >= 22)); then os_ok=1; fi ;;
+esac
+((os_ok)) || die "只支持 Debian 12 及以后、Ubuntu 22.04 及以后（这台是 ${PRETTY_NAME:-未知系统}）。"
 case $(uname -m) in
     x86_64) GOARCH=amd64 ;;
     aarch64) GOARCH=arm64 ;;
