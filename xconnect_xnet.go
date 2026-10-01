@@ -26,3 +26,7 @@ func init() {
 }
 
 func http2ExtendedConnect() bool { return !http2DisableExtendedConnect }
+
+// goH2ClientExtendedConnect: the HTTP/2 client can send extended CONNECT
+// (used by `caddy network-relay check` and the tests).
+const goH2ClientExtendedConnect = true

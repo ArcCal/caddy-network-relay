@@ -135,10 +135,11 @@ func (c *h2Client) gone() <-chan struct{} { return c.done }
 
 // h3Client is an HTTP/3 request stream taken over from the server.
 type h3Client struct {
-	str *http3.Stream
+	str  *http3.Stream
+	body *h3Body
 }
 
-func (c *h3Client) Read(p []byte) (int, error)  { return c.str.Read(p) }
+func (c *h3Client) Read(p []byte) (int, error)  { return c.body.Read(p) }
 func (c *h3Client) Write(p []byte) (int, error) { return c.str.Write(p) }
 
 func (c *h3Client) closeWrite() bool {

@@ -138,9 +138,9 @@ func (u *udpTunnel) finish(why abortReason, aborted bool) {
 
 func (u *udpTunnel) touch() { u.last.Store(time.Now().UnixNano()) }
 
-// toTarget sends one payload to the target. Errors that concern only this
-// datagram (too big for the path, an ICMP error from an earlier one) drop
-// it; anything else means the socket is unusable.
+// toTarget sends one payload to the target. A datagram too big for the
+// path (the socket never fragments) or a full send buffer drops it; any
+// other error means the socket is unusable, which closes the tunnel.
 func (u *udpTunnel) toTarget(p []byte) {
 	u.touch()
 	if _, err := u.sock.Write(p); err != nil {
@@ -153,10 +153,14 @@ func (u *udpTunnel) toTarget(p []byte) {
 	u.up.Add(int64(len(p)))
 }
 
+// isPerDatagramError reports errors that concern a single datagram. ICMP
+// Destination Unreachable errors (ECONNREFUSED, EHOSTUNREACH, ENETUNREACH
+// on a connected socket) are not among them: RFC 9298 §3.1 requires the
+// proxy to close the request stream when the operating system reports the
+// socket unusable, with exactly that example.
 func isPerDatagramError(err error) bool {
-	return errors.Is(err, syscall.EMSGSIZE) || errors.Is(err, syscall.ECONNREFUSED) ||
-		errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) ||
-		errors.Is(err, syscall.ENOBUFS) || errors.Is(err, syscall.EAGAIN)
+	return errors.Is(err, syscall.EMSGSIZE) || errors.Is(err, syscall.ENOBUFS) ||
+		errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EINTR)
 }
 
 // run relays until the client ends the stream, the tunnel is idle for too

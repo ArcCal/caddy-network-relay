@@ -17,6 +17,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/modules/caddyhttp"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -168,6 +169,10 @@ const (
 	notRelay requestKind = iota
 	tcpRequest
 	udpRequest
+	// An extended CONNECT for connect-udp whose path is not the template:
+	// no tunnel here, and the website must not see it either, since any
+	// 2xx answer would mean "tunnel open".
+	udpUnknownPath
 )
 
 // classify tells relay requests from website requests (RFC 9114 §4.4,
@@ -187,14 +192,17 @@ func (h *Handler) classify(r *http.Request) (requestKind, target, bool) {
 		t, ok := parseAuthority(r.Host)
 		return tcpRequest, t, ok
 	case r.Method == http.MethodConnect && protocol == connectUDP && r.ProtoMajor >= 2,
-		r.ProtoMajor == 1 && r.Method == http.MethodGet && isUDPUpgrade(r.Header):
+		r.ProtoMajor == 1 && headerHasToken(r.Header, "Upgrade", connectUDP):
 		pathAndQuery := r.URL.EscapedPath()
 		if r.URL.RawQuery != "" {
 			pathAndQuery += "?" + r.URL.RawQuery
 		}
 		host, port, ok := h.template.Match(pathAndQuery)
 		if !ok {
-			return notRelay, target{}, false
+			if r.Method == http.MethodConnect {
+				return udpUnknownPath, target{}, false
+			}
+			return notRelay, target{}, false // a GET for the website
 		}
 		t, ok := newTarget(host, port)
 		return udpRequest, t, ok
@@ -202,8 +210,10 @@ func (h *Handler) classify(r *http.Request) (requestKind, target, bool) {
 	return notRelay, target{}, false
 }
 
-func isUDPUpgrade(hdr http.Header) bool {
-	return headerHasToken(hdr, "Upgrade", connectUDP) && headerHasToken(hdr, "Connection", "upgrade")
+// malformedUpgrade reports an HTTP/1.1 CONNECT-UDP request that breaks
+// RFC 9298 §3.2: the method must be GET and Connection must list Upgrade.
+func malformedUpgrade(r *http.Request) bool {
+	return r.ProtoMajor == 1 && (r.Method != http.MethodGet || !headerHasToken(r.Header, "Connection", "upgrade"))
 }
 
 func headerHasToken(hdr http.Header, name, token string) bool {
@@ -246,6 +256,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		}
 		// A GET with Upgrade: connect-udp is answered by the website.
 		return next.ServeHTTP(w, r)
+	}
+	if kind == udpUnknownPath {
+		return caddyhttp.Error(http.StatusNotFound, nil)
+	}
+	if kind == udpRequest && malformedUpgrade(r) {
+		return h.refuse(w, r, refuseRequest)
 	}
 	if !validTarget {
 		return h.refuse(w, r, refuseBadTarget)
@@ -405,7 +421,9 @@ func establish(w http.ResponseWriter, r *http.Request, h1Response string) (clien
 		w.WriteHeader(http.StatusOK)
 		str := streamer.HTTPStream()
 		_ = str.SetDeadline(time.Time{})
-		return &h3Client{str: str}, nil
+		conn, _ := r.Context().Value(quicConnKey{}).(*quic.Conn)
+		guard, _ := r.Context().Value(datagramGuardKey{}).(*datagramGuard)
+		return &h3Client{str: str, body: newH3Body(str, conn, guard)}, nil
 	}
 	return nil, errHijackFailed
 }
