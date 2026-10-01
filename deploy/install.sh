@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Installs or upgrades Caddy with the network_relay plugin on Debian 12/13
-# (x86_64 or arm64), from the source directory this script is in.
+# or Ubuntu 22.04/24.04 (x86_64 or arm64), from the source directory this
+# script is in.
 #
 # First install:
 #     sudo bash deploy/install.sh --domain relay.example.com [--user iphone] [--email you@example.com]
@@ -65,7 +66,10 @@ grep -q '^module github.com/arccal/caddy-network-relay$' "$SRC/go.mod" 2>/dev/nu
     || die "找不到源码：请在解压后的 caddy-network-relay 目录里运行 bash deploy/install.sh。"
 if [[ -z $ROOT ]]; then
     . /etc/os-release
-    [[ ${ID:-} == debian && ${VERSION_ID:-} =~ ^(12|13)$ ]] || die "只支持 Debian 12/13（这台是 ${PRETTY_NAME:-未知系统}）。"
+    case "${ID:-} ${VERSION_ID:-}" in
+        "debian 12"|"debian 13"|"ubuntu 22.04"|"ubuntu 24.04") ;;
+        *) die "只支持 Debian 12/13 和 Ubuntu 22.04/24.04（这台是 ${PRETTY_NAME:-未知系统}）。" ;;
+    esac
 fi
 case $(uname -m) in
     x86_64) GOARCH=amd64 ;;

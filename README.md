@@ -14,10 +14,11 @@
 ## 目录
 
 - [准备](#准备)
-- [一键安装（Debian 12/13）](#一键安装debian-1213)
+- [一键安装（Debian / Ubuntu）](#一键安装debian--ubuntu)
 - [把描述文件装到 iPhone / iPad / Mac](#把描述文件装到-iphone--ipad--mac)
 - [从旧的 network-relay（Rust 版）换过来](#从旧的-network-relayrust-版换过来)
 - [日常操作](#日常操作)：加用户、删用户、改密码、升级、看日志、重新生成描述文件、卸载
+- [在真机上测试](docs/test-on-device.md)：部署后在 iPhone/Mac 上验证的步骤和排查方法
 - [易错点（一定要看）](#易错点一定要看)
 - [已经在用 Caddy：手动集成](#已经在用-caddy手动集成)
 - [配置参考](#配置参考)
@@ -30,7 +31,7 @@
 
 | 需要 | 说明 |
 |---|---|
-| 一台 VPS | Debian 12 或 13，x86_64 或 arm64，**至少 1 GB 内存**（编译 Caddy 要用；512 MB 的机器先加 swap），3 GB 空闲磁盘 |
+| 一台 VPS | Debian 12/13 或 Ubuntu 22.04/24.04，x86_64 或 arm64，**至少 1 GB 内存**（编译 Caddy 要用；512 MB 的机器先加 swap），3 GB 空闲磁盘 |
 | 一个域名 | 比如 `relay.example.com`。下面所有命令里的 `relay.example.com` 都换成你的 |
 | 防火墙 | 云服务商的安全组/防火墙放行 **TCP 80、TCP 443、UDP 443**（UDP 443 最容易忘） |
 | 本机 | Mac（或任何能用 `scp` 的电脑），用来上传源码、下载描述文件 |
@@ -55,7 +56,7 @@ scp ~/Downloads/caddy-network-relay-main.zip root@服务器IP:/root/
 
 ---
 
-## 一键安装（Debian 12/13）
+## 一键安装（Debian / Ubuntu）
 
 登录服务器，切到 root：
 
