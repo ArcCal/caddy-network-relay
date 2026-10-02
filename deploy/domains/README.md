@@ -1,22 +1,22 @@
-# 域名列表
+# Domain lists
 
-`google-ai-social.txt` 用于生成 Apple `MatchDomains`：每行匹配域名及其子域名，未匹配的连接不由这份中继配置代理。保留非空匹配表；不要用空表表示“全部直连”，因为 Apple 对空匹配表的含义恰好相反。
+`google-ai-social.txt` is used to generate Apple `MatchDomains`: each line matches a domain and its subdomains, and connections that match nothing are not proxied by this relay configuration. Keep the match list non-empty; do not use an empty list to mean "everything direct", because for Apple an empty match list means exactly the opposite.
 
-覆盖 Google/Gemini 登录及常用资源、Gmail、Drive、Photos、Maps、YouTube，Claude 及 artifacts/MCP 内容，X/Twitter/Grok，OpenAI/ChatGPT/Sora 及常用语音端点。列入 ChatGPT 是这份通用 AI 分流预设的选择；不需要的服务可以整组删除。
+It covers Google/Gemini sign-in and common resources, Gmail, Drive, Photos, Maps and YouTube; Claude and artifacts/MCP content; X/Twitter/Grok; and OpenAI/ChatGPT/Sora with their common voice endpoints. Including ChatGPT is a choice of this general-purpose AI routing preset; services you do not need can be deleted group by group.
 
-2026-10-01 对照 [v2fly/domain-list-community](https://github.com/v2fly/domain-list-community/tree/2d71342eea1720da57261b55663c9d55619e9b1c/data) 的 `google`、`youtube`、`anthropic`、`twitter`、`xai`、`openai` 数据，筛选服务端点。来源是社区维护的域名数据，**不是各厂商保证完整的官方白名单**；尝试读取 Google/Claude 官方帮助页面时，当前环境返回 403。源数据的 MIT 许可证保留在 `LICENSE.domain-list-community`。
+On 2026-10-01 the service endpoints were selected by comparing against the `google`, `youtube`, `anthropic`, `twitter`, `xai` and `openai` data in [v2fly/domain-list-community](https://github.com/v2fly/domain-list-community/tree/2d71342eea1720da57261b55663c9d55619e9b1c/data). The source is community-maintained domain data, **not an official allowlist that each vendor guarantees to be complete**; attempts to read Google's and Claude's official help pages returned 403 in the environment used. The source data's MIT license is kept in `LICENSE.domain-list-community`.
 
-没有导入整个 Google 企业资产表、广告表，也没有让整个 `cloudflare.com`、`amazonaws.com`、`azure.com`、`appspot.com` 或 `livekit.cloud` 走代理。仅加入明确的服务域名和若干具体 CDN/语音主机。Apple MatchDomains 不支持社区规则中的正则表达式，因此没有将 ChatGPT 动态 Azure WebPubSub 的正则粗暴扩大成整个 Azure 域名。
+The whole Google corporate asset list and ad list were not imported, and neither all of `cloudflare.com`, `amazonaws.com`, `azure.com`, `appspot.com` nor `livekit.cloud` is proxied. Only clear-cut service domains and a few specific CDN/voice hosts were added. Apple MatchDomains does not support the regular expressions in the community rules, so the regular expression for ChatGPT's dynamic Azure WebPubSub hosts was not crudely widened to the whole Azure domain.
 
-域名会变更，这不是逐版本抓包得到的 App 全量清单。Google 的区域域名只列出常用项；其他地区的跳转、付费流程或动态第三方端点可能还需补充。若某项功能没有走中继，可临时在 `network_relay` 里加 `log_requests`，结合设备实际连接检查域名，再增加最小范围的规则。
+Domains change, and this is not a complete list of each app's hosts captured release by release. For Google's regional domains only the common ones are listed; redirects in other regions, payment flows or dynamic third-party endpoints may still need to be added. If some feature does not go through the relay, temporarily add `log_requests` to `network_relay`, check the domains against the device's actual connections, and then add the narrowest rule that works.
 
-这是**域名分流**，不是 App 身份分流：其他 App 使用相同 Google API、共享验证码或 CDN 时也会匹配。只指定某个 App 而不影响其他 App，需要另外的设备管理配置。本预设也不会覆盖设备上其他 VPN/代理已有的路由规则。
+This is **domain-based routing**, not routing by app identity: other apps that use the same Google APIs, shared verification codes or CDNs match too. Targeting a single app without affecting others needs separate device management configuration. This preset also does not override routing rules that other VPNs/proxies on the device already have.
 
-修改后重新生成描述文件并安装；已安装的描述文件不会因文本文件变化自动更新。生成时用 `caddy network-relay profile --domains-file 自己的列表.txt`（可以写多个）。
+After making changes, regenerate the profile and install it; an installed profile does not update itself when the text files change. To generate one, use `caddy network-relay profile --domains-file my-list.txt` (it can be given several times).
 
-## 全球服务 + gfwlist
+## Global services + gfwlist
 
-`global-services.txt`（Meta AI/Instagram、Spotify、Pandora、NYT、Wikipedia、YouTube Music 等）加上 `google-ai-social.txt` 和 [gfwlist](https://github.com/gfwlist/gfwlist)，就是安装脚本生成的 `-global` 描述文件：
+`global-services.txt` (Meta AI/Instagram, Spotify, Pandora, NYT, Wikipedia, YouTube Music and more) plus `google-ai-social.txt` and the [gfwlist](https://github.com/gfwlist/gfwlist) make up the `-global` profile that the install script generates:
 
 ```bash
 caddy network-relay profile --host relay.example.com --user iphone \
@@ -24,8 +24,8 @@ caddy network-relay profile --host relay.example.com --user iphone \
   --gfwlist --ui-toggle-enabled false
 ```
 
-- 密码运行后提示输入（不显示），或用 `--password-stdin` 从标准输入读。
-- gfwlist 在运行时下载（`--gfwlist-file` 用本地文件）；列表本身不在仓库里。官方的 base64 版本和纯文本版本都能读。
-- 苹果的 `MatchDomains` 只能写域名：gfwlist 里的正则、IP 和 `@@` 例外规则被丢弃，只限某个 URL 路径的规则会让整个域名走中继；运行结束时打印各类的数量。父域名已在列表里的子域名会合并。
-- 中继域名自己放进 `ExcludedDomains`。`--ui-toggle-enabled false` 让设备上不能在设置里关闭（iOS/macOS 26+）；描述文件本身仍可删除。
-- 描述文件含明文密码，已被 `.gitignore` 忽略，不要提交或随意传递。
+- The password is prompted for when it runs (input not shown), or read from standard input with `--password-stdin`.
+- The gfwlist is downloaded at run time (`--gfwlist-file` uses a local file); the list itself is not in the repository. Both the official base64 version and the plain-text version can be read.
+- Apple's `MatchDomains` can only hold domains: the gfwlist's regular expressions, IP addresses and `@@` exception rules are dropped, and rules limited to a URL path send the whole domain through the relay; counts for each kind are printed at the end. Subdomains whose parent domain is already in the list are merged.
+- The relay's own domain goes into `ExcludedDomains`. `--ui-toggle-enabled false` keeps the relay from being turned off in Settings on the device (iOS/macOS 26+); the profile itself can still be removed.
+- Profiles contain the password in plain text; they are ignored by `.gitignore`. Do not commit them or pass them around.
