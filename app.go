@@ -3,6 +3,7 @@ package networkrelay
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -240,12 +241,19 @@ type endpointUser struct {
 	tls    *tls.Config
 }
 
-// current returns the newest configuration's server and TLS config.
-func (ep *endpoint) current() endpointUser {
+// current returns the newest configuration's server and TLS config; false
+// once the last one was released, which can happen while a connection is
+// being accepted or a handshake is under way.
+func (ep *endpoint) current() (endpointUser, bool) {
 	endpoints.Lock()
 	defer endpoints.Unlock()
-	return ep.users[len(ep.users)-1]
+	if len(ep.users) == 0 {
+		return endpointUser{}, false
+	}
+	return ep.users[len(ep.users)-1], true
 }
+
+var errEndpointClosed = errors.New("HTTP/3 is no longer served on this address")
 
 var endpoints = struct {
 	sync.Mutex
@@ -296,7 +304,11 @@ func acquireEndpoint(network, hostport string, u endpointUser, logger *zap.Logge
 	ep.tr = &quic.Transport{Conn: conn}
 	ep.ln, err = ep.tr.ListenEarly(&tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			c := ep.current().tls
+			u, ok := ep.current()
+			if !ok {
+				return nil, errEndpointClosed
+			}
+			c := u.tls
 			if c.GetConfigForClient != nil {
 				return c.GetConfigForClient(hello)
 			}
@@ -318,7 +330,12 @@ func (ep *endpoint) accept() {
 		if err != nil {
 			return
 		}
-		s := ep.current().server
+		u, ok := ep.current()
+		if !ok {
+			_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+			return
+		}
+		s := u.server
 		go func() {
 			if err := s.ServeQUICConn(conn); err == http.ErrServerClosed {
 				_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")

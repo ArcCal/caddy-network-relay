@@ -7,6 +7,7 @@ package networkrelay
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -48,8 +49,9 @@ type Handler struct {
 	UDPTemplate string `json:"udp_template,omitempty"`
 
 	// Addresses (CIDR ranges) clients may not reach. Every address a name
-	// resolves to is checked. Default: loopback, private, link-local,
-	// multicast and other special-purpose ranges. An empty list blocks
+	// resolves to is checked. Default: this host's own addresses, loopback,
+	// private, link-local, multicast and other special-purpose ranges. A
+	// list given here replaces all of that; an empty list blocks
 	// nothing, which exposes services on the relay's own host.
 	BlockedDestinations *[]string `json:"blocked_destinations,omitempty"`
 
@@ -106,6 +108,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	}
 	if h.policy, err = newPolicy(blocked, ports); err != nil {
 		return err
+	}
+	if h.BlockedDestinations == nil {
+		h.policy.hostAddrs = interfaceAddrs
 	}
 	if h.ConnectTimeout == 0 {
 		h.ConnectTimeout = caddy.Duration(defaultConnectTimeout)
@@ -239,12 +244,16 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return next.ServeHTTP(w, r)
 	}
 	creds := credentials(r)
-	acct, ok := h.auth.verify(creds)
+	acct, err := h.auth.verify(r.Context(), creds)
 	if h.LogRequests {
-		h.logRequest(r, kind, ok)
+		h.logRequest(r, kind, err == nil)
 	}
-	if !ok {
-		if creds != "" {
+	if err != nil {
+		switch {
+		case errors.Is(err, errAuthBusy):
+			h.logger.Warn("relay authentication refused: too many verifications waiting",
+				zap.String("remote", r.RemoteAddr))
+		case errors.Is(err, errBadCredentials) && creds != "":
 			h.logger.Warn("relay authentication failed",
 				zap.String("user", acct.name), zap.String("remote", r.RemoteAddr))
 		}

@@ -142,6 +142,10 @@ Without any --match-* option, all traffic goes through the relay (except
 			if p.Password == "" {
 				return errors.New("the password is empty")
 			}
+			// Asked for a list of domains: an empty result must not turn into
+			// a profile that relays everything.
+			selective := len(p.MatchDomains) > 0 || len(p.MatchFQDNs) > 0 ||
+				len(domainFiles) > 0 || gfwlist || gfwFile != ""
 			for _, f := range domainFiles {
 				b, err := os.ReadFile(f)
 				if err != nil {
@@ -177,6 +181,11 @@ Without any --match-* option, all traffic goes through the relay (except
 				if !containsString(normalizedAll(p.ExcludedDomains), host) {
 					p.ExcludedDomains = append(p.ExcludedDomains, host)
 				}
+			}
+			if selective && len(p.MatchDomains) == 0 && len(p.MatchFQDNs) == 0 {
+				// Apple's rule: no MatchDomains and no MatchFQDNs relays all traffic.
+				return errors.New("no domain to relay is left (empty lists, or only the relay itself); " +
+					"leave out every --match-* and list option to relay all traffic")
 			}
 			xml, err := p.Generate()
 			if err != nil {
@@ -437,6 +446,9 @@ func runChecks(c *relayClient, tcpTarget, udpTarget, dnsName string, timeout tim
 	case err == nil:
 		s.Close()
 		report("no password: refused", errors.New("the tunnel opened without a password"), "")
+	case errors.As(err, &se) && se.Status/100 == 2:
+		// Any 2xx to a CONNECT means the tunnel is open (RFC 9110 §9.3.6).
+		report("no password: refused", fmt.Errorf("the relay answered %d without a password", se.Status), "")
 	case errors.As(err, &se):
 		report("no password: refused", nil, fmt.Sprintf("%d %s", se.Status, http.StatusText(se.Status)))
 	default:
@@ -470,6 +482,12 @@ func httpThrough(ctx context.Context, s stream, err error, target string) (strin
 	case r := <-ch:
 		if r.line == "" && r.err != nil {
 			return "", r.err
+		}
+		// Bytes alone do not show that the tunnel reached the target: the
+		// answer must be an HTTP status line.
+		if f := strings.Fields(r.line); len(f) < 2 || !strings.HasPrefix(f[0], "HTTP/1.") ||
+			len(f[1]) != 3 || strings.Trim(f[1], "0123456789") != "" {
+			return "", fmt.Errorf("not an HTTP response: %q", r.line)
 		}
 		return r.line, nil
 	case <-ctx.Done():
