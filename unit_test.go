@@ -70,14 +70,14 @@ func TestTemplates(t *testing.T) {
 		"/{target_host}/{target_port}/{other}", "/{+target_host}/{target_port}", "/{target_host}/{target_port",
 		"/{target_host}/{target_host}/{target_port}", "/{&target_host,target_port}",
 		// RFC 9298 §2: printable ASCII only.
-		"/中继/{target_host}/{target_port}/", "/r\x7f/{target_host}/{target_port}/", "/r\x01/{target_host}/{target_port}/",
+		"/relé/{target_host}/{target_port}/", "/r\x7f/{target_host}/{target_port}/", "/r\x01/{target_host}/{target_port}/",
 	} {
 		if _, err := parseUDPTemplate(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
 	}
 	// The same path percent-encoded is fine.
-	if _, err := parseUDPTemplate("/%E4%B8%AD%E7%BB%A7/{target_host}/{target_port}/"); err != nil {
+	if _, err := parseUDPTemplate("/rel%C3%A9/{target_host}/{target_port}/"); err != nil {
 		t.Errorf("percent-encoded template: %v", err)
 	}
 }
