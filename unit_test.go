@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -676,6 +677,30 @@ func TestHTTPThrough(t *testing.T) {
 		line, err := httpThrough(context.Background(), pipeStream{client}, nil, "example.com:80")
 		if (err == nil) != ok {
 			t.Errorf("%q: line %q, err %v", answer, line, err)
+		}
+	}
+}
+
+// The self-check accepts every response that opens a tunnel, and only
+// those: any 2xx to a CONNECT, 101 to an HTTP/1.1 upgrade.
+func TestCheckResponse(t *testing.T) {
+	for _, c := range []struct {
+		status  int
+		upgrade bool
+		ok      bool
+	}{
+		{200, false, true}, {202, false, true}, {204, false, true}, {299, false, true},
+		{101, false, false}, {301, false, false}, {405, false, false}, {502, false, false},
+		{101, true, true}, {200, true, false}, {426, true, false},
+	} {
+		rsp := &http.Response{StatusCode: c.status, Header: http.Header{"Proxy-Status": {"x; error=y"}}}
+		err := checkResponse(rsp, c.upgrade)
+		if (err == nil) != c.ok {
+			t.Errorf("%d (upgrade %v): %v", c.status, c.upgrade, err)
+		}
+		var se *statusError
+		if err != nil && (!errors.As(err, &se) || se.Status != c.status || se.ProxyStatus != "x; error=y") {
+			t.Errorf("%d: error %#v", c.status, err)
 		}
 	}
 }
