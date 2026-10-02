@@ -1,6 +1,7 @@
 package networkrelay
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -201,7 +202,20 @@ type flight struct {
 	done chan struct{}
 	acct account
 	ok   bool
+	// abandoned: the request went away before its verification ran, so
+	// requests waiting for the result have to verify for themselves.
+	abandoned bool
 }
+
+// pendingPerSlot bounds the verifications waiting for a slot: with 16 per
+// slot, a request waits for at most about half a second (16 verifications
+// of ~30 ms) before its own runs.
+const pendingPerSlot = 16
+
+var (
+	errBadCredentials = errors.New("wrong or missing credentials")
+	errAuthBusy       = errors.New("too many verifications waiting")
+)
 
 // authenticator checks Basic credentials against the configured users.
 // One Argon2id verification takes tens of milliseconds and devices send the
@@ -209,6 +223,12 @@ type flight struct {
 // header (the cache never holds passwords): successes for 10 minutes,
 // failures for a minute. Concurrent requests with the same header share one
 // verification, and at most 2 per CPU run at once.
+//
+// Headers that are not cached cost a verification each, so they are bounded
+// too: a request that goes away stops waiting (and its verification does
+// not run), and when pendingPerSlot verifications per slot are already
+// waiting, new ones are refused at once instead of queueing without limit.
+// Devices whose header is cached are not affected either way.
 type authenticator struct {
 	users  map[string]User
 	hashes map[string]passwordHash
@@ -263,59 +283,95 @@ func (a *authenticator) has(acct account) bool {
 	return ok && u.PasswordHash == acct.hash
 }
 
-// verify returns the account the header authenticates, if any.
-func (a *authenticator) verify(header string) (account, bool) {
+// verify returns the account the header authenticates: errBadCredentials
+// when it does not, errAuthBusy when too many verifications are waiting, or
+// ctx's error when the request went away while waiting.
+func (a *authenticator) verify(ctx context.Context, header string) (account, error) {
 	if header == "" || len(a.users) == 0 {
-		return account{}, false
+		return account{}, errBadCredentials
 	}
 	mac := hmac.New(sha256.New, a.key)
 	mac.Write([]byte(header))
 	var id [32]byte
 	copy(id[:], mac.Sum(nil))
 
-	a.mu.Lock()
-	if e, ok := a.cache[id]; ok {
-		if time.Now().Before(e.expires) {
-			a.mu.Unlock()
-			return e.acct, e.ok
+	for {
+		a.mu.Lock()
+		if e, ok := a.cache[id]; ok {
+			if time.Now().Before(e.expires) {
+				a.mu.Unlock()
+				return result(e.acct, e.ok)
+			}
+			delete(a.cache, id)
 		}
-		delete(a.cache, id)
-	}
-	if f, ok := a.inflight[id]; ok {
+		if f, ok := a.inflight[id]; ok {
+			a.mu.Unlock()
+			select {
+			case <-f.done:
+			case <-ctx.Done():
+				return account{}, ctx.Err()
+			}
+			if f.abandoned {
+				continue
+			}
+			return result(f.acct, f.ok)
+		}
+		if len(a.inflight) >= pendingPerSlot*cap(a.slots) {
+			a.mu.Unlock()
+			return account{}, errAuthBusy
+		}
+		f := &flight{done: make(chan struct{})}
+		a.inflight[id] = f
 		a.mu.Unlock()
-		<-f.done
-		return f.acct, f.ok
+
+		var err error
+		f.acct, f.ok, err = a.check(ctx, header)
+
+		a.mu.Lock()
+		delete(a.inflight, id)
+		if err != nil {
+			f.abandoned = true
+		} else {
+			a.remember(id, f.acct, f.ok)
+		}
+		a.mu.Unlock()
+		close(f.done)
+		if err != nil {
+			return account{}, err
+		}
+		return result(f.acct, f.ok)
 	}
-	f := &flight{done: make(chan struct{})}
-	a.inflight[id] = f
-	a.mu.Unlock()
-
-	f.acct, f.ok = a.check(header)
-
-	a.mu.Lock()
-	delete(a.inflight, id)
-	a.remember(id, f.acct, f.ok)
-	a.mu.Unlock()
-	close(f.done)
-	return f.acct, f.ok
 }
 
-func (a *authenticator) check(header string) (account, bool) {
+func result(acct account, ok bool) (account, error) {
+	if !ok {
+		return acct, errBadCredentials
+	}
+	return acct, nil
+}
+
+// check verifies header. It returns ctx's error, without verifying, when
+// ctx ends while waiting for a slot.
+func (a *authenticator) check(ctx context.Context, header string) (account, bool, error) {
 	name, password, ok := parseBasic(header)
 	if !ok {
-		return account{}, false
+		return account{}, false, nil
 	}
 	h, known := a.hashes[name]
 	if !known {
 		h = a.dummy
 	}
-	a.slots <- struct{}{}
+	select {
+	case a.slots <- struct{}{}:
+	case <-ctx.Done():
+		return account{}, false, ctx.Err()
+	}
 	ok = h.verify([]byte(password))
 	<-a.slots
 	if !known || !ok {
-		return account{name: name}, false
+		return account{name: name}, false, nil
 	}
-	return account{name: name, hash: a.users[name].PasswordHash}, true
+	return account{name: name, hash: a.users[name].PasswordHash}, true, nil
 }
 
 // remember caches a result. A full cache drops expired entries first; it

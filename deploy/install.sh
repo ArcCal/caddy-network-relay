@@ -187,7 +187,10 @@ mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
         GOPATH="$CACHE/gopath" GOMODCACHE="$CACHE/gomod" GOCACHE="$CACHE/gocache" \
         "$GO" build "${jobs[@]}" -tags http2legacy -trimpath -ldflags '-s -w' -o "$CACHE/caddy.new" ./cmd/caddy
 ) || die '编译失败（上面是原因）。内存太小时先加 swap；网络不通时检查能否访问 proxy.golang.org。'
-"$CACHE/caddy.new" list-modules 2>/dev/null | grep -qx 'http.handlers.network_relay' || die '编译出的 Caddy 里没有 network_relay 模块。'
+# Read the whole list before searching it: with pipefail, "| grep -q" can fail
+# when grep exits at the match and the writer then dies of SIGPIPE.
+modules=$("$CACHE/caddy.new" list-modules 2>/dev/null || true)
+grep -qx 'http.handlers.network_relay' <<<"$modules" || die '编译出的 Caddy 里没有 network_relay 模块。'
 
 if ! getent passwd caddy >/dev/null; then
     say "==> 创建系统用户 caddy"
@@ -273,23 +276,18 @@ want=7500000
 } >"$SYSCTL"
 sysctl -p "$SYSCTL" >/dev/null 2>&1 || say "（这台机器不让改 UDP 缓冲区，继续用系统默认值。）"
 
-if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q '^Status: active'; then
+if command -v ufw >/dev/null && grep -q '^Status: active' <<<"$(ufw status 2>/dev/null || true)"; then
     say "==> 在 ufw 里放行 TCP 80、TCP 443、UDP 443"
     ufw allow 80/tcp >/dev/null
     ufw allow 443/tcp >/dev/null
     ufw allow 443/udp >/dev/null
 fi
 
-say "==> 安装并启动服务"
-started=1
-install -m 755 "$CACHE/caddy.new" "$BIN.new"
-mv -f "$BIN.new" "$BIN"
-install -m 644 "$SRC/deploy/caddy.service" "$UNIT"
-systemctl daemon-reload
-systemctl enable caddy >/dev/null 2>&1
-systemctl restart caddy
-
+# Defined before anything is replaced: every failure from here on, including
+# a restart that exits non-zero (set -e would otherwise stop the script right
+# there), restores the state from before the install.
 rollback() {
+    set +e # restore as much as possible, whatever fails along the way
     say "服务没能启动，正在恢复安装前的状态。日志："
     journalctl -u caddy -n 40 --no-pager 2>/dev/null || true
     for f in "$BIN" "$CADDYFILE" "$UNIT"; do
@@ -307,6 +305,15 @@ rollback() {
     fi
     die "安装失败，已恢复。$( ((UPGRADE)) && echo '旧版本继续运行。' || echo '可以修好原因后重新运行。')"
 }
+
+say "==> 安装并启动服务"
+started=1
+install -m 755 "$CACHE/caddy.new" "$BIN.new" || rollback
+mv -f "$BIN.new" "$BIN" || rollback
+install -m 644 "$SRC/deploy/caddy.service" "$UNIT" || rollback
+systemctl daemon-reload || rollback
+systemctl enable caddy >/dev/null 2>&1 || rollback
+systemctl restart caddy || rollback
 sleep "${RELAY_TEST_SLEEP:-2}"
 systemctl is-active --quiet caddy || rollback
 
