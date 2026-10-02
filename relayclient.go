@@ -104,8 +104,15 @@ func (e *statusError) Error() string {
 	return s
 }
 
-func checkResponse(rsp *http.Response, want int) error {
-	if rsp.StatusCode != want {
+// checkResponse accepts the responses that open a tunnel: any 2xx to a
+// CONNECT (RFC 9110 §9.3.6, RFC 9298 §3.5), or 101 to an HTTP/1.1 upgrade
+// (RFC 9298 §3.3).
+func checkResponse(rsp *http.Response, upgrade bool) error {
+	ok := rsp.StatusCode/100 == 2
+	if upgrade {
+		ok = rsp.StatusCode == http.StatusSwitchingProtocols
+	}
+	if !ok {
 		return &statusError{rsp.StatusCode, rsp.Header.Get("Proxy-Status")}
 	}
 	return nil
@@ -160,7 +167,7 @@ func (c *relayClient) h3Request(ctx context.Context, h *h3Conn, req *http.Reques
 	if err != nil {
 		return nil, err
 	}
-	if err := checkResponse(rsp, http.StatusOK); err != nil {
+	if err := checkResponse(rsp, false); err != nil {
 		str.CancelRead(0)
 		str.Close()
 		return nil, err
@@ -318,7 +325,7 @@ func (c *relayClient) h2Request(ctx context.Context, h *h2Conn, req *http.Reques
 		pw.Close()
 		return nil, err
 	}
-	if err := checkResponse(rsp, http.StatusOK); err != nil {
+	if err := checkResponse(rsp, false); err != nil {
 		pw.Close()
 		rsp.Body.Close()
 		return nil, err
@@ -366,7 +373,7 @@ func (s *h1Stream) Write(p []byte) (int, error) { return s.conn.Write(p) }
 func (s *h1Stream) CloseWrite() error           { return s.conn.CloseWrite() }
 func (s *h1Stream) Close() error                { return s.conn.Close() }
 
-func (c *relayClient) h1Request(ctx context.Context, request string, want int) (*h1Stream, error) {
+func (c *relayClient) h1Request(ctx context.Context, request string, upgrade bool) (*h1Stream, error) {
 	d := tls.Dialer{Config: c.tlsConfig("http/1.1")}
 	conn, err := d.DialContext(ctx, "tcp", c.Address)
 	if err != nil {
@@ -386,7 +393,7 @@ func (c *relayClient) h1Request(ctx context.Context, request string, want int) (
 		tc.Close()
 		return nil, err
 	}
-	if err := checkResponse(rsp, want); err != nil {
+	if err := checkResponse(rsp, upgrade); err != nil {
 		tc.Close()
 		return nil, err
 	}
@@ -403,7 +410,7 @@ func (c *relayClient) authLine() string {
 
 func (c *relayClient) openTCPH1(ctx context.Context, target string) (stream, error) {
 	req := "CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n" + c.authLine() + "\r\n"
-	return c.h1Request(ctx, req, http.StatusOK)
+	return c.h1Request(ctx, req, false)
 }
 
 func (c *relayClient) openUDPH1(ctx context.Context, host, port string) (packetConn, error) {
@@ -413,7 +420,7 @@ func (c *relayClient) openUDPH1(ctx context.Context, host, port string) (packetC
 	}
 	req := "GET " + path + " HTTP/1.1\r\nHost: " + c.authority() + "\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\n" +
 		"Capsule-Protocol: ?1\r\n" + c.authLine() + "\r\n"
-	s, err := c.h1Request(ctx, req, http.StatusSwitchingProtocols)
+	s, err := c.h1Request(ctx, req, true)
 	if err != nil {
 		return nil, err
 	}
