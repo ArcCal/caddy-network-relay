@@ -34,6 +34,13 @@ func parseUDPTemplate(raw string) (*uriTemplate, error) {
 	if !strings.HasPrefix(raw, "/") {
 		return nil, fmt.Errorf("UDP template %q must start with /", raw)
 	}
+	// RFC 9298 §2: printable ASCII only. Anything else would be sent
+	// percent-encoded and never match the template.
+	for i := 0; i < len(raw); i++ {
+		if raw[i] < 0x21 || raw[i] > 0x7e {
+			return nil, fmt.Errorf("UDP template %q: only printable ASCII is allowed (percent-encode other characters)", raw)
+		}
+	}
 	t := &uriTemplate{raw: raw}
 	var pattern strings.Builder
 	pattern.WriteString("^")

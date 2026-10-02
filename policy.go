@@ -9,11 +9,17 @@ import (
 	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
 // DefaultBlockedDestinations keeps clients away from the relay's own host,
-// private networks, cloud metadata services and reserved ranges.
+// private networks, cloud metadata services and reserved ranges. With the
+// default list, the addresses of this host's network interfaces are blocked
+// too: a connection to the host's own public address stays on the host (on
+// Linux it goes over the loopback interface, which firewalls such as ufw
+// let through), so it would reach services that only the firewall keeps
+// from the internet.
 var DefaultBlockedDestinations = []string{
 	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
 	"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15",
@@ -146,6 +152,44 @@ type policy struct {
 	resolver     interface {
 		LookupNetIP(ctx context.Context, network, host string) ([]netip.Addr, error)
 	}
+	// hostAddrs returns this host's own addresses, which are blocked too;
+	// nil when they are not.
+	hostAddrs func() []netip.Addr
+}
+
+// hostAddrsTTL is how long the list of this host's addresses is reused.
+const hostAddrsTTL = 10 * time.Second
+
+var hostAddrCache struct {
+	sync.Mutex
+	addrs   []netip.Addr
+	fetched time.Time
+}
+
+// interfaceAddrs returns the addresses of this host's network interfaces,
+// read again at most every hostAddrsTTL so that address changes are seen.
+// If they cannot be read, the last list is kept.
+func interfaceAddrs() []netip.Addr {
+	hostAddrCache.Lock()
+	defer hostAddrCache.Unlock()
+	if !hostAddrCache.fetched.IsZero() && time.Since(hostAddrCache.fetched) < hostAddrsTTL {
+		return hostAddrCache.addrs
+	}
+	hostAddrCache.fetched = time.Now()
+	ifaddrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return hostAddrCache.addrs
+	}
+	var addrs []netip.Addr
+	for _, a := range ifaddrs {
+		if n, ok := a.(*net.IPNet); ok {
+			if ip, ok := netip.AddrFromSlice(n.IP); ok {
+				addrs = append(addrs, ip.Unmap())
+			}
+		}
+	}
+	hostAddrCache.addrs = addrs
+	return addrs
 }
 
 func newPolicy(blocked []string, ports []int) (*policy, error) {
@@ -180,6 +224,13 @@ func (p *policy) allows(ip netip.Addr) bool {
 	for _, prefix := range p.blocked {
 		if prefix.Contains(ip) {
 			return false
+		}
+	}
+	if p.hostAddrs != nil {
+		for _, own := range p.hostAddrs() {
+			if own.WithZone("") == ip {
+				return false
+			}
 		}
 	}
 	return true

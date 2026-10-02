@@ -30,6 +30,9 @@ case "$1 $2" in
     unit=$3
     [ -e "$STATE/active-$unit" ] && exit 0; exit 3 ;;
   "restart caddy")
+    # FAKE_START_FAILS: the service is not running afterwards; "exit" makes
+    # restart itself fail too, as it does for a Type=notify unit.
+    [ "$FAKE_START_FAILS" = exit ] && { rm -f "$STATE/active-caddy"; exit 1; }
     [ -n "$FAKE_START_FAILS" ] && { rm -f "$STATE/active-caddy"; exit 0; }
     touch "$STATE/active-caddy" ;;
   "disable --now")
@@ -61,6 +64,14 @@ case "$1 $2" in
   "validate --config") echo "validate" >> "$LOG"; [ -n "$FAKE_INVALID" ] && exit 1; exit 0 ;;
   "network-relay check") cat > /dev/null; echo "check $*" >> "$LOG"; [ -n "$FAKE_CHECK_FAILS" ] && { echo "FAIL HTTP/3"; exit 1; }; echo "all checks passed"; exit 0 ;;
 esac
+# A module list longer than a pipe buffer, with network_relay first (or,
+# with "missing", not at all).
+if [ "$1" = list-modules ] && [ -n "$FAKE_LONG_MODULES" ]; then
+  exec awk -v first="$FAKE_LONG_MODULES" 'BEGIN {
+    if (first != "missing") print "http.handlers.network_relay"
+    for (i = 0; i < 200000; i++) print "other.module." i
+  }'
+fi
 exec "$REAL_CADDY" "$@"
 '''
 
@@ -270,22 +281,31 @@ class InstallTest(unittest.TestCase):
         self.assertIn('systemctl disable --now network-relay', self.calls())
 
     def test_failed_start_rolls_back(self):
-        r = self.fresh(ok=False, FAKE_START_FAILS='1')
-        self.assertIn('安装失败，已恢复', r.stderr)
-        self.assertFalse(self.path('/etc/caddy/Caddyfile').exists())
-        self.assertFalse(self.path('/usr/local/bin/caddy').exists())
-        self.assertIn('systemctl disable --now caddy', self.calls())
-        # A later run is a fresh install again.
-        self.fresh()
-        self.assertTrue(self.path('/etc/caddy/Caddyfile').exists())
+        for how in ['inactive', 'exit']:
+            with self.subTest(how):
+                for f in self.state.iterdir():
+                    f.unlink()
+                shutil.rmtree(self.root)
+                self.root.mkdir()
+                self.log.write_text('')
+                r = self.fresh(ok=False, FAKE_START_FAILS=how)
+                self.assertIn('安装失败，已恢复', r.stderr)
+                self.assertFalse(self.path('/etc/caddy/Caddyfile').exists())
+                self.assertFalse(self.path('/usr/local/bin/caddy').exists())
+                self.assertIn('systemctl disable --now caddy', self.calls())
+                # A later run is a fresh install again.
+                self.fresh()
+                self.assertTrue(self.path('/etc/caddy/Caddyfile').exists())
 
     def test_failed_upgrade_restores_the_old_binary(self):
         self.fresh()
-        self.path('/usr/local/bin/caddy').write_text('#!/bin/sh\necho old\n')
-        r = self.install(ok=False, FAKE_START_FAILS='1')
-        self.assertIn('旧版本继续运行', r.stderr)
-        self.assertEqual(self.path('/usr/local/bin/caddy').read_text(), '#!/bin/sh\necho old\n')
-        self.assertTrue(self.path('/etc/caddy/Caddyfile').exists())
+        for how in ['inactive', 'exit']:
+            with self.subTest(how):
+                self.path('/usr/local/bin/caddy').write_text('#!/bin/sh\necho old\n')
+                r = self.install(ok=False, FAKE_START_FAILS=how)
+                self.assertIn('旧版本继续运行', r.stderr)
+                self.assertEqual(self.path('/usr/local/bin/caddy').read_text(), '#!/bin/sh\necho old\n')
+                self.assertTrue(self.path('/etc/caddy/Caddyfile').exists())
 
     def test_invalid_config_stops_before_installing(self):
         r = self.fresh(ok=False, FAKE_INVALID='1')
@@ -296,6 +316,17 @@ class InstallTest(unittest.TestCase):
         self.assertFalse(self.path('/etc/caddy/Caddyfile').exists())
         self.assertFalse(self.path('/etc/caddy/relay/iphone.password').exists())
         self.fresh()
+
+    def test_module_check_reads_the_whole_list(self):
+        # grep -q stopping at the first line used to kill the writer with
+        # SIGPIPE, which pipefail turned into "no network_relay module".
+        self.fresh(FAKE_LONG_MODULES='1')
+        self.assertTrue((self.state / 'active-caddy').exists())
+
+    def test_build_without_the_module_is_refused(self):
+        r = self.fresh(ok=False, FAKE_LONG_MODULES='missing')
+        self.assertIn('没有 network_relay 模块', r.stderr)
+        self.assertFalse(self.path('/usr/local/bin/caddy').exists())
 
     def test_failed_self_check_keeps_the_service(self):
         r = self.fresh(ok=False, FAKE_CHECK_FAILS='1')
