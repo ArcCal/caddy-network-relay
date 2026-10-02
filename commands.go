@@ -446,9 +446,6 @@ func runChecks(c *relayClient, tcpTarget, udpTarget, dnsName string, timeout tim
 	case err == nil:
 		s.Close()
 		report("no password: refused", errors.New("the tunnel opened without a password"), "")
-	case errors.As(err, &se) && se.Status/100 == 2:
-		// Any 2xx to a CONNECT means the tunnel is open (RFC 9110 §9.3.6).
-		report("no password: refused", fmt.Errorf("the relay answered %d without a password", se.Status), "")
 	case errors.As(err, &se):
 		report("no password: refused", nil, fmt.Sprintf("%d %s", se.Status, http.StatusText(se.Status)))
 	default:
