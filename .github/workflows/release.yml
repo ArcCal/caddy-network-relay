@@ -1,11 +1,15 @@
-# Builds Caddy with the network_relay plugin and attaches it to a GitHub
-# Release. Runs when a tag like v1.2.3 is pushed, or by hand from the
-# Actions page (which creates the release for an existing tag).
+# Builds Caddy with the network_relay plugin for Linux (x86_64, arm64) and
+# macOS (Apple silicon, Intel) and attaches the files to a GitHub Release.
+#
+# Runs when: a tag like v1.2.3 is pushed; a release is published on the
+# GitHub website; or by hand from the Actions page for an existing tag.
 name: release
 
 on:
   push:
     tags: ["v*"]
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       tag:
@@ -29,7 +33,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -40,7 +44,7 @@ jobs:
           GOARCH: ${{ matrix.arch }}
         run: |
           go build -tags http2legacy -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
-          name=caddy-network-relay-${{ inputs.tag || github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}
+          name=caddy-network-relay-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}
           tar -czf "$name.tar.gz" caddy
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v4
@@ -59,6 +63,6 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.tag || github.ref_name }}
+          tag_name: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
           files: dist/*
           generate_release_notes: true

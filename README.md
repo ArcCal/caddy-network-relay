@@ -265,7 +265,11 @@ systemctl daemon-reload && deluser --system caddy
 
 每次推送到 `main`，GitHub Actions 都会测试并编译；打一个版本标签还会生成 Release。在仓库页面 **Releases** 里下载 `caddy-network-relay-<版本>-linux-amd64.tar.gz`（x86_64 服务器）或 `-linux-arm64.tar.gz`（ARM 服务器；`-darwin-arm64` 是给 Mac 上跑 `check` 用的），解压得到一个 `caddy`，放到 `/usr/local/bin/caddy` 即可，不需要在服务器上编译。仓库是私有的，所以要在浏览器里登录后下载，再上传到服务器。
 
-发布一个版本：在本地 `git tag v1.0.0 && git push origin v1.0.0`，或者在 GitHub 的 **Actions → release → Run workflow** 里填一个已有的标签。
+发布一个版本有三种办法，任选其一，之后约 5 分钟 Release 页面上就有 4 个文件（Linux x86_64 / arm64，macOS Apple 芯片 / Intel）和校验和：
+
+- 在 GitHub 网页上：仓库首页右侧 **Releases → Draft a new release → Choose a tag** 里输入新标签（比如 `v1.0.0`）→ **Create new tag on publish** → 填标题 → **Publish release**。
+- 在本地：`git tag v1.0.0 && git push origin v1.0.0`。
+- 已有标签但没有 Release：**Actions → release → Run workflow**，填标签名。
 
 ### 编译
 
