@@ -2,7 +2,8 @@
 # macOS (Apple silicon, Intel) and attaches the files to a GitHub Release.
 #
 # Runs when: a tag like v1.2.3 is pushed; a release is published on the
-# GitHub website; or by hand from the Actions page for an existing tag.
+# GitHub website; or by hand from the Actions page, which creates the tag
+# on the chosen branch when it does not exist yet.
 name: release
 
 on:
@@ -13,7 +14,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing tag to build and release (for example v1.0.0)"
+        description: "Tag to release (for example v1.0.0). Created on the chosen branch if it does not exist yet."
         required: true
 
 permissions:
@@ -33,7 +34,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ inputs.tag || github.event.release.tag_name || github.ref }}
+          # Run by hand: the branch picked in the Actions page (the release
+          # step then creates the tag there if needed). Otherwise the tag.
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.release.tag_name || github.ref }}
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
