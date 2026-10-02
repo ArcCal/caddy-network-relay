@@ -67,6 +67,7 @@ grep -q '^module github.com/arccal/caddy-network-relay$' "$SRC/go.mod" 2>/dev/nu
 # Debian 12 or newer, Ubuntu 22.04 or newer: anything with systemd, apt and
 # a glibc the static binary does not even need. Newer releases are accepted
 # as they come out.
+# shellcheck source=/dev/null # os-release only sets variables; tests point it elsewhere
 . "${RELAY_TEST_OS_RELEASE:-/etc/os-release}"
 os_ok=0
 os_version=${VERSION_ID:-}
