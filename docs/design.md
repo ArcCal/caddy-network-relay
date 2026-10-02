@@ -1,137 +1,137 @@
-# 设计文档
+# Design
 
-## 1. 目标
+## 1. Goals
 
-苹果的「网络中继」（iOS/iPadOS 17、macOS 14 起）：描述文件里的 `com.apple.relay.managed` 负载告诉系统一个 HTTP 代理（中继）的地址，系统把匹配的连接交给它转发，不需要 VPN App。本插件让 Caddy 成为这样的中继：
+Apple's Network Relay (from iOS/iPadOS 17 and macOS 14): the `com.apple.relay.managed` payload in a configuration profile tells the system the address of an HTTP proxy (the relay), and the system hands matching connections to it for forwarding, with no VPN app needed. This plugin makes Caddy such a relay:
 
-- 只需要一个描述文件：`HTTP3RelayURL` / `HTTP2RelayURL` 是 RFC 9298 的 URI 模板，`AdditionalHTTPHeaderFields` 里是 Basic 认证头，设备每个请求都主动带上。
-- Caddy 负责证书（自动 HTTPS）、接收 TCP 流量（HTTP/2、HTTP/1.1）、网站；HTTP/3 由插件在 Caddy 进程内接收（§3）。
-- 与 Rust 版 [network-relay](https://github.com/ArcCal/network-relay) 的协议行为、默认值、描述文件格式和密码哈希兼容。
+- One profile is all that is needed: `HTTP3RelayURL` / `HTTP2RelayURL` are RFC 9298 URI templates, and `AdditionalHTTPHeaderFields` holds a Basic authentication header that the device sends on every request on its own.
+- Caddy handles the certificates (automatic HTTPS), receives TCP traffic (HTTP/2, HTTP/1.1) and serves the website; HTTP/3 is received by the plugin inside the Caddy process (§3).
+- Compatible with the Rust version, [network-relay](https://github.com/ArcCal/network-relay), in protocol behavior, defaults, profile format and password hashes.
 
-描述文件各个键的含义和设备行为的调研，见 Rust 版的设计文档 §1；本项目生成的描述文件与之相同（标识符 `com.github.arccal.network-relay.<域名>.<用户>` 也相同）。
+For what each profile key means and research into device behavior, see §1 of the Rust version's design document; the profiles this project generates are the same (including the identifier `com.github.arccal.network-relay.<domain>.<user>`).
 
-## 2. 协议
+## 2. Protocol
 
-### 2.1 请求分类
+### 2.1 Classifying requests
 
-| HTTP 版本 | TCP 隧道 | UDP 隧道 |
+| HTTP version | TCP tunnel | UDP tunnel |
 |---|---|---|
-| HTTP/3 | `CONNECT`，无 `:protocol`，`:authority = 主机:端口`（RFC 9114 §4.4） | 扩展 CONNECT，`:protocol = connect-udp`，`:path` 匹配模板（RFC 9298 §3.4、RFC 9220） |
-| HTTP/2 | 同上（RFC 9113 §8.5） | 同上（RFC 8441） |
-| HTTP/1.1 | `CONNECT 主机:端口`（RFC 9110 §9.3.6） | `GET 路径` + `Upgrade: connect-udp` + `Connection: Upgrade`（RFC 9298 §3.2），回 101 |
+| HTTP/3 | `CONNECT`, no `:protocol`, `:authority = host:port` (RFC 9114 §4.4) | Extended CONNECT, `:protocol = connect-udp`, `:path` matches the template (RFC 9298 §3.4, RFC 9220) |
+| HTTP/2 | Same as above (RFC 9113 §8.5) | Same as above (RFC 8441) |
+| HTTP/1.1 | `CONNECT host:port` (RFC 9110 §9.3.6) | `GET path` + `Upgrade: connect-udp` + `Connection: Upgrade` (RFC 9298 §3.2), answered with 101 |
 
-其他请求原样交给站点里后面的处理器，有两个例外：经典 CONNECT 总是由插件回答（§2.2 第 2 步）；`:protocol = connect-udp` 但路径不匹配模板的扩展 CONNECT 回 404（没有凭据时 405），因为网站对扩展 CONNECT 的任何 2xx 回答都会被理解为“隧道已建立”。其他 `:protocol`（比如 HTTP/2 上的 WebSocket）交给网站，`reverse_proxy` 可以处理它们。HTTP/1.1 上 `Upgrade` 含 `connect-udp` 但路径不匹配模板的请求是普通网页请求。
+Other requests are passed unchanged to the handlers after it in the site, with two exceptions: classic CONNECT is always answered by the plugin (§2.2 step 2); an extended CONNECT with `:protocol = connect-udp` whose path does not match the template gets 404 (405 without credentials), because the website answering an extended CONNECT with any 2xx would be understood as "tunnel established". Other values of `:protocol` (for example WebSocket over HTTP/2) are passed to the website, and `reverse_proxy` can handle them. An HTTP/1.1 request whose `Upgrade` contains `connect-udp` but whose path does not match the template is an ordinary web request.
 
-### 2.2 处理一个请求
+### 2.2 Handling a request
 
-1. **分类**（上表）。
-2. **认证**：先看 `Proxy-Authorization`，没有再看 `Authorization`，按 Basic 解析。失败时：`CONNECT`（经典或扩展）回 405 和 `Allow: GET, HEAD`，和 Caddy 静态网站对 CONNECT 的回答一样（由 Caddy 的错误处理生成，`handle_errors` 也适用）；不交给后面的处理器，是因为某个处理器可能回 2xx，而 CONNECT 的 2xx 表示“隧道已建立”。`GET` + `Upgrade` 交给网站。带了凭据但错误时记一条警告日志（用户名由 zap 转义）。
-3. **目标**：TCP 从 `:authority`（端口必填，IPv6 带方括号）；UDP 从模板变量（百分号解码，IPv6 不带方括号）。格式错 → 400。CONNECT-UDP 请求带 `Content-Length`、`Content-Type`、`Transfer-Encoding` 或请求体 → 400（RFC 9297 §3.2）。HTTP/1.1 的 CONNECT-UDP 请求方法不是 GET、或 `Connection` 里没有 `Upgrade` → 400（RFC 9298 §3.2：畸形请求必须回错误，建议 400）；`Connection`、`Upgrade` 按逗号分隔的令牌比较，不区分大小写。
-4. **名额**：同时转发数达到 `max_tunnels` → 503。
-5. **策略**：端口在 `blocked_ports` → 403；域名解析（5 秒）；每个地址检查 `blocked_destinations`，IPv4 映射地址按 IPv4 检查；一个都不剩 → 403（防 DNS 重绑定）。
-6. **连接**：TCP 用 Happy Eyeballs（RFC 8305）：两种地址族交替，每 250 毫秒多试一个，失败的立刻试下一个，整体 `connect_timeout`。连接关闭 Nagle，开 keepalive（2 分钟起）。UDP 建一个 connect 过的套接字（只收目标发回的包），选第一个有路由的地址；Linux 上设置不分片（`IP_PMTUDISC_PROBE`），超过 MTU 的包丢弃而不是分片（RFC 9298 §3.1）。
-7. **回应**：TCP 回 200；UDP 回 200（HTTP/1.1 是 101，带 `Connection: Upgrade` 和唯一一个 `Upgrade: connect-udp`）并带 `Capsule-Protocol: ?1`。成功回应里没有 `Content-Length`、`Content-Type`、`Transfer-Encoding`（RFC 9110 §9.3.6、RFC 9297 §3.2），失败回应里没有 `Capsule-Protocol`（RFC 9297 §3.4）；测试在三种版本的线路上逐字检查。失败时回 §2.2 中的状态码和 RFC 9209 `Proxy-Status: network-relay; error=...`（表见 README）。
+1. **Classify** (table above).
+2. **Authenticate**: look at `Proxy-Authorization` first, then `Authorization` if it is absent, and parse it as Basic. On failure: `CONNECT` (classic or extended) gets 405 with `Allow: GET, HEAD`, the same answer a Caddy static website gives to CONNECT (produced by Caddy's error handling, so `handle_errors` applies too); it is not passed to the following handlers, because one of them might answer 2xx, and a 2xx to CONNECT means "tunnel established". `GET` + `Upgrade` is passed to the website. Wrong credentials (as opposed to none) log a warning (the user name is escaped by zap).
+3. **Target**: for TCP, from `:authority` (the port is required; IPv6 in brackets); for UDP, from the template variables (percent-decoded; IPv6 without brackets). Malformed → 400. A CONNECT-UDP request with `Content-Length`, `Content-Type`, `Transfer-Encoding` or a request body → 400 (RFC 9297 §3.2). An HTTP/1.1 CONNECT-UDP request whose method is not GET or whose `Connection` has no `Upgrade` → 400 (RFC 9298 §3.2: malformed requests must get an error, and 400 is recommended); `Connection` and `Upgrade` are compared as comma-separated tokens, case-insensitively.
+4. **Capacity**: the number of concurrent tunnels has reached `max_tunnels` → 503.
+5. **Policy**: port in `blocked_ports` → 403; resolve the domain (5 seconds); check every address against `blocked_destinations`, IPv4-mapped addresses as IPv4; none left → 403 (guards against DNS rebinding).
+6. **Connect**: TCP uses Happy Eyeballs (RFC 8305): the two address families alternate, one more attempt starts every 250 milliseconds, a failed attempt immediately moves on to the next, and the whole thing is bounded by `connect_timeout`. Connections have Nagle off and keepalive on (from 2 minutes). UDP creates a connected socket (it only receives packets from the destination), using the first address that has a route; on Linux, don't-fragment is set (`IP_PMTUDISC_PROBE`), so packets over the MTU are dropped instead of fragmented (RFC 9298 §3.1).
+7. **Respond**: TCP gets 200; UDP gets 200 (on HTTP/1.1, 101 with `Connection: Upgrade` and exactly one `Upgrade: connect-udp`) with `Capsule-Protocol: ?1`. Successful responses carry no `Content-Length`, `Content-Type` or `Transfer-Encoding` (RFC 9110 §9.3.6, RFC 9297 §3.2), and failure responses carry no `Capsule-Protocol` (RFC 9297 §3.4); the tests check this byte for byte on the wire for all three versions. Failures get the status codes from §2.2 and an RFC 9209 `Proxy-Status: network-relay; error=...` (table in the README).
 
-### 2.3 TCP 转发
+### 2.3 TCP forwarding
 
-- 64 KiB 缓冲，双向复制。
-- **半关闭**：设备发 FIN（HTTP/3 流结束、HTTP/2 END_STREAM、HTTP/1.1 的 TLS close_notify）→ 目标一侧 `shutdown(SHUT_WR)`，另一方向继续；目标发 FIN → HTTP/3 发 FIN（另一方向继续）、HTTP/1.1 发 close_notify、HTTP/2 结束响应（见 §5 限制）。
-- **出错**：目标一侧出错（RST）→ HTTP/3 用 `H3_CONNECT_ERROR` 复位请求流（RFC 9114 §4.4）；设备一侧出错、用户被撤销、Caddy 退出 → HTTP/3 用 `H3_REQUEST_CANCELLED`，目标一侧发 TCP RST（`SO_LINGER=0`）。
-- 设备消失：HTTP/2 由请求上下文（流被复位或连接关闭）发现，HTTP/3 由流的上下文（STOP_SENDING、复位、连接关闭）发现，HTTP/1.1 由读写错误发现。
+- 64 KiB buffers, copying in both directions.
+- **Half-close**: the device sends FIN (end of the HTTP/3 stream, HTTP/2 END_STREAM, TLS close_notify on HTTP/1.1) → `shutdown(SHUT_WR)` on the destination side, while the other direction carries on; the destination sends FIN → HTTP/3 sends FIN (the other direction carries on), HTTP/1.1 sends close_notify, HTTP/2 ends the response (see the limitations in §5).
+- **Errors**: an error on the destination side (RST) → on HTTP/3, the request stream is reset with `H3_CONNECT_ERROR` (RFC 9114 §4.4); an error on the device side, a revoked user, or Caddy exiting → on HTTP/3, `H3_REQUEST_CANCELLED`, and a TCP RST to the destination (`SO_LINGER=0`).
+- A device going away is noticed on HTTP/2 through the request context (stream reset or connection closed), on HTTP/3 through the stream's context (STOP_SENDING, reset, connection closed), and on HTTP/1.1 through read and write errors.
 
-### 2.4 UDP 转发
+### 2.4 UDP forwarding
 
-- 数据报格式（RFC 9298 §5）：上下文 ID（变长整数）+ UDP 负载；只处理上下文 ID 0，其他丢弃；空负载合法；超过 65527 字节中止。
-- **HTTP/3**：设备的 SETTINGS 里有 `SETTINGS_H3_DATAGRAM`（quic-go 只在 QUIC DATAGRAM 也协商了时才接受）时用 HTTP Datagram，否则用请求流里的 DATAGRAM Capsule。用 Datagram 时仍然读请求流上的 Capsule（RFC 9297 §3.5 允许两种混用）。设备在收到回应前就发来的数据报（RFC 9298 §5 允许）由 quic-go 按流缓存（每流最多 32 个），认证完成后照常转发；比请求流本身还早到、quic-go 还不知道这个流时，数据报被丢弃（RFC 9297 §2.1、RFC 9298 §5 允许丢弃或缓存）。
-- **HTTP/2、HTTP/1.1**：DATAGRAM Capsule。
-- Capsule 解析是流式的：未知类型、其他上下文 ID 的 Capsule 按声明长度跳过，不受 UDP 大小限制；上下文 0 根据声明长度尽早检查上限；Capsule 中间断开、缺上下文 ID 等格式错误 → `H3_MESSAGE_ERROR`（HTTP/2 见 §5）。
-- 目标发回的包太大、装不进一个 QUIC DATAGRAM 时丢弃，不改走可靠的流（RFC 9297 §3.5、RFC 9298 §6.1：QUIC 套 QUIC 时，两层拥塞控制会互相干扰，也会破坏 DPLPMTUD）。超过路径 MTU（EMSGSIZE）或发送缓冲满时只丢这个包。
-- 操作系统报告套接字不可用时关闭隧道（HTTP/3 用 `H3_CONNECT_ERROR`）：RFC 9298 §3.1 要求这样做，例子正是 ICMP Destination Unreachable，Linux 在 connect 过的 UDP 套接字上把它报告为 ECONNREFUSED、EHOSTUNREACH、ENETUNREACH。
-- 发往目标的包 ECN 为 Not-ECT（套接字默认），目标发回的包的 ECN 不转发（RFC 9298 §6.2）；外层 QUIC 连接保留拥塞控制。
-- 两个方向都 `udp_idle_timeout` 没有包时正常关闭（RFC 4787 要求 NAT 映射至少 2 分钟，默认 5 分钟）。设备结束请求流时正常关闭。
+- Datagram format (RFC 9298 §5): Context ID (variable-length integer) + UDP payload; only Context ID 0 is handled, others are dropped; an empty payload is valid; anything over 65527 bytes aborts.
+- **HTTP/3**: when the device's SETTINGS include `SETTINGS_H3_DATAGRAM` (quic-go only accepts that when QUIC DATAGRAM was negotiated too), HTTP Datagrams are used; otherwise DATAGRAM Capsules on the request stream. When Datagrams are used, Capsules on the request stream are still read (RFC 9297 §3.5 allows mixing the two). Datagrams the device sends before it receives the response (allowed by RFC 9298 §5) are buffered per stream by quic-go (at most 32 per stream) and forwarded as usual once authentication completes; datagrams that arrive even before the request stream itself, when quic-go does not yet know the stream, are dropped (RFC 9297 §2.1 and RFC 9298 §5 allow dropping or buffering).
+- **HTTP/2, HTTP/1.1**: DATAGRAM Capsules.
+- Capsule parsing is streaming: Capsules of unknown types or other Context IDs are skipped according to their declared length and are not subject to the UDP size limit; for context 0 the limit is checked as early as possible from the declared length; format errors such as a disconnect in the middle of a Capsule or a missing Context ID → `H3_MESSAGE_ERROR` (for HTTP/2 see §5).
+- Packets from the destination that are too large to fit in one QUIC DATAGRAM are dropped rather than sent over the reliable stream instead (RFC 9297 §3.5, RFC 9298 §6.1: with QUIC inside QUIC, the two layers of congestion control interfere with each other, and DPLPMTUD breaks). A packet over the path MTU (EMSGSIZE) or a full send buffer drops only that packet.
+- When the operating system reports the socket unusable, the tunnel is closed (on HTTP/3 with `H3_CONNECT_ERROR`): RFC 9298 §3.1 requires this, and its example is exactly ICMP Destination Unreachable, which Linux reports on a connected UDP socket as ECONNREFUSED, EHOSTUNREACH or ENETUNREACH.
+- Packets sent to the destination have ECN Not-ECT (the socket default), and the ECN of packets from the destination is not forwarded (RFC 9298 §6.2); the outer QUIC connection keeps its congestion control.
+- When there have been no packets in either direction for `udp_idle_timeout`, the tunnel is closed normally (RFC 4787 requires NAT mappings to last at least 2 minutes; the default is 5 minutes). When the device ends the request stream, the tunnel is closed normally.
 
-### 2.5 URI 模板
+### 2.5 URI templates
 
-支持 RFC 6570 的简单展开 `{var}` 和表单式查询 `{?a,b}`、`{&a,b}`，变量只有 `target_host`、`target_port`，两个都必须出现、各出现一次，两个 `{var}` 之间必须有分隔符。加载时把 `example.com:443`、`192.0.2.1:53`、`2001:db8::1:8443` 按模板展开再解析，结果必须一致，否则拒绝这个模板。匹配时宽容：未编码的 `:`（IPv6）也接受。
+Supports RFC 6570 simple expansion `{var}` and form-style queries `{?a,b}` and `{&a,b}`. The only variables are `target_host` and `target_port`; both must appear, exactly once each, and two `{var}` expressions must be separated by something. On load, `example.com:443`, `192.0.2.1:53` and `2001:db8::1:8443` are expanded through the template and parsed back, and the results must match, or the template is rejected. Matching is lenient: an unencoded `:` (IPv6) is accepted too.
 
-## 3. 在 Caddy 里的结构
+## 3. Structure inside Caddy
 
-### 3.1 模块
+### 3.1 Modules
 
-| 模块 | ID | 作用 |
+| Module | ID | Purpose |
 |---|---|---|
-| `Handler` | `http.handlers.network_relay` | 中间件：分类、认证、隧道；其他请求交给下一个处理器。Caddyfile 指令 `network_relay`，自动排在 `map` 之前（站点里最先） |
-| `App` | `network_relay` | 由处理器自动创建，不用配置：为含有处理器的服务器提供 HTTP/3 |
+| `Handler` | `http.handlers.network_relay` | Middleware: classification, authentication, tunnels; other requests go to the next handler. Caddyfile directive `network_relay`, automatically ordered before `map` (first in the site) |
+| `App` | `network_relay` | Created automatically by the handler, no configuration: provides HTTP/3 for the servers that contain the handler |
 
 ### 3.2 HTTP/3
 
-Caddy 2.11 的 HTTP/3 服务器（`http3.Server`）没有 `EnableDatagrams`，QUIC 配置也写死在 Caddy 内部，没有扩展点；而苹果设备经 HTTP/3 转发 UDP 依赖 HTTP Datagram。所以：
+Caddy 2.11's HTTP/3 server (`http3.Server`) has no `EnableDatagrams`, and its QUIC configuration is hard-coded inside Caddy with no extension point; yet Apple devices depend on HTTP Datagrams to relay UDP over HTTP/3. So:
 
-1. 处理器 provision 时从上下文取得它所在的 `caddyhttp.Server`（Caddy 在 provision 每个服务器的路由时把它放在上下文里），记下哪些监听地址原本要提供 HTTP/3，并从这个服务器的 `protocols`（以及 `listen_protocols`）里去掉 `h3`。这时 Caddy 还没启动这个服务器，所以 Caddy 不会再监听这些 UDP 端口。用户自己去掉了 `h3` 的服务器，插件也不提供 HTTP/3。
-2. `App` 启动时，为每个这样的地址打开 UDP 套接字和 QUIC 监听（quic-go，和 Caddy 用的同一个库），`EnableDatagrams`、最多 1024 个并发流、单流窗口 4 MiB、连接窗口 32 MiB、空闲超时 5 分钟、初始包大小 1350（被转发的 QUIC 包至少 1200 字节，RFC 9000 §14.1，外层还要装 QUIC 头、DATAGRAM 帧和上下文 ID）、不允许 0-RTT。TLS 配置来自这个服务器的 `TLSConnPolicies`，即 Caddy 的证书。
-3. 每个请求交给同一个 `caddyhttp.Server` 的 `ServeHTTP`：路由、匹配器、访问日志、网站、错误处理与 TCP 上完全相同。
-4. TCP 上的回应由处理器加 `Alt-Svc: h3=":端口"; ma=2592000`（Caddy 自己的 HTTP/3 关闭后不再加）。
-5. **reload**：UDP 端点是进程级的，按地址共享，记录使用它的各代配置，新连接交给最新的一代；旧代用 `Shutdown` 优雅结束（已有连接留在旧代）。新配置启动失败时只撤销它自己的登记，旧配置照常提供服务。最后一代释放时才关闭套接字。所以 reload 不会出现“旧配置还占着端口，新配置绑不上”的问题。
+1. When the handler is provisioned, it takes the `caddyhttp.Server` it belongs to from the context (Caddy puts it in the context while provisioning each server's routes), records which listener addresses were meant to serve HTTP/3, and removes `h3` from that server's `protocols` (and `listen_protocols`). At this point Caddy has not started the server yet, so Caddy never listens on those UDP ports. For servers where the user removed `h3`, the plugin does not serve HTTP/3 either.
+2. When the `App` starts, it opens a UDP socket and a QUIC listener (quic-go, the same library Caddy uses) for each such address, with `EnableDatagrams`, at most 1024 concurrent streams, a 4 MiB per-stream window, a 32 MiB connection window, a 5-minute idle timeout, an initial packet size of 1350 (relayed QUIC packets are at least 1200 bytes, RFC 9000 §14.1, and the outer packet also has to fit the QUIC header, the DATAGRAM frame and the Context ID), and 0-RTT not allowed. The TLS configuration comes from the server's `TLSConnPolicies`, i.e. Caddy's certificates.
+3. Every request is handed to the same `caddyhttp.Server`'s `ServeHTTP`: routes, matchers, access logs, the website and error handling are exactly as on TCP.
+4. Responses over TCP get `Alt-Svc: h3=":port"; ma=2592000` from the handler (Caddy no longer adds it once its own HTTP/3 is off).
+5. **reload**: UDP endpoints are process-wide and shared by address; each records the configuration generations using it, and new connections go to the newest generation; old generations end gracefully with `Shutdown` (existing connections stay on the old generation). If a new configuration fails to start, only its own registration is undone, and the old configuration keeps serving. The socket is closed only when the last generation releases it. So a reload never runs into "the old configuration still holds the port, so the new one cannot bind it".
 
-### 3.3 HTTP/3 CONNECT 流和 HTTP Datagram 的规则
+### 3.3 Rules for HTTP/3 CONNECT streams and HTTP Datagrams
 
-插件对 HTTP/3 做了 quic-go 没有做的检查：
+The plugin performs HTTP/3 checks that quic-go does not:
 
-- **CONNECT 流上的帧**（RFC 9114 §4.4、§7.1、§9）：隧道建立后，设备一侧的帧由插件自己解析：只有 DATA 携带数据；HEADERS（quic-go 会当成 trailers 接受）、SETTINGS、GOAWAY、保留的 HTTP/2 帧类型、PRIORITY_UPDATE 等已知类型 → 连接错误 `H3_FRAME_UNEXPECTED`；未知类型（包括 greasing 用的保留值）跳过；流在帧中间结束 → 连接错误 `H3_FRAME_ERROR`。
-- **不该有 Datagram 的请求**（RFC 9297 §2.1）：经典 CONNECT 和所有非 CONNECT 请求（网页）收到 HTTP Datagram 时，用 `H3_DATAGRAM_ERROR` 中止这个请求流；请求的接收方向已经结束（设备已发 FIN）后才到的数据报静默丢弃。扩展 CONNECT 不受此限（它们的协议可能定义了 Datagram）。quic-go 只有在接管请求流时才交出它（而接管会立刻发出回应头），所以插件按类型从 quic-go 的 `ResponseWriter` 里取出流；一个测试固定了这个做法，升级 quic-go 后它若失效，测试会失败。
-- 数据报格式本身的错误（Quarter Stream ID 解析不了或超出范围 → 连接错误 `H3_DATAGRAM_ERROR`；对应的流还不存在 → 丢弃；接收方向已关闭 → 丢弃）由 quic-go 处理，符合 RFC 9297 §2.1。
-- **保活**：QUIC 连接没有包超过空闲超时（5 分钟）就会关闭，不管里面有没有流；隧道可能空闲更久（比如中继里一个空闲的 TCP 连接）。插件每 30 秒发一次 QUIC PING；HTTP/2 连接上 Go 每 15 秒发 TCP keepalive，效果相同。没有请求流的 HTTP/3 连接仍在 Caddy 的 `idle_timeout`（默认 5 分钟）后关闭。
+- **Frames on CONNECT streams** (RFC 9114 §4.4, §7.1, §9): once the tunnel is up, the plugin parses the device-side frames itself: only DATA carries data; known types such as HEADERS (which quic-go would accept as trailers), SETTINGS, GOAWAY, reserved HTTP/2 frame types and PRIORITY_UPDATE → connection error `H3_FRAME_UNEXPECTED`; unknown types (including reserved values used for greasing) are skipped; a stream that ends in the middle of a frame → connection error `H3_FRAME_ERROR`.
+- **Requests that must not carry Datagrams** (RFC 9297 §2.1): when classic CONNECT or any non-CONNECT request (a web page) receives an HTTP Datagram, the request stream is aborted with `H3_DATAGRAM_ERROR`; datagrams that arrive after the receiving side of the request has ended (the device has sent FIN) are silently dropped. Extended CONNECT is exempt (its protocol may define Datagrams). quic-go only hands over the request stream when it is taken over (and taking it over sends the response headers immediately), so the plugin gets the stream out of quic-go's `ResponseWriter` by type; a test pins this down, so if it stops working after a quic-go upgrade, the test fails.
+- Errors in the datagram format itself (a Quarter Stream ID that cannot be parsed or is out of range → connection error `H3_DATAGRAM_ERROR`; the corresponding stream does not exist yet → dropped; the receiving side is closed → dropped) are handled by quic-go, in line with RFC 9297 §2.1.
+- **Keepalive**: a QUIC connection with no packets for longer than the idle timeout (5 minutes) is closed, whether or not it has streams; a tunnel can be idle for longer (for example an idle TCP connection inside the relay). The plugin sends a QUIC PING every 30 seconds; on HTTP/2 connections Go sends TCP keepalives every 15 seconds, with the same effect. HTTP/3 connections without request streams are still closed after Caddy's `idle_timeout` (5 minutes by default).
 
-### 3.4 HTTP/2 扩展 CONNECT
+### 3.4 HTTP/2 extended CONNECT
 
-CONNECT-UDP over HTTP/2 需要服务器发送 `SETTINGS_ENABLE_CONNECT_PROTOCOL`。Caddy 用 `golang.org/x/net/http2`；它支持扩展 CONNECT，但在 Go issue #71128 之后默认关闭，只认环境变量 `GODEBUG=http2xconnect=1`。
+CONNECT-UDP over HTTP/2 needs the server to send `SETTINGS_ENABLE_CONNECT_PROTOCOL`. Caddy uses `golang.org/x/net/http2`; it supports extended CONNECT, but since Go issue #71128 it is off by default and only honors the environment variable `GODEBUG=http2xconnect=1`.
 
-- Go 1.26 编译，或 Go 1.27+ 加 `-tags http2legacy`：`x/net/http2` 用自己的实现，插件在 `init` 里通过 `go:linkname` 打开开关（除非 `GODEBUG` 明确写了 `http2xconnect=0`）。
-- Go 1.27+ 不加这个标签：`x/net/http2` 改用标准库内部的实现，链接器不允许 linkname 进标准库，只能靠环境变量。插件检测到没有打开时在日志里警告；`deploy/caddy.service` 总是设置这个环境变量。
+- Built with Go 1.26, or with Go 1.27+ and `-tags http2legacy`: `x/net/http2` uses its own implementation, and the plugin flips the switch in `init` through `go:linkname` (unless `GODEBUG` explicitly says `http2xconnect=0`).
+- Built with Go 1.27+ without that tag: `x/net/http2` uses the standard library's internal implementation instead, the linker does not allow linkname into the standard library, and only the environment variable works. When the plugin detects that it is not on, it logs a warning; `deploy/caddy.service` always sets the environment variable.
 
-扩展 CONNECT 打开后，浏览器也可能对这个服务器用 WebSocket over HTTP/2（这就是 Go 默认关闭它的原因）。Caddy 的 `reverse_proxy` 支持它；纯静态网站不受影响。
+With extended CONNECT on, browsers may also use WebSocket over HTTP/2 with this server (which is why Go turns it off by default). Caddy's `reverse_proxy` supports it; purely static websites are not affected.
 
-### 3.5 绕开 Caddy 为网站设计的超时
+### 3.5 Getting around timeouts Caddy designed for websites
 
-Caddy 2.11 默认给请求体读和响应写加 1 分钟的“空闲超时”（防 slowloris），每次读写前重设截止时间。对隧道而言，一分钟没有数据很正常。所以隧道建立后：
+By default, Caddy 2.11 puts a 1-minute "idle timeout" on reading request bodies and writing responses (against slowloris), resetting the deadline before every read and write. For a tunnel, a minute without data is perfectly normal. So once a tunnel is up:
 
-- 响应头通过 Caddy 的包装（访问日志能记录状态码）写出；之后的数据直接用最底层的 `ResponseWriter`（剥掉 `Unwrap` 链）和最底层的请求体（剥掉 `IdleTimeoutReader` 和访问日志的计数包装），并清除流或连接的读写截止时间。
-- HTTP/1.1 劫持连接，HTTP/3 接管请求流（`HTTPStreamer`）。
+- The response headers are written through Caddy's wrappers (so the access log can record the status code); after that, data goes directly through the innermost `ResponseWriter` (with the `Unwrap` chain stripped) and the innermost request body (with `IdleTimeoutReader` and the access log's counting wrapper stripped), and the stream's or connection's read and write deadlines are cleared.
+- HTTP/1.1 hijacks the connection; HTTP/3 takes over the request stream (`HTTPStreamer`).
 
-### 3.6 隧道的生命周期
+### 3.6 Tunnel lifecycle
 
-- 隧道属于建立它的那一代配置的处理器。reload 后旧处理器 cleanup 时，隧道交给新配置里**仍有同一用户、同一密码哈希**的处理器；没有的话（用户被删除或改了密码）立刻关闭。建立隧道的过程中旧配置已被替换的，同样检查。
-- Caddy 退出时（`caddy stop`、SIGTERM），HTTP 服务器的关闭钩子关闭所有隧道；否则 Caddy 会一直等打开的 HTTP/2 请求结束。
-- 隧道建立前，设备断开（请求上下文取消）会取消 DNS 解析和连接。建立后不再跟随请求上下文：Go 的 HTTP/1.1 服务器在被劫持的连接上设备半关闭时就取消它，quic-go 在中继半关闭时就取消它，两者都不表示设备走了；改用 §2.3 的方式发现设备消失。
+- A tunnel belongs to the handler of the configuration generation that established it. When the old handler is cleaned up after a reload, the tunnel is handed to a handler in the new configuration that **still has the same user with the same password hash**; if there is none (the user was removed or the password changed), it is closed immediately. A tunnel whose configuration was replaced while it was being established is checked the same way.
+- When Caddy exits (`caddy stop`, SIGTERM), the HTTP server's shutdown hook closes all tunnels; otherwise Caddy would keep waiting for open HTTP/2 requests to end.
+- Before the tunnel is established, a device disconnecting (request context canceled) cancels the DNS lookup and the connection attempt. After that, the tunnel no longer follows the request context: Go's HTTP/1.1 server cancels it when the device half-closes a hijacked connection, and quic-go cancels it when the relay half-closes, and neither means the device is gone; instead, a device going away is noticed as in §2.3.
 
-## 4. 认证
+## 4. Authentication
 
-- 只保存哈希。新哈希用 Argon2id（19 MiB、2 轮、1 线程，OWASP 建议，与 Rust 版相同，PHC 格式）；也验证 bcrypt 和 `caddy hash-password` 的 base64 输出。`passwd` 生成 144 位随机密码，在线猜不中，所以不封锁 IP 或账号。
-- 验证结果按请求头缓存：成功 10 分钟、失败 1 分钟。键是请求头的 HMAC-SHA256（每次加载配置随机密钥），缓存里没有密码。同一个请求头的并发请求只算一次哈希；同时计算的哈希数不超过 CPU 核数的 2 倍。缓存最多 4096 条，满了先清过期的；失败结果不会挤掉成功结果。
-- 用户名不存在时也对一个随机哈希算一次，响应时间不暴露哪些用户名存在。
+- Only hashes are stored. New hashes use Argon2id (19 MiB, 2 iterations, 1 thread, as OWASP recommends, the same as the Rust version, in PHC format); bcrypt and the base64 output of `caddy hash-password` are verified too. `passwd` generates 144-bit random passwords, which cannot be guessed online, so neither IPs nor accounts are locked out.
+- Verification results are cached by request header: successes for 10 minutes, failures for 1 minute. The key is an HMAC-SHA256 of the request header (with a random key each time the configuration loads), so the cache holds no passwords. Concurrent requests with the same header compute the hash only once; no more than twice the number of CPU cores of hashes are computed at the same time. The cache holds at most 4096 entries; when it is full, expired entries are cleared first; failure results never push out success results.
+- For a user name that does not exist, a hash is still computed against a random hash, so response times do not reveal which user names exist.
 
-## 5. 已知限制
+## 5. Known limitations
 
-| 限制 | 原因 | 影响 |
+| Limitation | Reason | Impact |
 |---|---|---|
-| HTTP/2 上目标先关闭时，中继结束整个流（END_STREAM，如设备仍在发送则随后 RST_STREAM(NO_ERROR)），不能只关一个方向 | Go 的 HTTP/2 服务器只在处理器返回时结束响应 | 极少见：目标半关闭后还要继续接收设备数据的协议。HTTP/3、HTTP/1.1 不受影响 |
-| HTTP/2 隧道异常结束时的 RST_STREAM 码是 `INTERNAL_ERROR`；RFC 9113 §8.5 要求目标 TCP 出错时用 `CONNECT_ERROR`，RFC 9297 §3.3 / RFC 9113 §8.1.1 要求畸形 Capsule 用 `PROTOCOL_ERROR` | Go 的 HTTP/2 服务器（`x/net/http2`，Caddy 用的）不让处理器选择复位码，处理器中止时固定发 `INTERNAL_ERROR` | 设备照样看到流被复位、目标一侧照样收到 TCP RST，只是不知道原因细节。HTTP/3 上三种码都正确 |
-| HTTP/2 CONNECT 流上的尾部 HEADERS 被当成流结束（等同 FIN），没有按 RFC 9113 §8.5 当作流错误 | 同上：`x/net/http2` 在处理器看到之前就把它当成 END_STREAM | 只有违反协议的客户端才会这样发。HTTP/3 上是 `H3_FRAME_UNEXPECTED` |
-| 扩展 CONNECT 的 `:scheme` 没有检查是不是 `https`（RFC 9298 §3.4） | `x/net/http2` 和 quic-go 只检查它存在，不把值交给处理器 | 客户端都发 `https` |
-| HTTP/2 的流控窗口和并发流数是 `x/net/http2` 的默认值（每流/每连接约 1 MiB，最多 250 个流） | Caddy 不提供这些设置 | HTTP/2 上的大流量上传吞吐受 RTT 限制；HTTP/3 不受影响 |
-| 经中继访问同一台 Caddy 上其他站点的域名会失败 | CONNECT 以目标为主机名，被那个站点接收 | 把这些域名放进描述文件的 `--exclude-domain` |
-| 撤销某个用户后，正在进行的认证可能已经放行了一个请求 | 认证和建立隧道之间的竞态 | 建立隧道时再次检查配置代际（§3.6），窗口只有几毫秒 |
+| On HTTP/2, when the destination closes first, the relay ends the whole stream (END_STREAM, followed by RST_STREAM(NO_ERROR) if the device is still sending); it cannot close just one direction | Go's HTTP/2 server only ends the response when the handler returns | Rare: protocols that keep receiving data from the device after the destination half-closes. HTTP/3 and HTTP/1.1 are not affected |
+| The RST_STREAM code when an HTTP/2 tunnel ends abnormally is `INTERNAL_ERROR`; RFC 9113 §8.5 calls for `CONNECT_ERROR` when the destination TCP fails, and RFC 9297 §3.3 / RFC 9113 §8.1.1 call for `PROTOCOL_ERROR` for malformed Capsules | Go's HTTP/2 server (`x/net/http2`, which Caddy uses) does not let handlers choose the reset code; when a handler aborts it always sends `INTERNAL_ERROR` | The device still sees the stream reset and the destination still gets a TCP RST; only the detail of why is lost. On HTTP/3 all three codes are correct |
+| Trailing HEADERS on an HTTP/2 CONNECT stream are treated as the end of the stream (like FIN) rather than as a stream error as RFC 9113 §8.5 requires | Same as above: `x/net/http2` treats them as END_STREAM before the handler sees them | Only clients that violate the protocol send them. On HTTP/3 they are `H3_FRAME_UNEXPECTED` |
+| The `:scheme` of extended CONNECT is not checked to be `https` (RFC 9298 §3.4) | `x/net/http2` and quic-go only check that it is present and do not pass its value to the handler | Clients all send `https` |
+| HTTP/2 flow control windows and the concurrent stream limit are `x/net/http2`'s defaults (about 1 MiB per stream/per connection, at most 250 streams) | Caddy does not expose these settings | Throughput of large uploads over HTTP/2 is bounded by the RTT; HTTP/3 is not affected |
+| Reaching, through the relay, the domain of another site on the same Caddy fails | CONNECT uses the destination as the host name, so that site receives it | Put those domains in the profile's `--exclude-domain` |
+| After a user is revoked, an authentication already in progress may have let one request through | A race between authentication and establishing the tunnel | The configuration generation is checked again when the tunnel is established (§3.6); the window is only a few milliseconds |
 
-## 6. 测试
+## 6. Testing
 
-`go test ./...`（CI 里加 `-race`，并在 Go 1.27 上分别以 `-tags http2legacy` 和 `GODEBUG=http2xconnect=1` 运行）：
+`go test ./...` (in CI with `-race`, and on Go 1.27 run separately with `-tags http2legacy` and with `GODEBUG=http2xconnect=1`):
 
-- **单元**：URI 模板（展开、匹配、IPv6、查询形式、拒绝的写法）、目标解析、策略（映射地址、DNS 重绑定、DNS 超时）、Happy Eyeballs、密码哈希（含 Rust 版 `network-relay passwd` 生成的哈希、bcrypt、base64）、认证缓存、Capsule（大型未知 Capsule、其他上下文、空负载、65527 上限、截断）、描述文件、域名列表和 gfwlist 解析。
-- **集成**（进程内启动真实 Caddy，真实 TLS/QUIC）：三种 HTTP 版本的 TCP 往返和半关闭、目标先关闭、UDP 往返（HTTP/3 Datagram、HTTP/3 Capsule、HTTP/2、HTTP/1.1；0、1、60、1200 字节，Capsule 还有 1400、9000 字节）、IPv6 目标、拒绝（403/400/502 和 `Proxy-Status`）、未认证请求看到网站、网站经 HTTP/3 和 `Alt-Svc`、Caddy 读写空闲超时不切断空闲隧道、`max_tunnels`、reload 撤销被删用户而保留其他用户、reload 失败时 HTTP/3 和隧道保持、Caddyfile 解析和指令顺序。
-- **逐帧的协议一致性**（`compliance_test.go`，自己写的 HTTP/3 帧级客户端和 HTTP/2 帧级客户端，能发出正常客户端库不会发的东西）：服务器 SETTINGS（扩展 CONNECT、H3_DATAGRAM、QUIC DATAGRAM）；三种版本成功回应的头部（无 Content-Length/Content-Type/Transfer-Encoding，UDP 有且只有 `Capsule-Protocol: ?1`，HTTP/1.1 的 101 头部，拒绝时没有 `Capsule-Protocol`）；CONNECT 流上的未知帧被跳过、尾部 HEADERS/SETTINGS/GOAWAY/保留类型 → `H3_FRAME_UNEXPECTED`、截断的 DATA → `H3_FRAME_ERROR`；TCP 隧道和下载中的网页收到数据报 → `H3_DATAGRAM_ERROR`，FIN 之后的数据报被丢弃；回应前发出的数据报被转发；ICMP 不可达关闭三种版本的 UDP 隧道（HTTP/3 是 `H3_CONNECT_ERROR`）；HTTP/1.1 的畸形 Upgrade 请求 → 400、令牌列表形式的 `Connection`/`Upgrade` 被接受、重复 `Host` → 400；带内容头的 CONNECT-UDP → 400（HTTP/3、HTTP/2）；模板外的 connect-udp → 404/405，其他 `:protocol` 交给网站。
-- **互通**：quic-go 的 [masque-go](https://github.com/quic-go/masque-go)（独立的 CONNECT-UDP 客户端和 RFC 6570 实现）经 HTTP/3 收发数据报；帧级 HTTP/2 客户端检查 `SETTINGS_ENABLE_CONNECT_PROTOCOL`、扩展 CONNECT、Capsule 往返、畸形 Capsule 引起的 RST_STREAM、正常结束（这个测试不依赖 Go 的 HTTP/2 客户端，所以在 Go 1.27 的标准库实现下也验证了服务端）；HTTP/3 的 `H3_MESSAGE_ERROR`、`H3_CONNECT_ERROR`。
-- **大流量和差网络**（`stress_test.go`；默认每次 64 MiB，`RELAY_STRESS_MB` 可调）：三种版本各传 64 MiB 上行 + 64 MiB 下行，逐字节校验（SHA-256），本机约 160–200 MiB/s；24 条隧道并发（三种版本混合）；客户端停止读取而目标持续发送时，中继进程堆内存不增长（流控把压力推回目标，不缓冲）；传完后隧道计数回到 0。差网络在测试进程内模拟（这台机器的内核没有 netem）：QUIC 下面的 UDP 包按概率丢弃、FIFO 延迟加抖动、少量重排和重复；TCP 经一个加延迟、限带宽、可停顿、可切断的代理。每种情况都先不经中继跑一遍同样的传输作基准，再经中继跑，要求中继不明显更慢。覆盖：HTTP/3 在 3% 丢包/40 ms RTT 和 10% 丢包/200 ms RTT 下的往返（经中继的用时分别是直连的 1.0 倍和 0.9 倍；吞吐本身受丢包式拥塞控制限制，约 1.2·MSS/(RTT·√p)，前者实测约 220 KB/s，和这个上限一致）；HTTP/2、HTTP/1.1 在 60 ms 单向延迟、8 Mbit/s 下与直连相同的用时；连接停顿 3 秒后隧道照常；连接被切断后隧道立即释放、目标收到 RST；HTTP/3 连接被突然关闭后隧道释放；UDP 隧道在 5% 丢包下只丢路径丢的包、不损坏；**QUIC 套 QUIC**：设备里的 QUIC 连接经 UDP 隧道穿过 3% 丢包的外层路径，8 MiB 各向，内层包最大 1280 字节（装得进外层 1350 字节的数据报），内层更大的 PMTU 探测包被丢弃而不是转成 Capsule。
-- **安装脚本**：`python3 deploy/test_install.py`，系统命令换成记录调用的假命令，Caddy 用真实编译的程序：全新安装、升级保留一切、各种拒绝时什么都不写、不接管别人的 Caddyfile、替换 Rust 版、启动失败回滚（全新安装和升级）、配置检查失败、自检失败时保留服务。
-- **手动端到端**（编译出的 `caddy` 加 Caddyfile 运行）：`caddy network-relay check` 三种版本的 TCP 和 UDP（经真实互联网查询 1.1.1.1）全部通过；curl 经 HTTP/1.1 和 HTTP/2 的 CONNECT 各下载、上传 200 MB 文件，校验和一致，8 个 200 MB 下载并发同样一致；HTTP/3 用 `go test -run TestRealServerHTTP3`（`e2e_test.go`，需要 `RELAY_E2E_*` 环境变量）对运行中的服务传 200 MiB 各向两次，约 6 秒一次；带打开的 HTTP/2 隧道时 SIGTERM，Caddy 约 1 秒内退出。
+- **Unit**: URI templates (expansion, matching, IPv6, query forms, rejected forms), target parsing, policy (mapped addresses, DNS rebinding, DNS timeouts), Happy Eyeballs, password hashes (including hashes generated by the Rust version's `network-relay passwd`, bcrypt, base64), the authentication cache, Capsules (large unknown Capsules, other contexts, empty payloads, the 65527 limit, truncation), profiles, and parsing of domain lists and the gfwlist.
+- **Integration** (a real Caddy started in-process, real TLS/QUIC): TCP round trips and half-close over all three HTTP versions, the destination closing first, UDP round trips (HTTP/3 Datagrams, HTTP/3 Capsules, HTTP/2, HTTP/1.1; 0, 1, 60 and 1200 bytes, and for Capsules also 1400 and 9000 bytes), IPv6 destinations, refusals (403/400/502 and `Proxy-Status`), unauthenticated requests seeing the website, the website over HTTP/3 and `Alt-Svc`, Caddy's read/write idle timeouts not cutting idle tunnels, `max_tunnels`, a reload revoking a removed user while keeping the others, HTTP/3 and tunnels surviving a failed reload, and Caddyfile parsing and directive order.
+- **Frame-level protocol conformance** (`compliance_test.go`, with hand-written frame-level HTTP/3 and HTTP/2 clients that can send things normal client libraries never would): server SETTINGS (extended CONNECT, H3_DATAGRAM, QUIC DATAGRAM); headers of successful responses over all three versions (no Content-Length/Content-Type/Transfer-Encoding, exactly one `Capsule-Protocol: ?1` for UDP, the headers of HTTP/1.1's 101, no `Capsule-Protocol` on refusals); unknown frames on CONNECT streams skipped, trailing HEADERS/SETTINGS/GOAWAY/reserved types → `H3_FRAME_UNEXPECTED`, truncated DATA → `H3_FRAME_ERROR`; datagrams received on TCP tunnels and on web pages being downloaded → `H3_DATAGRAM_ERROR`, datagrams after FIN dropped; datagrams sent before the response forwarded; ICMP unreachable closing UDP tunnels on all three versions (`H3_CONNECT_ERROR` on HTTP/3); malformed HTTP/1.1 Upgrade requests → 400, token-list forms of `Connection`/`Upgrade` accepted, duplicate `Host` → 400; CONNECT-UDP with content headers → 400 (HTTP/3, HTTP/2); connect-udp outside the template → 404/405, other values of `:protocol` passed to the website.
+- **Interoperability**: quic-go's [masque-go](https://github.com/quic-go/masque-go) (an independent CONNECT-UDP client and RFC 6570 implementation) sending and receiving datagrams over HTTP/3; a frame-level HTTP/2 client checking `SETTINGS_ENABLE_CONNECT_PROTOCOL`, extended CONNECT, Capsule round trips, the RST_STREAM caused by malformed Capsules, and normal termination (this test does not depend on Go's HTTP/2 client, so it also verifies the server under Go 1.27's standard library implementation); HTTP/3's `H3_MESSAGE_ERROR` and `H3_CONNECT_ERROR`.
+- **Heavy traffic and bad networks** (`stress_test.go`; 64 MiB per transfer by default, adjustable with `RELAY_STRESS_MB`): 64 MiB up + 64 MiB down over each of the three versions, verified byte for byte (SHA-256), at about 160–200 MiB/s locally; 24 concurrent tunnels (mixing the three versions); when the client stops reading while the destination keeps sending, the relay process's heap does not grow (flow control pushes back on the destination, nothing is buffered); after the transfers the tunnel count returns to 0. Bad networks are simulated inside the test process (this machine's kernel has no netem): UDP packets under QUIC are dropped with some probability, delayed FIFO with jitter, and a few are reordered and duplicated; TCP goes through a proxy that adds delay, limits bandwidth, and can stall or cut the connection. Each case first runs the same transfer without the relay as a baseline, then through the relay, and the relay must not be noticeably slower. Covered: HTTP/3 round trips at 3% loss/40 ms RTT and 10% loss/200 ms RTT (through the relay they take 1.0x and 0.9x as long as direct; throughput itself is limited by loss-based congestion control, roughly 1.2·MSS/(RTT·√p), and the former measures about 220 KB/s, in line with that bound); HTTP/2 and HTTP/1.1 at 60 ms one-way delay and 8 Mbit/s taking the same time as direct; tunnels carrying on after a 3-second stall; tunnels released immediately and the destination getting an RST after the connection is cut; tunnels released after an HTTP/3 connection is closed abruptly; UDP tunnels at 5% loss losing only what the path loses, with nothing corrupted; **QUIC inside QUIC**: a QUIC connection on the device going through a UDP tunnel across an outer path with 3% loss, 8 MiB each way, inner packets at most 1280 bytes (fitting in the outer 1350-byte datagrams), and larger inner PMTU probe packets dropped rather than turned into Capsules.
+- **Install script**: `python3 deploy/test_install.py`, with system commands replaced by stubs that record their calls and Caddy being the real built binary: fresh install, upgrade keeping everything, writing nothing on every kind of refusal, not taking over someone else's Caddyfile, replacing the Rust version, rollback on a failed start (fresh install and upgrade), a failed configuration check, and keeping the service when the self-check fails.
+- **Manual end-to-end** (the built `caddy` run with a Caddyfile): `caddy network-relay check` passing TCP and UDP over all three versions (with DNS queries to 1.1.1.1 over the real internet); curl downloading and uploading a 200 MB file through CONNECT over HTTP/1.1 and HTTP/2, with matching checksums, and the same with 8 concurrent 200 MB downloads; for HTTP/3, `go test -run TestRealServerHTTP3` (`e2e_test.go`, which needs the `RELAY_E2E_*` environment variables) transferring 200 MiB each way twice against a running server, about 6 seconds each time; and with an HTTP/2 tunnel open, Caddy exiting within about 1 second of SIGTERM.
 
-**还没做的**：真实 iPhone、Mac 的测试。
+**Not done yet**: tests with a real iPhone and Mac.
