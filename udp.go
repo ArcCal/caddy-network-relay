@@ -53,13 +53,20 @@ func readCapsules(r io.Reader, deliver func([]byte)) error {
 		if length == 0 {
 			return errMalformed // no room for the context ID
 		}
-		ctxID, err := quicvarint.Read(br)
+		// A varint need not use its shortest encoding (RFC 9000 §16): the
+		// size of the context ID is what its first byte says, and it must
+		// fit in the capsule.
+		first, err := br.Peek(1)
 		if err != nil {
 			return truncated(err)
 		}
-		idLen := uint64(quicvarint.Len(ctxID))
+		idLen := uint64(1) << (first[0] >> 6)
 		if idLen > length {
 			return errMalformed
+		}
+		ctxID, err := quicvarint.Read(br)
+		if err != nil {
+			return truncated(err)
 		}
 		if ctxID != 0 {
 			if err := discard(br, length-idLen); err != nil {

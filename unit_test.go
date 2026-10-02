@@ -1,18 +1,28 @@
 package networkrelay
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/netip"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/caddyserver/caddy/v2"
+	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/quicvarint"
+	"go.uber.org/zap"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -58,10 +68,16 @@ func TestTemplates(t *testing.T) {
 		"no-slash/{target_host}/{target_port}", "/{target_host}{target_port}", "/{target_host}/",
 		"/{target_host}/{target_port}/{other}", "/{+target_host}/{target_port}", "/{target_host}/{target_port",
 		"/{target_host}/{target_host}/{target_port}", "/{&target_host,target_port}",
+		// RFC 9298 §2: printable ASCII only.
+		"/中继/{target_host}/{target_port}/", "/r\x7f/{target_host}/{target_port}/", "/r\x01/{target_host}/{target_port}/",
 	} {
 		if _, err := parseUDPTemplate(bad); err == nil {
 			t.Errorf("%q accepted", bad)
 		}
+	}
+	// The same path percent-encoded is fine.
+	if _, err := parseUDPTemplate("/%E4%B8%AD%E7%BB%A7/{target_host}/{target_port}/"); err != nil {
+		t.Errorf("percent-encoded template: %v", err)
 	}
 }
 
@@ -169,6 +185,48 @@ func TestPolicy(t *testing.T) {
 	if p2, err := newPolicy([]string{"192.0.2.7"}, nil); err != nil || p2.allows(netip.MustParseAddr("192.0.2.7")) {
 		t.Error("single address not blocked")
 	}
+
+	// The host's own public addresses, by address or by name, also as
+	// IPv4-mapped addresses.
+	p.hostAddrs = func() []netip.Addr {
+		return []netip.Addr{netip.MustParseAddr("203.0.113.9"), netip.MustParseAddr("2001:db8:1::9")}
+	}
+	p.blocked = nil // the documentation ranges above are blocked anyway
+	p.resolver = fakeResolver{"self.example": {netip.MustParseAddr("2001:db8:1::9")}}
+	for _, s := range []string{"203.0.113.9", "::ffff:203.0.113.9", "2001:db8:1::9"} {
+		if p.allows(netip.MustParseAddr(s)) {
+			t.Errorf("own address %s allowed", s)
+		}
+	}
+	check("self.example", 443, refuseAddress)
+	check("203.0.113.10", 443, nil)
+	// interfaceAddrs finds the host's addresses (loopback at least).
+	if own := interfaceAddrs(); !slices.Contains(own, netip.MustParseAddr("127.0.0.1")) {
+		t.Errorf("interface addresses: %v", own)
+	}
+}
+
+// Only the default list blocks the host's own addresses: a list given in
+// the configuration replaces it, as documented.
+func TestHostAddrsDefaultOnly(t *testing.T) {
+	for _, tc := range []struct {
+		conf string
+		want bool
+	}{{"{}", true}, {`{"blocked_destinations": ["10.0.0.0/8"]}`, false}, {`{"blocked_destinations": []}`, false}} {
+		var h Handler
+		if err := json.Unmarshal([]byte(tc.conf), &h); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := caddy.NewContext(caddy.Context{Context: context.Background()})
+		if err := h.Provision(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if got := h.policy.hostAddrs != nil; got != tc.want {
+			t.Errorf("%s: host addresses blocked: %v", tc.conf, got)
+		}
+		h.Cleanup()
+		cancel()
+	}
 }
 
 func TestInterleave(t *testing.T) {
@@ -241,21 +299,22 @@ func TestAuthenticator(t *testing.T) {
 		t.Fatal(err)
 	}
 	good := BasicAuthorization("alice", testPassword)
-	if acct, ok := a.verify(good); !ok || acct.name != "alice" || !a.has(acct) {
+	ctx := context.Background()
+	if acct, err := a.verify(ctx, good); err != nil || acct.name != "alice" || !a.has(acct) {
 		t.Fatal("good credentials rejected")
 	}
-	if _, ok := a.verify("basic " + strings.TrimPrefix(good, "Basic ")); !ok {
+	if _, err := a.verify(ctx, "basic "+strings.TrimPrefix(good, "Basic ")); err != nil {
 		t.Fatal("scheme is case-insensitive")
 	}
 	for _, bad := range []string{"", BasicAuthorization("alice", "nope"), BasicAuthorization("bob", testPassword), "Bearer abc", "Basic !!!"} {
-		if _, ok := a.verify(bad); ok {
-			t.Errorf("%q accepted", bad)
+		if _, err := a.verify(ctx, bad); !errors.Is(err, errBadCredentials) {
+			t.Errorf("%q: %v", bad, err)
 		}
 	}
 	// Cached: the second check is fast.
 	start := time.Now()
 	for i := 0; i < 100; i++ {
-		a.verify(good)
+		a.verify(ctx, good)
 	}
 	if time.Since(start) > 50*time.Millisecond {
 		t.Errorf("cache not used: %v", time.Since(start))
@@ -305,7 +364,24 @@ func TestCapsules(t *testing.T) {
 	if err != nil || len(got) != 3 || string(got[0]) != "one" || len(got[1]) != 0 || len(got[2]) != maxUDPPayload {
 		t.Fatalf("err %v, %d payloads", err, len(got))
 	}
+	// Context IDs in every varint size (RFC 9000 §16 allows longer encodings
+	// than needed); each capsule ends where its length says.
+	stream = nil
+	for _, id := range [][]byte{{0x40, 0}, {0x80, 0, 0, 0}, {0xc0, 0, 0, 0, 0, 0, 0, 0}} {
+		stream = append(stream, capsule(0, append(append([]byte{}, id...), 'A'))...)
+		stream = append(stream, capsule(0, append(append([]byte{}, id[:len(id)-1]...), 5, 'x'))...) // context 5: skipped
+		stream = appendDatagramCapsule(stream, []byte("B"))
+	}
+	got = nil
+	err = readCapsules(bytes.NewReader(stream), func(p []byte) { got = append(got, append([]byte(nil), p...)) })
+	if err != nil || fmt.Sprintf("%q", got) != `["A" "B" "A" "B" "A" "B"]` {
+		t.Fatalf("long context IDs: err %v, payloads %q", err, got)
+	}
 	malformed := [][]byte{
+		// A two-byte context ID in a one-byte capsule, followed by a
+		// capsule that would complete it.
+		append(capsule(0, []byte{0x40}), capsule(0, []byte{0, 'B'})...),
+		capsule(0, []byte{0x80, 0, 0}), // context ID longer than the capsule
 		appendDatagramCapsule(nil, []byte("truncated"))[:5],
 		capsule(0, nil), // no context ID
 		capsule(0, append([]byte{0}, make([]byte, maxUDPPayload+1)...)),
@@ -400,5 +476,206 @@ func TestDomainLists(t *testing.T) {
 	}
 	if got := collapseDomains([]string{"a.example.com", "example.com", "b.c.example.org", "c.example.org", "x.org"}); strings.Join(got, ",") != "c.example.org,example.com,x.org" {
 		t.Errorf("collapse: %v", got)
+	}
+}
+
+// Verifications waiting for a slot are bounded, stop when their request
+// goes away, and never run for a request that is gone.
+func TestAuthenticatorQueue(t *testing.T) {
+	a, err := newAuthenticator([]User{{"alice", testHash}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	good := BasicAuthorization("alice", testPassword)
+	if _, err := a.verify(context.Background(), good); err != nil {
+		t.Fatal(err)
+	}
+	// Every slot busy, as under a flood of new credentials.
+	for i := 0; i < cap(a.slots); i++ {
+		a.slots <- struct{}{}
+	}
+	limit := pendingPerSlot * cap(a.slots)
+	pending := func() int {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return len(a.inflight)
+	}
+	waitFor := func(n int) {
+		t.Helper()
+		for deadline := time.Now().Add(5 * time.Second); pending() != n; {
+			if time.Now().After(deadline) {
+				t.Fatalf("%d verifications pending, want %d", pending(), n)
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errs := make(chan error, limit)
+	for i := 0; i < limit; i++ {
+		go func() {
+			_, err := a.verify(ctx, BasicAuthorization(fmt.Sprintf("u%d", i), "x"))
+			errs <- err
+		}()
+	}
+	waitFor(limit)
+	// The queue is full: a new header is refused at once, a cached one is
+	// still answered.
+	if _, err := a.verify(context.Background(), BasicAuthorization("one", "more")); !errors.Is(err, errAuthBusy) {
+		t.Errorf("over the limit: %v", err)
+	}
+	if _, err := a.verify(context.Background(), good); err != nil {
+		t.Errorf("cached header while the queue is full: %v", err)
+	}
+	cancel()
+	for i := 0; i < limit; i++ {
+		if err := <-errs; !errors.Is(err, context.Canceled) {
+			t.Errorf("cancelled request: %v", err)
+		}
+	}
+	waitFor(0)
+
+	// A request with the same header as one that goes away verifies for
+	// itself instead of failing.
+	a.mu.Lock()
+	clear(a.cache)
+	a.mu.Unlock()
+	ctxA, cancelA := context.WithCancel(context.Background())
+	first := make(chan error, 1)
+	go func() { _, err := a.verify(ctxA, good); first <- err }()
+	waitFor(1)
+	second := make(chan error, 1)
+	go func() { _, err := a.verify(context.Background(), good); second <- err }()
+	time.Sleep(20 * time.Millisecond) // let it wait for the first one
+	cancelA()
+	if err := <-first; !errors.Is(err, context.Canceled) {
+		t.Errorf("first: %v", err)
+	}
+	waitFor(1) // the second one now verifies by itself
+	for i := 0; i < cap(a.slots); i++ {
+		<-a.slots
+	}
+	if err := <-second; err != nil {
+		t.Errorf("second: %v", err)
+	}
+	// Nothing from the cancelled requests was cached as a failure.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, e := range a.cache {
+		if !e.ok {
+			t.Error("a cancelled verification was cached")
+		}
+	}
+}
+
+// A list that ends up empty must not produce a profile that relays all
+// traffic (Apple: no MatchDomains and no MatchFQDNs match every domain).
+func TestProfileCommandEmptyMatches(t *testing.T) {
+	dir := t.TempDir()
+	empty := filepath.Join(dir, "empty.txt")
+	if err := os.WriteFile(empty, []byte("# only comments\n\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	listed := filepath.Join(dir, "listed.txt")
+	if err := os.WriteFile(listed, []byte("Example.org\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"--host", "relay.example.com", "--user", "iphone", "--password", "secret"}
+	run := func(args ...string) (string, error) {
+		out := filepath.Join(dir, "out.mobileconfig")
+		os.Remove(out)
+		c := profileCommand()
+		c.SetArgs(append(append(append([]string{}, base...), args...), "-o", out))
+		c.SetOut(io.Discard)
+		c.SetErr(io.Discard)
+		err := c.Execute()
+		b, _ := os.ReadFile(out)
+		return string(b), err
+	}
+	for name, args := range map[string][]string{
+		"empty domains file": {"--domains-file", empty},
+		"only the relay":     {"--match-domain", "relay.example.com"},
+		"only the relay, FQ": {"--match-domain", "Relay.Example.com."},
+	} {
+		x, err := run(args...)
+		if err == nil || x != "" {
+			t.Errorf("%s: err %v, wrote %d bytes", name, err, len(x))
+		}
+	}
+	// What still works: a list with entries, exact names alone, and
+	// relaying everything on purpose.
+	if x, err := run("--domains-file", listed, "--match-domain", "relay.example.com"); err != nil ||
+		!strings.Contains(x, "<string>example.org</string>") || !strings.Contains(x, "ExcludedDomains") {
+		t.Errorf("list: %v", err)
+	}
+	if x, err := run("--match-fqdn", "www.example.org"); err != nil || !strings.Contains(x, "MatchFQDNs") {
+		t.Errorf("fqdn: %v", err)
+	}
+	if x, err := run(); err != nil || strings.Contains(x, "MatchDomains") || !strings.Contains(x, "all of this device&apos;s traffic") {
+		t.Errorf("everything: %v", err)
+	}
+}
+
+// A handshake that arrives after the last configuration released the
+// endpoint (before its listener is closed) fails; it used to index an empty
+// list and crash the process.
+func TestEndpointWithoutUsers(t *testing.T) {
+	ep, err := acquireEndpoint("udp", "127.0.0.1:0", endpointUser{tls: &tls.Config{}}, zap.NewNop())
+	if err != nil {
+		t.Fatal(err)
+	}
+	endpoints.Lock()
+	saved := ep.users
+	ep.users = nil
+	endpoints.Unlock()
+	defer func() {
+		endpoints.Lock()
+		ep.users = saved
+		endpoints.Unlock()
+		ep.release(nil)
+	}()
+	if _, ok := ep.current(); ok {
+		t.Fatal("current with no users")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, err := quic.DialAddr(ctx, ep.conn.LocalAddr().String(),
+		&tls.Config{InsecureSkipVerify: true, NextProtos: []string{"h3"}}, nil)
+	if err == nil {
+		conn.CloseWithError(0, "")
+		t.Fatal("handshake succeeded")
+	}
+}
+
+type pipeStream struct{ net.Conn }
+
+func (pipeStream) CloseWrite() error { return nil }
+
+// The self-check's TCP test passes only on an HTTP answer, not on any bytes.
+func TestHTTPThrough(t *testing.T) {
+	for answer, ok := range map[string]bool{
+		"HTTP/1.1 200 OK\r\n":      true,
+		"HTTP/1.0 301 Moved\r\n":   true,
+		"not an HTTP response\r\n": false,
+		"HTTP/1.1 2xx\r\n":         false,
+		"SSH-2.0-OpenSSH_9.6\r\n":  false,
+		"HTTP/1.1\r\n":             false,
+	} {
+		client, server := net.Pipe()
+		go func() {
+			br := bufio.NewReader(server)
+			for { // read the request to its end
+				line, err := br.ReadString('\n')
+				if err != nil || line == "\r\n" {
+					break
+				}
+			}
+			io.WriteString(server, answer)
+			server.Close()
+		}()
+		line, err := httpThrough(context.Background(), pipeStream{client}, nil, "example.com:80")
+		if (err == nil) != ok {
+			t.Errorf("%q: line %q, err %v", answer, line, err)
+		}
 	}
 }
