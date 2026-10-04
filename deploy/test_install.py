@@ -29,14 +29,23 @@ case "$1 $2" in
   "is-active --quiet")
     unit=$3
     [ -e "$STATE/active-$unit" ] && exit 0; exit 3 ;;
+  "is-enabled --quiet") [ -e "$STATE/enabled-$3" ] && exit 0; exit 1 ;;
+  "enable caddy"|"enable network-relay") touch "$STATE/enabled-$2" ;;
+  "disable caddy"|"disable network-relay") rm -f "$STATE/enabled-$2" ;;
+  "stop caddy") rm -f "$STATE/active-caddy" ;;
   "restart caddy")
     # FAKE_START_FAILS: the service is not running afterwards; "exit" makes
     # restart itself fail too, as it does for a Type=notify unit.
-    [ "$FAKE_START_FAILS" = exit ] && { rm -f "$STATE/active-caddy"; exit 1; }
-    [ -n "$FAKE_START_FAILS" ] && { rm -f "$STATE/active-caddy"; exit 0; }
+    if [ -n "$FAKE_START_FAILS" ] && { [ -z "$FAKE_START_FAILS_ONCE" ] || [ ! -e "$STATE/start-failed-once" ]; }; then
+      touch "$STATE/start-failed-once"
+      rm -f "$STATE/active-caddy"
+      [ "$FAKE_START_FAILS" = exit ] && exit 1
+      exit 0
+    fi
     touch "$STATE/active-caddy" ;;
+  "restart network-relay") touch "$STATE/active-network-relay" ;;
   "disable --now")
-    rm -f "$STATE/active-$3" ;;
+    rm -f "$STATE/active-$3" "$STATE/enabled-$3" ;;
 esac
 exit 0''',
     'journalctl': 'exit 0',
@@ -146,7 +155,9 @@ class InstallTest(unittest.TestCase):
         return self.log.read_text()
 
     def files(self):
-        return sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*') if p.is_file())
+        # The private runtime lock is coordination state, not a deployment file.
+        return sorted(str(p.relative_to(self.root)) for p in self.root.rglob('*')
+                      if p.is_file() and 'run/caddy-network-relay-install/' not in str(p.relative_to(self.root)))
 
     def fresh(self, *args, **env):
         return self.install('--domain', 'Relay.Example.COM', '--user', 'iphone', '--no-gfwlist', *args, **env)
@@ -190,7 +201,10 @@ class InstallTest(unittest.TestCase):
 
         self.assertTrue(self.path('/usr/local/bin/caddy').exists())
         unit = self.path('/etc/systemd/system/caddy.service').read_text()
-        self.assertIn('ExecStart=/usr/local/bin/caddy run --environ --config /etc/caddy/Caddyfile', unit)
+        self.assertIn('ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile', unit)
+        self.assertNotIn('--environ', unit)
+        self.assertNotIn('CAP_NET_ADMIN', unit)
+        self.assertIn('relay_id relay.example.com', self.path('/etc/caddy/Caddyfile').read_text())
         self.assertIn('GODEBUG=http2xconnect=1', unit)
         self.assertIn('net.core.rmem_max = 7500000', self.path('/etc/sysctl.d/60-caddy-network-relay.conf').read_text())
         self.assertTrue(self.path('/var/www/relay/index.html').exists())
@@ -292,7 +306,8 @@ class InstallTest(unittest.TestCase):
                 self.assertIn('Install failed and was rolled back', r.stderr)
                 self.assertFalse(self.path('/etc/caddy/Caddyfile').exists())
                 self.assertFalse(self.path('/usr/local/bin/caddy').exists())
-                self.assertIn('systemctl disable --now caddy', self.calls())
+                self.assertIn('systemctl stop caddy', self.calls())
+                self.assertIn('systemctl disable caddy', self.calls())
                 # A later run is a fresh install again.
                 self.fresh()
                 self.assertTrue(self.path('/etc/caddy/Caddyfile').exists())
@@ -302,10 +317,47 @@ class InstallTest(unittest.TestCase):
         for how in ['inactive', 'exit']:
             with self.subTest(how):
                 self.path('/usr/local/bin/caddy').write_text('#!/bin/sh\necho old\n')
-                r = self.install(ok=False, FAKE_START_FAILS=how)
+                (self.state / 'start-failed-once').unlink(missing_ok=True)
+                r = self.install(ok=False, FAKE_START_FAILS=how, FAKE_START_FAILS_ONCE='1')
                 self.assertIn('The old version keeps running', r.stderr)
                 self.assertEqual(self.path('/usr/local/bin/caddy').read_text(), '#!/bin/sh\necho old\n')
                 self.assertTrue(self.path('/etc/caddy/Caddyfile').exists())
+                self.assertTrue((self.state / 'active-caddy').exists())
+
+    def test_failed_rollback_reports_incomplete_recovery(self):
+        self.fresh()
+        r = self.install(ok=False, FAKE_START_FAILS='exit')
+        self.assertIn('rollback is incomplete', r.stderr)
+        self.assertNotIn('The old version keeps running', r.stderr)
+
+    def test_failed_upgrade_restores_inactive_and_disabled_state(self):
+        self.fresh()
+        for enabled in [False, True]:
+            with self.subTest(enabled=enabled):
+                (self.state / 'active-caddy').unlink(missing_ok=True)
+                (self.state / 'enabled-caddy').unlink(missing_ok=True)
+                if enabled:
+                    (self.state / 'enabled-caddy').touch()
+                r = self.install(ok=False, FAKE_START_FAILS='exit')
+                self.assertNotIn('The old version keeps running', r.stderr)
+                self.assertIn('remains stopped', r.stderr)
+                self.assertFalse((self.state / 'active-caddy').exists())
+                self.assertEqual((self.state / 'enabled-caddy').exists(), enabled)
+
+    def test_another_installer_is_refused(self):
+        import fcntl
+        lock = self.path('/run/caddy-network-relay-install/lock')
+        lock.parent.mkdir(parents=True)
+        with lock.open('w') as f:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            r = self.fresh(ok=False)
+        self.assertIn('Another caddy-network-relay installer is running', r.stderr)
+        self.assertEqual(self.files(), [])
+
+    def test_failed_migration_restores_the_rust_service(self):
+        (self.state / 'active-network-relay').touch()
+        self.fresh('--replace-network-relay', ok=False, FAKE_START_FAILS='exit')
+        self.assertTrue((self.state / 'active-network-relay').exists())
 
     def test_invalid_config_stops_before_installing(self):
         r = self.fresh(ok=False, FAKE_INVALID='1')

@@ -87,8 +87,12 @@ func parsePasswordHash(s string) (passwordHash, error) {
 		}
 	}
 	if strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$") {
-		if _, err := bcrypt.Cost([]byte(s)); err != nil {
+		cost, err := bcrypt.Cost([]byte(s))
+		if err != nil {
 			return nil, fmt.Errorf("invalid bcrypt hash: %v", err)
+		}
+		if cost > 14 {
+			return nil, errors.New("bcrypt cost exceeds the relay verification budget (maximum 14)")
 		}
 		return bcryptHash(s), nil
 	}
@@ -123,14 +127,14 @@ func parsePasswordHash(s string) (passwordHash, error) {
 			return nil, fmt.Errorf("unknown Argon2id parameter %q", kv)
 		}
 	}
-	if h.time < 1 || h.threads < 1 || h.memory < 8*uint32(h.threads) || h.memory > 4*1024*1024 || h.time > 100 {
+	if h.time < 1 || h.threads < 1 || h.threads > 4 || h.memory < 8*uint32(h.threads) || h.memory > 64*1024 || h.time > 10 {
 		return nil, errors.New("Argon2id parameters out of range")
 	}
 	var err error
-	if h.salt, err = base64.RawStdEncoding.DecodeString(parts[4]); err != nil || len(h.salt) < 8 {
+	if h.salt, err = base64.RawStdEncoding.DecodeString(parts[4]); err != nil || len(h.salt) < 8 || len(h.salt) > 64 {
 		return nil, errors.New("invalid Argon2id salt")
 	}
-	if h.key, err = base64.RawStdEncoding.DecodeString(parts[5]); err != nil || len(h.key) < 16 {
+	if h.key, err = base64.RawStdEncoding.DecodeString(parts[5]); err != nil || len(h.key) < 16 || len(h.key) > 64 {
 		return nil, errors.New("invalid Argon2id hash")
 	}
 	return h, nil
@@ -212,6 +216,12 @@ type flight struct {
 // of ~30 ms) before its own runs.
 const pendingPerSlot = 16
 
+// Bound expensive work process-wide, including configurations overlapping
+// during reload. Respect container CPU quotas and cap normal Argon2 memory
+// consumption at four concurrent verifications.
+var authenticationSlots = make(chan struct{}, min(4, max(1, runtime.GOMAXPROCS(0))))
+var authenticationPending = make(chan struct{}, pendingPerSlot*cap(authenticationSlots))
+
 var (
 	errBadCredentials = errors.New("wrong or missing credentials")
 	errAuthBusy       = errors.New("too many verifications waiting")
@@ -248,7 +258,7 @@ func newAuthenticator(users []User) (*authenticator, error) {
 		key:      make([]byte, 32),
 		cache:    map[[32]byte]cacheEntry{},
 		inflight: map[[32]byte]*flight{},
-		slots:    make(chan struct{}, 2*runtime.NumCPU()),
+		slots:    authenticationSlots,
 	}
 	if _, err := rand.Read(a.key); err != nil {
 		return nil, err
@@ -287,6 +297,9 @@ func (a *authenticator) has(acct account) bool {
 // when it does not, errAuthBusy when too many verifications are waiting, or
 // ctx's error when the request went away while waiting.
 func (a *authenticator) verify(ctx context.Context, header string) (account, error) {
+	if err := ctx.Err(); err != nil {
+		return account{}, err
+	}
 	if header == "" || len(a.users) == 0 {
 		return account{}, errBadCredentials
 	}
@@ -294,6 +307,7 @@ func (a *authenticator) verify(ctx context.Context, header string) (account, err
 	mac.Write([]byte(header))
 	var id [32]byte
 	copy(id[:], mac.Sum(nil))
+	admitted := false
 
 	for {
 		a.mu.Lock()
@@ -303,6 +317,16 @@ func (a *authenticator) verify(ctx context.Context, header string) (account, err
 				return result(e.acct, e.ok)
 			}
 			delete(a.cache, id)
+		}
+		if !admitted {
+			select {
+			case authenticationPending <- struct{}{}:
+				admitted = true
+				defer func() { <-authenticationPending }()
+			default:
+				a.mu.Unlock()
+				return account{}, errAuthBusy
+			}
 		}
 		if f, ok := a.inflight[id]; ok {
 			a.mu.Unlock()
@@ -365,6 +389,10 @@ func (a *authenticator) check(ctx context.Context, header string) (account, bool
 	case a.slots <- struct{}{}:
 	case <-ctx.Done():
 		return account{}, false, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		<-a.slots
+		return account{}, false, err
 	}
 	ok = h.verify([]byte(password))
 	<-a.slots

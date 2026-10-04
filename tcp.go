@@ -22,6 +22,14 @@ type copyResult struct {
 // other direction keeps going. An error on either side resets both: the
 // client stream with the reason, the target with a TCP RST.
 func pumpTCP(ctx context.Context, cc clientConn, t *net.TCPConn) (up, down int64, why abortReason, aborted bool) {
+	return pumpTCPLimited(ctx, cc, t, nil)
+}
+
+func pumpTCPLimited(ctx context.Context, cc clientConn, t *net.TCPConn, budget *trafficBudget) (up, down int64, why abortReason, aborted bool) {
+	// Returning on a peer reset must also release a worker waiting for credits,
+	// even when the caller's request context is still alive.
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	results := make(chan copyResult, 2)
 	go func() {
 		buf := make([]byte, tcpBufferSize)
@@ -29,6 +37,10 @@ func pumpTCP(ctx context.Context, cc clientConn, t *net.TCPConn) (up, down int64
 		for {
 			m, rerr := cc.Read(buf)
 			if m > 0 {
+				if err := budget.waitTCP(ctx, m); err != nil {
+					results <- copyResult{up: true, n: n, err: err}
+					return
+				}
 				if _, werr := t.Write(buf[:m]); werr != nil {
 					results <- copyResult{up: true, n: n, err: werr, targetEr: true}
 					return
@@ -51,6 +63,10 @@ func pumpTCP(ctx context.Context, cc clientConn, t *net.TCPConn) (up, down int64
 		for {
 			m, rerr := t.Read(buf)
 			if m > 0 {
+				if err := budget.waitTCP(ctx, m); err != nil {
+					results <- copyResult{n: downN.Load(), err: err}
+					return
+				}
 				if _, werr := cc.Write(buf[:m]); werr != nil {
 					results <- copyResult{n: downN.Load(), err: werr}
 					return

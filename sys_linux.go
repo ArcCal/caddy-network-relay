@@ -8,7 +8,7 @@ import (
 
 // forbidFragmentation sets the Don't Fragment policy on a target UDP socket:
 // datagrams larger than the path MTU are dropped instead of being sent as IP
-// fragments (RFC 9298 §3.1 discourages fragmentation).
+// fragments (RFC 9298 §3.1 prohibits introducing fragmentation).
 func forbidFragmentation(c *net.UDPConn, ipv6 bool) error {
 	raw, err := c.SyscallConn()
 	if err != nil {

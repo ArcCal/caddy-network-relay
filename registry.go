@@ -3,6 +3,7 @@ package networkrelay
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 )
@@ -34,6 +35,15 @@ var openTunnels atomic.Int64
 
 func registerHandler(h *Handler) {
 	registry.Lock()
+	for old := range registry.handlers {
+		if sameRelay(old, h) {
+			for name := range h.traffic {
+				if old.auth.has(account{name: name, hash: h.auth.users[name].PasswordHash}) && old.traffic[name] != nil {
+					h.traffic[name] = old.traffic[name]
+				}
+			}
+		}
+	}
 	registry.handlers[h] = struct{}{}
 	registry.Unlock()
 }
@@ -50,7 +60,7 @@ func unregisterHandler(h *Handler) {
 		}
 		t.owner = nil
 		for other := range registry.handlers {
-			if other.auth.has(t.acct) {
+			if sameRelay(h, other) && other.auth.has(t.acct) {
 				t.owner = other
 				break
 			}
@@ -68,9 +78,10 @@ func addTunnel(t *liveTunnel) bool {
 	registry.Lock()
 	defer registry.Unlock()
 	if _, live := registry.handlers[t.owner]; !live {
+		old := t.owner
 		t.owner = nil
 		for other := range registry.handlers {
-			if other.auth.has(t.acct) {
+			if sameRelay(old, other) && other.auth.has(t.acct) {
 				t.owner = other
 				break
 			}
@@ -81,6 +92,18 @@ func addTunnel(t *liveTunnel) bool {
 	}
 	registry.tunnels[t] = struct{}{}
 	return true
+}
+
+// Policy changes revoke existing tunnels rather than grandfathering targets
+// newly forbidden by the next configuration. An explicit ID is needed: a
+// password hash is not a tenant identifier.
+func sameRelay(a, b *Handler) bool {
+	return a != nil && b != nil && a.RelayID != "" && a.RelayID == b.RelayID &&
+		a.UDPTemplate == b.UDPTemplate &&
+		a.MaxBytesPerSecondPerUser == b.MaxBytesPerSecondPerUser &&
+		a.MaxUDPPacketsPerSecondPerUser == b.MaxUDPPacketsPerSecondPerUser &&
+		reflect.DeepEqual(a.BlockedDestinations, b.BlockedDestinations) &&
+		reflect.DeepEqual(a.BlockedPorts, b.BlockedPorts)
 }
 
 func removeTunnel(t *liveTunnel) {

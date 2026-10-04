@@ -3,6 +3,7 @@ package networkrelay
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -472,21 +473,30 @@ func httpThrough(ctx context.Context, s stream, err error, target string) (strin
 	}
 	ch := make(chan result, 1)
 	go func() {
-		line, err := bufio.NewReader(s).ReadString('\n')
-		ch <- result{strings.TrimSpace(line), err}
+		// A status line alone isn't a complete response. Bound all response
+		// headers and parse them, including any informational responses.
+		br := bufio.NewReader(io.LimitReader(s, 32<<10))
+		for range 8 {
+			rsp, err := http.ReadResponse(br, &http.Request{Method: http.MethodHead})
+			if err != nil {
+				ch <- result{err: err}
+				return
+			}
+			rsp.Body.Close()
+			if rsp.Proto != "HTTP/1.0" && rsp.Proto != "HTTP/1.1" || rsp.StatusCode < 100 || rsp.StatusCode > 599 {
+				ch <- result{err: errors.New("invalid HTTP response version or status")}
+				return
+			}
+			if rsp.StatusCode >= 200 {
+				ch <- result{line: rsp.Proto + " " + rsp.Status}
+				return
+			}
+		}
+		ch <- result{err: errors.New("too many informational HTTP responses")}
 	}()
 	select {
 	case r := <-ch:
-		if r.line == "" && r.err != nil {
-			return "", r.err
-		}
-		// Bytes alone do not show that the tunnel reached the target: the
-		// answer must be an HTTP status line.
-		if f := strings.Fields(r.line); len(f) < 2 || !strings.HasPrefix(f[0], "HTTP/1.") ||
-			len(f[1]) != 3 || strings.Trim(f[1], "0123456789") != "" {
-			return "", fmt.Errorf("not an HTTP response: %q", r.line)
-		}
-		return r.line, nil
+		return r.line, r.err
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -506,6 +516,11 @@ func dnsThrough(ctx context.Context, p packetConn, err error, name string) (stri
 		Header:    dnsmessage.Header{ID: 0x5250, RecursionDesired: true},
 		Questions: []dnsmessage.Question{{Name: qname, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}},
 	}
+	var transaction [2]byte
+	if _, err := rand.Read(transaction[:]); err != nil {
+		return "", err
+	}
+	msg.ID = uint16(transaction[0])<<8 | uint16(transaction[1])
 	query, err := msg.Pack()
 	if err != nil {
 		return "", err
@@ -530,11 +545,39 @@ func dnsThrough(ctx context.Context, p packetConn, err error, name string) (stri
 		if err := rsp.Unpack(answer); err != nil || rsp.ID != msg.ID {
 			continue
 		}
+		if !rsp.Response || rsp.OpCode != 0 || len(rsp.Questions) != 1 ||
+			!strings.EqualFold(rsp.Questions[0].Name.String(), qname.String()) ||
+			rsp.Questions[0].Type != dnsmessage.TypeA || rsp.Questions[0].Class != dnsmessage.ClassINET {
+			return "", errors.New("DNS response does not match the query")
+		}
+		if rsp.Truncated || rsp.RCode != dnsmessage.RCodeSuccess {
+			return "", fmt.Errorf("DNS query failed: truncated=%t rcode=%s", rsp.Truncated, rsp.RCode)
+		}
 		var addrs []string
+		// Only accept answers for the question or its CNAME chain, not an
+		// unrelated A record attached to an otherwise empty response.
+		allowed := map[string]bool{strings.ToLower(qname.String()): true}
+		for range len(rsp.Answers) {
+			changed := false
+			for _, a := range rsp.Answers {
+				if r, ok := a.Body.(*dnsmessage.CNAMEResource); ok && a.Header.Class == dnsmessage.ClassINET &&
+					allowed[strings.ToLower(a.Header.Name.String())] && !allowed[strings.ToLower(r.CNAME.String())] {
+					allowed[strings.ToLower(r.CNAME.String())] = true
+					changed = true
+				}
+			}
+			if !changed {
+				break
+			}
+		}
 		for _, a := range rsp.Answers {
-			if r, ok := a.Body.(*dnsmessage.AResource); ok {
+			if r, ok := a.Body.(*dnsmessage.AResource); ok && a.Header.Class == dnsmessage.ClassINET &&
+				allowed[strings.ToLower(a.Header.Name.String())] {
 				addrs = append(addrs, net.IP(r.A[:]).String())
 			}
+		}
+		if len(addrs) == 0 {
+			return "", errors.New("DNS response contains no IPv4 answers")
 		}
 		return fmt.Sprintf("%s: %s %s", name, rsp.RCode, strings.Join(addrs, " ")), nil
 	}

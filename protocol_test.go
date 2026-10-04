@@ -318,6 +318,8 @@ relay.example.com, :443 {
 		connect_timeout 5s
 		udp_idle_timeout 10m
 		max_tunnels 100
+		max_bytes_per_second_per_user 1048576
+		max_udp_packets_per_second_per_user 1000
 		log_requests
 	}
 	root * /var/www/relay
@@ -363,12 +365,15 @@ relay.example.com, :443 {
 	if len(first.Users) != 2 || first.UDPTemplate != "/masque/{target_host}/{target_port}/" ||
 		len(*first.BlockedDestinations) != 2 || len(*first.BlockedPorts) != 0 ||
 		time.Duration(first.ConnectTimeout) != 5*time.Second || time.Duration(first.UDPIdleTimeout) != 10*time.Minute ||
-		first.MaxTunnels != 100 || !first.LogRequests {
+		first.MaxTunnels != 100 || first.MaxBytesPerSecondPerUser != 1048576 ||
+		first.MaxUDPPacketsPerSecondPerUser != 1000 || !first.LogRequests {
 		t.Fatalf("options: %+v", first)
 	}
 	for _, bad := range []string{
 		"network_relay {\n user only-name\n}", "network_relay {\n unknown 1\n}", "network_relay arg",
 		"network_relay {\n max_tunnels many\n}", "network_relay {\n connect_timeout soon\n}",
+		"network_relay {\n max_bytes_per_second_per_user 9223372036854775808\n}",
+		"network_relay {\n max_udp_packets_per_second_per_user nope\n}",
 	} {
 		_, _, err := adapter.Adapt([]byte(":443 {\n"+bad+"\n}"), nil)
 		if err == nil {
@@ -382,6 +387,10 @@ func TestValidation(t *testing.T) {
 		{"connect_timeout": int64(time.Hour)},
 		{"udp_idle_timeout": int64(time.Second)},
 		{"max_tunnels": -1},
+		{"max_bytes_per_second_per_user": -1},
+		{"max_bytes_per_second_per_user": int64(1<<40) + 1},
+		{"max_udp_packets_per_second_per_user": -1},
+		{"max_udp_packets_per_second_per_user": int64(1<<30) + 1},
 		{"udp_template": "/{target_host}"},
 		{"blocked_destinations": []string{"nonsense"}},
 		{"users": []map[string]string{{"name": "x", "password_hash": "plain"}}},
@@ -420,6 +429,9 @@ func validateStandalone(h *Handler) error {
 	}
 	if h.MaxTunnels == 0 {
 		h.MaxTunnels = 1
+	}
+	if h.MaxTunnelsPerUser == 0 {
+		h.MaxTunnelsPerUser = defaultMaxUserTunnels
 	}
 	return h.Validate()
 }

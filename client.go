@@ -123,11 +123,29 @@ func (c *h2Client) Write(p []byte) (int, error) {
 	return n, err
 }
 
-func (c *h2Client) closeWrite() bool { return true }
+func (c *h2Client) closeWrite() bool {
+	if w, ok := c.w.(interface{ CloseWrite() error }); ok {
+		_ = w.CloseWrite()
+		return false
+	}
+	return true
+}
 
 // abort resets the stream. Go's HTTP/2 server picks the code
 // (INTERNAL_ERROR); a handler cannot send CONNECT_ERROR itself.
-func (c *h2Client) abort(abortReason) { panic(http.ErrAbortHandler) }
+func (c *h2Client) abort(why abortReason) {
+	if w, ok := c.w.(interface{ ResetStream(uint32) error }); ok {
+		code := uint32(8) // CANCEL
+		if why == abortMalformed {
+			code = 1 // PROTOCOL_ERROR
+		} else if why == abortFailed {
+			code = 10 // CONNECT_ERROR
+		}
+		_ = w.ResetStream(code)
+		return
+	}
+	panic(http.ErrAbortHandler)
+}
 
 func (c *h2Client) close() {}
 

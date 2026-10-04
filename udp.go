@@ -123,10 +123,12 @@ func appendDatagramCapsule(b, payload []byte) []byte {
 // DATAGRAM capsules on the request stream (HTTP/2, HTTP/1.1, or HTTP/3
 // without datagrams).
 type udpTunnel struct {
-	cc   clientConn
-	h3   *http3.Stream // set when HTTP/3 datagrams are in use
-	sock *net.UDPConn
-	idle time.Duration
+	cc      clientConn
+	h3      *http3.Stream // set when HTTP/3 datagrams are in use
+	sock    *net.UDPConn
+	idle    time.Duration
+	budget  *trafficBudget
+	dropped atomic.Int64
 
 	last     atomic.Int64 // unix nanoseconds of the last packet either way
 	up, down atomic.Int64
@@ -149,6 +151,10 @@ func (u *udpTunnel) touch() { u.last.Store(time.Now().UnixNano()) }
 // path (the socket never fragments) or a full send buffer drops it; any
 // other error means the socket is unusable, which closes the tunnel.
 func (u *udpTunnel) toTarget(p []byte) {
+	if !u.budget.allowUDP(len(p)) {
+		u.dropped.Add(1)
+		return
+	}
 	u.touch()
 	if _, err := u.sock.Write(p); err != nil {
 		if isPerDatagramError(err) {
@@ -230,6 +236,10 @@ func (u *udpTunnel) run(ctx context.Context) (up, down int64, why abortReason, a
 			}
 			u.touch()
 			payload := buf[1 : 1+n]
+			if !u.budget.allowUDP(n) {
+				u.dropped.Add(1)
+				continue
+			}
 			if u.h3 != nil {
 				buf[0] = 0 // context ID 0
 				err = u.h3.SendDatagram(buf[:1+n])

@@ -31,7 +31,8 @@ func init() {
 const (
 	defaultConnectTimeout = 10 * time.Second
 	defaultUDPIdleTimeout = 5 * time.Minute
-	defaultMaxTunnels     = 20000
+	defaultMaxTunnels     = 1024
+	defaultMaxUserTunnels = 128
 
 	// connectUDP is the upgrade token / :protocol of CONNECT-UDP.
 	connectUDP = "connect-udp"
@@ -40,6 +41,9 @@ const (
 // Handler relays TCP and UDP for authenticated clients and passes every
 // other request on to the next handler (the website).
 type Handler struct {
+	// Stable security domain for retaining tunnels across reloads. Omit it
+	// to revoke this handler's tunnels on every reload. Never reuse across tenants.
+	RelayID string `json:"relay_id,omitempty"`
 	// Accounts allowed to use the relay; one per device.
 	Users []User `json:"users,omitempty"`
 
@@ -66,11 +70,15 @@ type Handler struct {
 	UDPIdleTimeout caddy.Duration `json:"udp_idle_timeout,omitempty"`
 
 	// Most tunnels (TCP connections and UDP flows) open at once, across all
-	// users. Default: 20000.
-	MaxTunnels int `json:"max_tunnels,omitempty"`
+	// users. Default: 1024; size this against memory and file descriptors.
+	MaxTunnels        int `json:"max_tunnels,omitempty"`
+	MaxTunnelsPerUser int `json:"max_tunnels_per_user,omitempty"`
+	// Shared upload/download payload budgets per user. Zero disables a budget.
+	MaxBytesPerSecondPerUser      int64 `json:"max_bytes_per_second_per_user,omitempty"`
+	MaxUDPPacketsPerSecondPerUser int64 `json:"max_udp_packets_per_second_per_user,omitempty"`
 
-	// Log every proxy request with its headers (credentials reduced to
-	// the user name). Noisy; for finding out what a device sends.
+	// Sample proxy requests with redacted headers. Bounded process-wide;
+	// for finding out what a device sends, not a complete access log.
 	LogRequests bool `json:"log_requests,omitempty"`
 
 	template *uriTemplate
@@ -78,6 +86,7 @@ type Handler struct {
 	auth     *authenticator
 	server   *relayServer
 	logger   *zap.Logger
+	traffic  map[string]*trafficBudget
 }
 
 // CaddyModule returns the Caddy module information.
@@ -121,8 +130,15 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if h.MaxTunnels == 0 {
 		h.MaxTunnels = defaultMaxTunnels
 	}
+	if h.MaxTunnelsPerUser == 0 {
+		h.MaxTunnelsPerUser = defaultMaxUserTunnels
+	}
 	if h.auth, err = newAuthenticator(h.Users); err != nil {
 		return err
+	}
+	h.traffic = make(map[string]*trafficBudget, len(h.Users))
+	for _, u := range h.Users {
+		h.traffic[u.Name] = newTrafficBudget(h.MaxBytesPerSecondPerUser, h.MaxUDPPacketsPerSecondPerUser)
 	}
 	if len(h.Users) == 0 {
 		h.logger.Warn("network_relay has no users; it only serves the website")
@@ -142,7 +158,11 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		if err != nil {
 			return err
 		}
-		h.server = appIface.(*App).addServer(srv)
+		app := appIface.(*App)
+		if err := app.claimRelayID(h.RelayID); err != nil {
+			return err
+		}
+		h.server = app.addServer(srv)
 	}
 	registerHandler(h)
 	return nil
@@ -150,6 +170,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 // Validate checks the configuration.
 func (h *Handler) Validate() error {
+	if len(h.RelayID) > 256 || strings.TrimSpace(h.RelayID) != h.RelayID {
+		return fmt.Errorf("relay_id must have at most 256 bytes and no leading or trailing whitespace")
+	}
 	if d := time.Duration(h.ConnectTimeout); d < time.Second || d > 2*time.Minute {
 		return fmt.Errorf("connect_timeout must be between 1s and 2m, not %s", d)
 	}
@@ -158,6 +181,13 @@ func (h *Handler) Validate() error {
 	}
 	if h.MaxTunnels < 1 {
 		return fmt.Errorf("max_tunnels must be at least 1")
+	}
+	if h.MaxTunnelsPerUser < 1 {
+		return fmt.Errorf("max_tunnels_per_user must be at least 1")
+	}
+	if h.MaxBytesPerSecondPerUser < 0 || h.MaxBytesPerSecondPerUser > 1<<40 ||
+		h.MaxUDPPacketsPerSecondPerUser < 0 || h.MaxUDPPacketsPerSecondPerUser > 1<<30 {
+		return fmt.Errorf("per-user traffic limits must be nonnegative and within supported ranges")
 	}
 	return nil
 }
@@ -249,13 +279,18 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		h.logRequest(r, kind, err == nil)
 	}
 	if err != nil {
+		var suppressed uint64
+		var logAllowed bool
+		if errors.Is(err, errAuthBusy) || errors.Is(err, errBadCredentials) && creds != "" {
+			suppressed, logAllowed = authenticationLogs.allow()
+		}
 		switch {
-		case errors.Is(err, errAuthBusy):
+		case logAllowed && errors.Is(err, errAuthBusy):
 			h.logger.Warn("relay authentication refused: too many verifications waiting",
-				zap.String("remote", r.RemoteAddr))
-		case errors.Is(err, errBadCredentials) && creds != "":
+				zap.String("remote", r.RemoteAddr), zap.Uint64("suppressed", suppressed))
+		case logAllowed && errors.Is(err, errBadCredentials) && creds != "":
 			h.logger.Warn("relay authentication failed",
-				zap.String("user", acct.name), zap.String("remote", r.RemoteAddr))
+				zap.String("user", acct.name), zap.String("remote", r.RemoteAddr), zap.Uint64("suppressed", suppressed))
 		}
 		if r.Method == http.MethodConnect {
 			// What a static Caddy site answers to CONNECT. Passing it on
@@ -272,6 +307,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if kind == udpRequest && malformedUpgrade(r) {
 		return h.refuse(w, r, refuseRequest)
 	}
+	if kind == udpRequest && r.ProtoMajor >= 2 && r.URL.Scheme != "https" {
+		return h.refuse(w, r, refuseRequest)
+	}
 	if !validTarget {
 		return h.refuse(w, r, refuseBadTarget)
 	}
@@ -285,6 +323,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return h.refuse(w, r, refuseTooMany)
 	}
 	defer openTunnels.Add(-1)
+	releaseUser, admitted := reserveUserTunnel(h, acct.name)
+	if !admitted {
+		return h.refuse(w, r, refuseTooMany)
+	}
+	defer releaseUser()
 
 	// Until the tunnel is established, a client that goes away (the request
 	// context) cancels it. After that the request context means different
@@ -311,9 +354,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	log := h.logger.With(zap.String("user", acct.name), zap.String("proto", r.Proto),
 		zap.String("target", t.String()), zap.String("remote", r.RemoteAddr))
 	if kind == tcpRequest {
-		return h.serveTCP(ctx, w, r, addrs, log, start, unfollow)
+		return h.serveTCP(ctx, w, r, addrs, log, start, unfollow, h.traffic[acct.name])
 	}
-	return h.serveUDP(ctx, w, r, addrs, log, start, unfollow)
+	return h.serveUDP(ctx, w, r, addrs, log, start, unfollow, h.traffic[acct.name])
 }
 
 func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, why *refusal) error {
@@ -327,7 +370,7 @@ func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, why *refusal) e
 }
 
 func (h *Handler) serveTCP(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	addrs []netip.AddrPort, log *zap.Logger, start time.Time, established func() bool) error {
+	addrs []netip.AddrPort, log *zap.Logger, start time.Time, established func() bool, budget *trafficBudget) error {
 	conn, err := dialTCP(ctx, addrs, time.Duration(h.ConnectTimeout))
 	if err != nil {
 		return h.refuse(w, r, dialRefusal(err))
@@ -339,7 +382,7 @@ func (h *Handler) serveTCP(ctx context.Context, w http.ResponseWriter, r *http.R
 		log.Debug("could not start the tunnel", zap.Error(err))
 		return nil
 	}
-	up, down, why, aborted := pumpTCP(ctx, cc, conn)
+	up, down, why, aborted := pumpTCPLimited(ctx, cc, conn, budget)
 	h.logEnd(log, "tcp", start, up, down, ctx, why, aborted)
 	if aborted {
 		cc.abort(why)
@@ -350,7 +393,7 @@ func (h *Handler) serveTCP(ctx context.Context, w http.ResponseWriter, r *http.R
 }
 
 func (h *Handler) serveUDP(ctx context.Context, w http.ResponseWriter, r *http.Request,
-	addrs []netip.AddrPort, log *zap.Logger, start time.Time, established func() bool) error {
+	addrs []netip.AddrPort, log *zap.Logger, start time.Time, established func() bool, budget *trafficBudget) error {
 	sock, err := dialUDP(addrs)
 	if err != nil {
 		return h.refuse(w, r, dialRefusal(err))
@@ -365,11 +408,14 @@ func (h *Handler) serveUDP(ctx context.Context, w http.ResponseWriter, r *http.R
 		log.Debug("could not start the tunnel", zap.Error(err))
 		return nil
 	}
-	u := &udpTunnel{cc: cc, sock: sock, idle: time.Duration(h.UDPIdleTimeout)}
+	u := &udpTunnel{cc: cc, sock: sock, idle: time.Duration(h.UDPIdleTimeout), budget: budget}
 	if datagrams {
 		u.h3 = cc.(*h3Client).str
 	}
 	up, down, why, aborted := u.run(ctx)
+	if n := u.dropped.Load(); n > 0 {
+		log.Debug("UDP payloads dropped by per-user traffic budget", zap.Int64("dropped", n))
+	}
 	h.logEnd(log, "udp", start, up, down, ctx, why, aborted)
 	if aborted {
 		cc.abort(why)
@@ -457,23 +503,31 @@ func (h *Handler) logEnd(log *zap.Logger, kind string, start time.Time, up, down
 // logRequest logs a proxy request as the device sent it, with credentials
 // reduced to the user name.
 func (h *Handler) logRequest(r *http.Request, kind requestKind, authenticated bool) {
+	suppressed, allowed := diagnosticLogs.allow()
+	if !allowed {
+		return
+	}
 	headers := make(map[string]string, len(r.Header))
 	for name, values := range r.Header {
 		v := strings.Join(values, ", ")
-		if name == "Authorization" || name == "Proxy-Authorization" {
+		canonical := http.CanonicalHeaderKey(name)
+		if canonical == "Authorization" || canonical == "Proxy-Authorization" {
 			user, _, ok := parseBasic(v)
 			if ok {
 				v = "Basic (user " + strconv.Quote(user) + ")"
 			} else {
 				v = "(hidden)"
 			}
+		} else if canonical == "Cookie" || canonical == "Set-Cookie" ||
+			strings.Contains(strings.ToLower(name), "token") || strings.Contains(strings.ToLower(name), "api-key") {
+			v = "(hidden)"
 		}
 		headers[name] = v
 	}
 	h.logger.Info("relay request",
 		zap.String("proto", r.Proto), zap.String("method", r.Method), zap.String("host", r.Host),
 		zap.String("path", r.URL.RequestURI()), zap.Bool("udp", kind == udpRequest),
-		zap.Bool("authenticated", authenticated), zap.Any("headers", headers),
+		zap.Bool("authenticated", authenticated), zap.Any("headers", headers), zap.Uint64("suppressed", suppressed),
 		zap.String("remote", r.RemoteAddr))
 }
 
