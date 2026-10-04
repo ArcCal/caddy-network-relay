@@ -126,7 +126,7 @@ type h3Conn struct {
 }
 
 func (c *relayClient) dialH3(ctx context.Context) (*h3Conn, error) {
-	qconf := &quic.Config{EnableDatagrams: !c.NoDatagrams, InitialPacketSize: 1350}
+	qconf := &quic.Config{EnableDatagrams: !c.NoDatagrams, InitialPacketSize: 1200}
 	var conn *quic.Conn
 	var err error
 	if c.PacketConn != nil {

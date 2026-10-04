@@ -227,7 +227,11 @@ func (p *policy) allows(ip netip.Addr) bool {
 		}
 	}
 	if p.hostAddrs != nil {
-		for _, own := range p.hostAddrs() {
+		ownAddrs := p.hostAddrs()
+		if len(ownAddrs) == 0 {
+			return false // fail closed if interface discovery never succeeded
+		}
+		for _, own := range ownAddrs {
 			if own.WithZone("") == ip {
 				return false
 			}
@@ -239,6 +243,11 @@ func (p *policy) allows(ip netip.Addr) bool {
 // resolve returns the addresses the target may be reached at, in the order
 // the resolver gave them.
 func (p *policy) resolve(ctx context.Context, t target) ([]netip.AddrPort, error) {
+	// RFC 6761 section 6.4: .invalid is reserved to produce negative
+	// answers. Do not depend on external resolver availability for it.
+	if t.host == "invalid" || strings.HasSuffix(t.host, ".invalid") {
+		return nil, refuseDNS(&net.DNSError{Name: t.host, Err: "reserved invalid domain", IsNotFound: true})
+	}
 	if p.blockedPorts[t.port] {
 		return nil, refusePort
 	}

@@ -655,12 +655,18 @@ func (pipeStream) CloseWrite() error { return nil }
 // The self-check's TCP test passes only on an HTTP answer, not on any bytes.
 func TestHTTPThrough(t *testing.T) {
 	for answer, ok := range map[string]bool{
-		"HTTP/1.1 200 OK\r\n":      true,
-		"HTTP/1.0 301 Moved\r\n":   true,
-		"not an HTTP response\r\n": false,
-		"HTTP/1.1 2xx\r\n":         false,
-		"SSH-2.0-OpenSSH_9.6\r\n":  false,
-		"HTTP/1.1\r\n":             false,
+		"HTTP/1.1 200 OK\r\n\r\n":                                                true,
+		"HTTP/1.0 301 Moved\r\n\r\n":                                             true,
+		"HTTP/1.1 200 OK\r\n":                                                    false,
+		"HTTP/1.1 200 OK\r\nBad Header\r\n\r\n":                                  false,
+		"HTTP/1.bad 200 OK\r\n\r\n":                                              false,
+		"HTTP/1.1 000 Bad\r\n\r\n":                                               false,
+		"HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\n\r\n":                   true,
+		"HTTP/1.1 200 OK\r\nX-Test: " + strings.Repeat("x", 33<<10) + "\r\n\r\n": false,
+		"not an HTTP response\r\n":                                               false,
+		"HTTP/1.1 2xx\r\n":                                                       false,
+		"SSH-2.0-OpenSSH_9.6\r\n":                                                false,
+		"HTTP/1.1\r\n":                                                           false,
 	} {
 		client, server := net.Pipe()
 		go func() {

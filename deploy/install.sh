@@ -136,9 +136,10 @@ say "==> Installing dependencies"
 run_apt update -qq
 run_apt install -y -qq ca-certificates curl python3 iproute2 >/dev/null
 
-if ((REPLACE_OLD)) && systemctl is-active --quiet network-relay 2>/dev/null; then
-    say "==> Disabling the old network-relay service (its files stay where they are)"
-    systemctl disable --now network-relay
+old_stopped=0
+old_enabled=0
+if ((REPLACE_OLD)) && systemctl is-enabled --quiet network-relay 2>/dev/null; then
+    old_enabled=1
 fi
 
 say "==> Preparing Go $GO_VERSION (only used for building, installed in $OPT/go)"
@@ -246,6 +247,7 @@ $email_line
 # names the destination (for example www.google.com:443) as its host.
 $DOMAIN, :443 {
 	network_relay {
+		relay_id $DOMAIN
 		$user_line
 	}
 
@@ -289,21 +291,29 @@ fi
 # there), restores the state from before the install.
 rollback() {
     set +e # restore as much as possible, whatever fails along the way
+    restore_failed=0
     say "The service did not start; restoring the state from before the install. Log:"
     journalctl -u caddy -n 40 --no-pager 2>/dev/null || true
     for f in "$BIN" "$CADDYFILE" "$UNIT"; do
         if [[ -e $backup/$(basename "$f") ]]; then
-            cp -p "$backup/$(basename "$f")" "$f"
+            cp -p "$backup/$(basename "$f")" "$f" || restore_failed=1
         elif ((!UPGRADE)); then
-            rm -f "$f"
+            rm -f "$f" || restore_failed=1
         fi
     done
-    systemctl daemon-reload
+    systemctl daemon-reload || restore_failed=1
     if ((was_active)); then
-        systemctl restart caddy || true
+        systemctl restart caddy || restore_failed=1
+        systemctl is-active --quiet caddy || restore_failed=1
     else
-        systemctl disable --now caddy >/dev/null 2>&1 || true
+        systemctl disable --now caddy >/dev/null 2>&1 || restore_failed=1
     fi
+    if ((old_stopped)); then
+        if ((old_enabled)); then systemctl enable network-relay || restore_failed=1; fi
+        systemctl restart network-relay || restore_failed=1
+        systemctl is-active --quiet network-relay || restore_failed=1
+    fi
+    ((restore_failed == 0)) || die 'Install failed; rollback is incomplete. Manual service recovery is required. The preceding log shows the failures.'
     die "Install failed and was rolled back. $( ((UPGRADE)) && echo 'The old version keeps running.' || echo 'Fix the cause, then run this again.')"
 }
 
@@ -314,6 +324,11 @@ mv -f "$BIN.new" "$BIN" || rollback
 install -m 644 "$SRC/deploy/caddy.service" "$UNIT" || rollback
 systemctl daemon-reload || rollback
 systemctl enable caddy >/dev/null 2>&1 || rollback
+if ((REPLACE_OLD)) && systemctl is-active --quiet network-relay 2>/dev/null; then
+    say "==> Disabling the old network-relay service (its files stay where they are)"
+    old_stopped=1
+    systemctl disable --now network-relay || rollback
+fi
 systemctl restart caddy || rollback
 sleep "${RELAY_TEST_SLEEP:-2}"
 systemctl is-active --quiet caddy || rollback

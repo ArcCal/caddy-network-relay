@@ -21,8 +21,39 @@ permissions:
   contents: write
 
 jobs:
+  verify:
+    name: verify release source
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.revision.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.release.tag_name || github.ref }}
+      - id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+      - name: Check pinned transport vulnerability records
+        run: |
+          mapfile -t transport_queries < <(jq -r '.snapshots[] | "\(.module)@\(.version)"' third_party/provenance.json)
+          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=query -json "${transport_queries[@]}" > transport-vulnerabilities.json
+          jq -s -e '[.[] | select(has("osv"))] | length == 0' transport-vulnerabilities.json
+      - run: python3 third_party/test_upstream.py
+      - run: RELAY_STRESS_MB=16 go test -race -count=1 -timeout 40m ./...
+      - run: shellcheck -S warning -e SC1111,SC1091 deploy/install.sh
+      - run: python3 deploy/test_install.py -v
+
   build:
     name: build ${{ matrix.os }}/${{ matrix.arch }}
+    needs: verify
+    permissions:
+      contents: read
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -36,7 +67,7 @@ jobs:
         with:
           # Run by hand: the branch picked in the Actions page (the release
           # step then creates the tag there if needed). Otherwise the tag.
-          ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.release.tag_name || github.ref }}
+          ref: ${{ needs.verify.outputs.sha }}
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
@@ -57,7 +88,7 @@ jobs:
 
   release:
     name: attach to the release
-    needs: build
+    needs: [verify, build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/download-artifact@v4
@@ -67,5 +98,6 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+          target_commitish: ${{ needs.verify.outputs.sha }}
           files: dist/*
           generate_release_notes: true

@@ -36,6 +36,10 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	}
 	for d.NextBlock(0) {
 		switch d.Val() {
+		case "relay_id":
+			if !d.AllArgs(&h.RelayID) || h.RelayID == "" {
+				return d.ArgErr()
+			}
 		case "user":
 			args := d.RemainingArgs()
 			if len(args) != 2 {
@@ -77,7 +81,8 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			} else {
 				h.UDPIdleTimeout = caddy.Duration(dur)
 			}
-		case "max_tunnels":
+		case "max_tunnels", "max_tunnels_per_user":
+			name := d.Val()
 			var s string
 			if !d.AllArgs(&s) {
 				return d.ArgErr()
@@ -86,7 +91,11 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			if err != nil {
 				return d.Errf("max_tunnels: %q is not a number", s)
 			}
-			h.MaxTunnels = n
+			if name == "max_tunnels" {
+				h.MaxTunnels = n
+			} else {
+				h.MaxTunnelsPerUser = n
+			}
 		case "log_requests":
 			if d.NextArg() {
 				return d.ArgErr()
