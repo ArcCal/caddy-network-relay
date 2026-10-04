@@ -35,6 +35,15 @@ var openTunnels atomic.Int64
 
 func registerHandler(h *Handler) {
 	registry.Lock()
+	for old := range registry.handlers {
+		if sameRelay(old, h) {
+			for name := range h.traffic {
+				if old.auth.has(account{name: name, hash: h.auth.users[name].PasswordHash}) && old.traffic[name] != nil {
+					h.traffic[name] = old.traffic[name]
+				}
+			}
+		}
+	}
 	registry.handlers[h] = struct{}{}
 	registry.Unlock()
 }
@@ -91,6 +100,8 @@ func addTunnel(t *liveTunnel) bool {
 func sameRelay(a, b *Handler) bool {
 	return a != nil && b != nil && a.RelayID != "" && a.RelayID == b.RelayID &&
 		a.UDPTemplate == b.UDPTemplate &&
+		a.MaxBytesPerSecondPerUser == b.MaxBytesPerSecondPerUser &&
+		a.MaxUDPPacketsPerSecondPerUser == b.MaxUDPPacketsPerSecondPerUser &&
 		reflect.DeepEqual(a.BlockedDestinations, b.BlockedDestinations) &&
 		reflect.DeepEqual(a.BlockedPorts, b.BlockedPorts)
 }

@@ -170,8 +170,21 @@ func TestIdleDatagramPathMTUDiscovery(t *testing.T) {
 					if err != nil {
 						return
 					}
-					if err := conn.SendDatagram(b); err != nil {
-						return
+					// MTU discovery is independent in each direction. The
+					// client may become ready before the echo server's path.
+					// Exercise the server's idle probe too, rather than silently
+					// abandoning its echo on DatagramTooLargeError.
+					deadline := time.Now().Add(2 * time.Second)
+					for {
+						err := conn.SendDatagram(b)
+						if err == nil {
+							break
+						}
+						var oversized *quic.DatagramTooLargeError
+						if !errors.As(err, &oversized) || time.Now().After(deadline) {
+							return
+						}
+						time.Sleep(10 * time.Millisecond)
 					}
 				}
 			}()

@@ -96,6 +96,21 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			} else {
 				h.MaxTunnelsPerUser = n
 			}
+		case "max_bytes_per_second_per_user", "max_udp_packets_per_second_per_user":
+			name := d.Val()
+			var s string
+			if !d.AllArgs(&s) {
+				return d.ArgErr()
+			}
+			n, err := strconv.ParseInt(s, 10, 64)
+			if err != nil {
+				return d.Errf("%s: invalid integer %q", name, s)
+			}
+			if name == "max_bytes_per_second_per_user" {
+				h.MaxBytesPerSecondPerUser = n
+			} else {
+				h.MaxUDPPacketsPerSecondPerUser = n
+			}
 		case "log_requests":
 			if d.NextArg() {
 				return d.ArgErr()

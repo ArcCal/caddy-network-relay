@@ -183,7 +183,7 @@ caddy network-relay profile --host relay.example.com --user ipad --domains-file 
 
 ### Removing a user / changing a password
 
-Delete that user's line from the Caddyfile (to change the password, replace it with the line a new `passwd` prints), then run `systemctl reload caddy`. That user's open connections **are closed immediately**. Other users retain their tunnels only when `relay_id` and destination policy are unchanged; without `relay_id`, all old tunnels are revoked. After changing a password, regenerate the profile and install it again.
+Delete that user's line from the Caddyfile (to change the password, replace it with the line a new `passwd` prints), then run `systemctl reload caddy`. That user's open connections **are closed immediately**. Other users retain their tunnels only when `relay_id` and destination and traffic-budget policies are unchanged; without `relay_id`, all old tunnels are revoked. After changing a password, regenerate the profile and install it again.
 
 ### Upgrading
 
@@ -211,7 +211,7 @@ Self-check (the password is read from the file and not shown):
 caddy network-relay check --server relay.example.com --address 127.0.0.1 --user iphone --password-stdin < /etc/caddy/relay/iphone.password
 ```
 
-To see which requests a device actually sends: add a `log_requests` line inside `network_relay { ... }`, run `systemctl reload caddy`, then read the log. It is noisy; remove it when you are done.
+To see which requests a device actually sends: add a `log_requests` line inside `network_relay { ... }`, run `systemctl reload caddy`, then read the log. It samples at most 10 requests per second process-wide (burst 20), reports suppressed counts, and is not a complete access log; remove it when you are done.
 
 ### Regenerating the profiles
 
@@ -326,7 +326,9 @@ The `network_relay` directive (`"handler": "network_relay"` in JSON):
 | `max_tunnels <count>` | `1024` | Limit on the TCP connections and UDP flows forwarded at the same time, across all users; beyond it the answer is 503 |
 | `relay_id <id>` | none | Unique security-domain ID. Matching IDs, unchanged destination policy and unchanged credentials allow tunnels to survive reload. Without an ID, reload revokes all old tunnels. Do not share IDs across tenants |
 | `max_tunnels_per_user <count>` | `128` | Per-user concurrent tunnel budget, shared across reloads of the same relay ID |
-| `log_requests` | off | Log one line for each proxy request (with its headers; credentials show only the user name) |
+| `max_bytes_per_second_per_user <bytes>` | `0` (unlimited) | Aggregate TCP/UDP payload budget across upload, download and all tunnels of one user; TCP waits with cancellation, UDP drops excess packets. Burst: 128 KiB |
+| `max_udp_packets_per_second_per_user <packets>` | `0` (unlimited) | Aggregate UDP upload/download packet budget per user; burst is min(rate, 1024) |
+| `log_requests` | off | Sample redacted requests, process-wide limit 10/s and burst 20; suppressed counts accompany the next sample |
 
 Status codes and `Proxy-Status` (RFC 9209) on refusal:
 
