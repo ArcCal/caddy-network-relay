@@ -89,6 +89,7 @@ func freePort(t *testing.T) int {
 // relay handler (with the given options merged in) and a website.
 func relayConfig(port int, relay map[string]any, server map[string]any) []byte {
 	handler := map[string]any{
+		"relay_id":             "test-relay-" + strconv.Itoa(port),
 		"handler":              "network_relay",
 		"users":                []map[string]string{{"name": "alice", "password_hash": testHash}},
 		"blocked_destinations": []string{},
