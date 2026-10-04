@@ -58,7 +58,7 @@ moves while the jobs run. These checks do not replace staging validation.
 
 ## Verification in the audit environment (2026-10-04)
 
-- The final complete race suite passed: 66 top-level tests and 78 subtests, with
+- Go 1.26.8 and Go 1.27.0 complete race suites passed: 74 top-level tests and 84 subtests, with
   the external real-server HTTP/3 test skipped. Endpoint lifecycle fixes also
   passed separate five-run race regressions. No race was reported.
 - Five runs of nested QUIC, minimum-MTU handshake and idle datagram DPLPMTUD
@@ -69,8 +69,12 @@ moves while the jobs run. These checks do not replace staging validation.
 - Four release targets compiled: Linux and Darwin, amd64 and arm64. Linux IPv4
   and IPv6 sockets expose the required no-fragmentation policy. Darwin behavior
   still requires native testing, and Apple client compatibility requires devices.
-- The installer has 14 passing tests, using the real build with service-manager
-  stubs. Native systemd recovery is an independent staging requirement.
+- The installer has 16 passing tests, using the real build with service-manager
+  stubs. Additional native Debian 12 systemd fault injection verified failed
+  upgrades from active/enabled, inactive/enabled and inactive/disabled states,
+  plus failed fresh-install cleanup. The lab used preinstalled prerequisites and
+  an injected startup-failing candidate, with real validation and service manager.
+  External package downloads, ACME and native Rust migration remain staging gates.
 - Patched upstream QUIC, H3 and H2 tests passed via the reproducible snapshot
   checker. Two H3 assertions explicitly require the preserved CONNECT scheme.
 - govulncheck v1.8.0 ran against the official golang/vulndb GitHub OSV snapshot
@@ -80,8 +84,15 @@ moves while the jobs run. These checks do not replace staging validation.
   affected OpenPGP package is in the dependency graph. Explicit queries for the
   two replaced upstream module versions returned no records. This snapshot
   check is not a guarantee against future advisories or defects in local patches.
-- Go 1.27 could not be downloaded through the configured proxy; it remains
-  unverified here. All current checks used Go 1.26.8.
+- Official Go 1.27.0 was downloaded from dl.google.com and verified against
+  the SHA-256 published by go.dev. Its transport regressions and patched upstream
+  tests passed, including explicit http2legacy tests. Full suite results are
+  recorded separately in the verification artifacts. The 1.26 run initially
+  exposed a test echo-server defect: peer MTU discovery completes independently
+  in each direction. The corrected test keeps its original time bounds and
+  passed 20 consecutive Go 1.26 and ten Go 1.27 race-enabled runs. The
+  corrected Go 1.26 complete suite subsequently passed (266.277 s); the
+  Go 1.27 complete suite passed in 306.541 s.
 
 ## Required staging checks before rollout
 
@@ -91,16 +102,18 @@ moves while the jobs run. These checks do not replace staging validation.
    versions for every emitted profile key and the applicable enrollment mode.
 2. Exercise the expected concurrent devices, users and tunnel mix. Measure RSS,
    CPU, FD count, packet/byte rate, rejection rate and p99. Test slow peers,
-   blackholes, high-rate UDP, and a compromised account. Limits do not provide
-   bandwidth/PPS fairness; deploy per-tenant traffic shaping and ingress rate
-   limits appropriate for the expected shared NAT population.
+   blackholes, high-rate UDP, and a compromised account. Configure the per-user payload and UDP packet budgets for expected use;
+   both default to unlimited. They share credits across directions, tunnels and
+   unchanged same-domain reloads, and do not reset on reconnect. This is an
+   aggregate ceiling, not scheduling fairness between a user's tunnels. Also
+   deploy ingress rate limits appropriate for the expected shared NAT population.
 3. Audit destination allow/block policy and egress firewall, including local
    public addresses, cloud-NAT public mappings, metadata and adjacent networks.
    A custom blocked_destinations list replaces default protections. Interface
    addresses refresh every ten seconds, so newly assigned addresses require
    firewall protection during the refresh window.
 4. Test install/restart/reload/rollback using actual systemd and target OS. The
-   automated installer tests use stubs; they cannot certify service manager,
+   automated installer tests and limited native recovery lab cannot certify every
    firewall, privilege, ACME or packet behavior. Check memory and socket limits.
 5. Run govulncheck and the upstream transport tests in an environment with access
    to the relevant databases. Review the pinned dependency patches independently.
@@ -115,3 +128,38 @@ migrated Rust service. Recovery failures explicitly report incomplete rollback;
 the script does not promise that a failed recovery left the old service running.
 External DNS/Internet checks may fail independently of relay health; inspect
 their cause instead of treating an open socket as proof of success.
+
+## Additional hardening and capacity checks (2026-10-04)
+
+Repeated cached invalid credentials previously produced 200 warnings for 200
+requests. Authentication warnings now have a process-wide 5/s budget (burst 10),
+with suppressed counts. Optional diagnostic requests have a separate 10/s
+budget (burst 20), applied before header formatting. These logs are sampled;
+use external counters when exact incident accounting is required.
+
+Optional per-user byte and UDP packet ceilings constrain compromised accounts.
+Payload bytes exclude transport headers and refused or dropped traffic; UDP
+attempts can consume credits even if a later socket write fails. UDP packet
+credits cover zero-byte packets too. A byte burst permits 128 KiB; packet burst
+is min(configured rate, 1024). TCP backpressure and cancellation remain intact.
+Changing either budget revokes old tunnels rather than grandfathering old policy.
+Three-protocol TCP integrity and UDP excess-drop regressions passed.
+
+A race-enabled test held 1,000 distinct accounts and H3 connections simultaneously,
+checked data integrity, reloaded, verified the global ceiling, exchanged more
+data on every existing tunnel, and checked tunnel/H3/user-quota counts returned
+to zero. Combined in-process client and server heap growth was 260.6 MiB and
+FD growth was 5,000; admission p50 was 1.433 s and p99 2.009 s with 16 admission
+workers. These are laboratory measurements, not production SLOs or server-only
+resource estimates.
+
+A separately running Caddy under actual systemd passed authenticated and
+unauthenticated HTTP/1.1, HTTP/2 and HTTP/3 TCP/UDP CLI checks, plus the previously
+external-only H3 test with two tunnels carrying 64 MiB in each direction.
+The fixture used a locally trusted certificate and local TCP/DNS targets.
+It does not verify Apple devices, public PKI, NAT64 or mobile network handoff.
+
+Installer transactions now hold a root-owned private lock throughout detection,
+build and replacement, use private unique backup directories, preserve enabled
+and active state separately, and stop/disable the failed candidate before
+removing its unit during fresh-install rollback.

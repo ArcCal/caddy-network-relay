@@ -66,7 +66,9 @@ def main():
                 packages = [".", "./http3"]
             print(f"Testing patched {module}@{version}", flush=True)
             subprocess.run(["go", "test", "-p", str(os.cpu_count() and min(4, os.cpu_count())),
-                            "-race", "-count=1", "-timeout=10m", *packages],
+                            "-race", "-count=1", "-timeout=10m",
+                            *(["-tags=http2legacy"] if local.name == "x-net" else []),
+                            *packages],
                            cwd=target, check=True)
 
 
