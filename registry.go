@@ -3,6 +3,7 @@ package networkrelay
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"sync/atomic"
 )
@@ -50,7 +51,7 @@ func unregisterHandler(h *Handler) {
 		}
 		t.owner = nil
 		for other := range registry.handlers {
-			if other.auth.has(t.acct) {
+			if sameRelay(h, other) && other.auth.has(t.acct) {
 				t.owner = other
 				break
 			}
@@ -68,9 +69,10 @@ func addTunnel(t *liveTunnel) bool {
 	registry.Lock()
 	defer registry.Unlock()
 	if _, live := registry.handlers[t.owner]; !live {
+		old := t.owner
 		t.owner = nil
 		for other := range registry.handlers {
-			if other.auth.has(t.acct) {
+			if sameRelay(old, other) && other.auth.has(t.acct) {
 				t.owner = other
 				break
 			}
@@ -81,6 +83,16 @@ func addTunnel(t *liveTunnel) bool {
 	}
 	registry.tunnels[t] = struct{}{}
 	return true
+}
+
+// Policy changes revoke existing tunnels rather than grandfathering targets
+// newly forbidden by the next configuration. An explicit ID is needed: a
+// password hash is not a tenant identifier.
+func sameRelay(a, b *Handler) bool {
+	return a != nil && b != nil && a.RelayID != "" && a.RelayID == b.RelayID &&
+		a.UDPTemplate == b.UDPTemplate &&
+		reflect.DeepEqual(a.BlockedDestinations, b.BlockedDestinations) &&
+		reflect.DeepEqual(a.BlockedPorts, b.BlockedPorts)
 }
 
 func removeTunnel(t *liveTunnel) {

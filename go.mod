@@ -4,6 +4,10 @@ go 1.26.0
 
 toolchain go1.26.8
 
+replace github.com/quic-go/quic-go => ./third_party/quic-go
+
+replace golang.org/x/net => ./third_party/x-net
+
 require (
 	github.com/caddyserver/caddy/v2 v2.11.6
 	github.com/quic-go/masque-go v0.6.0

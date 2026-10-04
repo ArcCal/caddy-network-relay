@@ -31,10 +31,27 @@ func init() {
 // HTTP/3: it listens on the same UDP ports Caddy would have used, with
 // Caddy's certificates, and hands every request to the same Caddy server.
 type App struct {
-	mu      sync.Mutex
-	servers []*relayServer
-	ctx     caddy.Context
-	logger  *zap.Logger
+	mu       sync.Mutex
+	servers  []*relayServer
+	ctx      caddy.Context
+	logger   *zap.Logger
+	relayIDs map[string]struct{}
+}
+
+func (a *App) claimRelayID(id string) error {
+	if id == "" {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.relayIDs == nil {
+		a.relayIDs = make(map[string]struct{})
+	}
+	if _, exists := a.relayIDs[id]; exists {
+		return fmt.Errorf("relay_id %q is used by multiple handlers; each security domain needs a unique ID", id)
+	}
+	a.relayIDs[id] = struct{}{}
+	return nil
 }
 
 // CaddyModule returns the Caddy module information.
@@ -86,6 +103,12 @@ func (a *App) addServer(srv *caddyhttp.Server) *relayServer {
 		}
 	}
 	s := &relayServer{srv: srv}
+	if srv.ReadHeaderTimeout <= 0 {
+		srv.ReadHeaderTimeout = caddy.Duration(10 * time.Second)
+	}
+	if srv.MaxHeaderBytes <= 0 {
+		srv.MaxHeaderBytes = 32 << 10
+	}
 	for i, addr := range srv.Listen {
 		protocols := &srv.Protocols
 		if i < len(srv.ListenProtocols) && srv.ListenProtocols[i] != nil {
@@ -145,13 +168,20 @@ func (a *App) Start() error {
 		}
 		tlsConf := http3.ConfigureTLSConfig(s.srv.TLSConnPolicies.TLSConfig(a.ctx))
 		s.h3 = &http3.Server{
-			Handler:         h3Handler{next: s.srv},
-			ConnContext:     withQUICConn,
-			EnableDatagrams: true,
-			MaxHeaderBytes:  s.srv.MaxHeaderBytes,
-			IdleTimeout:     time.Duration(s.srv.IdleTimeout),
+			Handler:           h3Handler{next: s.srv},
+			ConnContext:       withQUICConn,
+			EnableDatagrams:   true,
+			MaxHeaderBytes:    s.srv.MaxHeaderBytes,
+			ReadHeaderTimeout: time.Duration(s.srv.ReadHeaderTimeout),
+			IdleTimeout:       time.Duration(s.srv.IdleTimeout),
 		}
 		ports := map[int]bool{}
+		if s.h3.ReadHeaderTimeout <= 0 {
+			s.h3.ReadHeaderTimeout = 10 * time.Second
+		}
+		if s.h3.MaxHeaderBytes <= 0 {
+			s.h3.MaxHeaderBytes = 32 << 10
+		}
 		for _, addr := range s.h3Listen {
 			na, err := caddy.ParseNetworkAddressWithDefaults(addr, "tcp", 443)
 			if err != nil {
@@ -232,8 +262,10 @@ type endpoint struct {
 	ln   *quic.EarlyListener
 	// users holds one entry per configuration using the endpoint, oldest
 	// first; the newest one gets new connections. Guarded by endpoints.
-	users  []endpointUser
-	logger *zap.Logger
+	users   []endpointUser
+	logger  *zap.Logger
+	closing bool
+	closed  chan struct{}
 }
 
 type endpointUser struct {
@@ -260,16 +292,17 @@ var endpoints = struct {
 	m map[string]*endpoint
 }{m: map[string]*endpoint{}}
 
-// quicConfig: up to 1024 concurrent streams (each TCP connection of a
-// device is a stream), large flow-control windows, and an initial packet
-// size of 1350 bytes: relayed QUIC packets are at least 1200 bytes (RFC
-// 9000 §14.1) and need room for the outer QUIC header, the DATAGRAM frame
-// and the context ID. No 0-RTT: a replayed CONNECT would open a second
-// tunnel.
+// Process-wide admission, including old configurations during reload.
+var h3Connections = make(chan struct{}, 1024)
+
+// Start at QUIC's minimum datagram size and let path MTU discovery grow
+// packets. The inner datagram size must not dictate the outer handshake
+// size: an IPv6 minimum-MTU path cannot carry a 1350-byte UDP payload.
+// No 0-RTT: a replayed CONNECT would open a second tunnel.
 func quicConfig() *quic.Config {
 	return &quic.Config{
 		EnableDatagrams:                true,
-		InitialPacketSize:              1350,
+		InitialPacketSize:              1200,
 		MaxIncomingStreams:             1024,
 		MaxIncomingUniStreams:          16,
 		InitialStreamReceiveWindow:     1 << 20,
@@ -291,6 +324,12 @@ func quicConfig() *quic.Config {
 func acquireEndpoint(network, hostport string, u endpointUser, logger *zap.Logger) (*endpoint, error) {
 	key := network + "/" + hostport
 	endpoints.Lock()
+	for ep := endpoints.m[key]; ep != nil && ep.closing; ep = endpoints.m[key] {
+		closed := ep.closed
+		endpoints.Unlock()
+		<-closed
+		endpoints.Lock()
+	}
 	defer endpoints.Unlock()
 	if ep, ok := endpoints.m[key]; ok {
 		ep.users = append(ep.users, u)
@@ -300,7 +339,7 @@ func acquireEndpoint(network, hostport string, u endpointUser, logger *zap.Logge
 	if err != nil {
 		return nil, fmt.Errorf("%v (is something else, such as Caddy's own HTTP/3, using this UDP port?)", err)
 	}
-	ep := &endpoint{key: key, conn: conn, users: []endpointUser{u}, logger: logger}
+	ep := &endpoint{key: key, conn: conn, users: []endpointUser{u}, logger: logger, closed: make(chan struct{})}
 	ep.tr = &quic.Transport{Conn: conn}
 	ep.ln, err = ep.tr.ListenEarly(&tls.Config{
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
@@ -336,7 +375,14 @@ func (ep *endpoint) accept() {
 			return
 		}
 		s := u.server
+		select {
+		case h3Connections <- struct{}{}:
+		default:
+			_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeExcessiveLoad), "connection limit")
+			continue
+		}
 		go func() {
+			defer func() { <-h3Connections }()
 			if err := s.ServeQUICConn(conn); err == http.ErrServerClosed {
 				_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
 			}
@@ -348,20 +394,33 @@ func (ep *endpoint) accept() {
 // Removing the last one closes the socket.
 func (ep *endpoint) release(s *http3.Server) {
 	endpoints.Lock()
-	defer endpoints.Unlock()
+	if ep.closing {
+		endpoints.Unlock()
+		return
+	}
+	found := false
 	for i, u := range ep.users {
 		if u.server == s {
 			ep.users = append(ep.users[:i], ep.users[i+1:]...)
+			found = true
 			break
 		}
 	}
-	if len(ep.users) > 0 {
+	if !found || len(ep.users) > 0 {
+		endpoints.Unlock()
 		return
 	}
-	delete(endpoints.m, ep.key)
+	ep.closing = true
+	endpoints.Unlock()
+	// Closing a transport can wait for TLS callbacks, which call current
+	// and need endpoints' lock. Never close while holding that lock.
 	ep.ln.Close()
 	ep.tr.Close()
 	ep.conn.Close()
+	endpoints.Lock()
+	delete(endpoints.m, ep.key)
+	close(ep.closed)
+	endpoints.Unlock()
 }
 
 // Interface guards

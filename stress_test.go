@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -394,6 +395,15 @@ func newLossyPacketConn(t *testing.T, loss float64, delay, jitter time.Duration,
 	}()
 	t.Cleanup(func() { c.Close() })
 	return c
+}
+
+// Preserve the underlying UDP socket's DF capability while keeping all reads
+// and writes on the impaired path. Without this, quic-go disables path MTU
+// discovery and a minimum-size outer connection can never carry inner QUIC.
+func (c *lossyPacketConn) SyscallConn() (syscall.RawConn, error) {
+	return c.PacketConn.(interface {
+		SyscallConn() (syscall.RawConn, error)
+	}).SyscallConn()
 }
 
 // Close stops the queues and unblocks ReadFrom, as quic-go's Transport

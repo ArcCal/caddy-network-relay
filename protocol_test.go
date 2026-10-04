@@ -421,5 +421,8 @@ func validateStandalone(h *Handler) error {
 	if h.MaxTunnels == 0 {
 		h.MaxTunnels = 1
 	}
+	if h.MaxTunnelsPerUser == 0 {
+		h.MaxTunnelsPerUser = defaultMaxUserTunnels
+	}
 	return h.Validate()
 }

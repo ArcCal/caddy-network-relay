@@ -31,7 +31,8 @@ func init() {
 const (
 	defaultConnectTimeout = 10 * time.Second
 	defaultUDPIdleTimeout = 5 * time.Minute
-	defaultMaxTunnels     = 20000
+	defaultMaxTunnels     = 1024
+	defaultMaxUserTunnels = 128
 
 	// connectUDP is the upgrade token / :protocol of CONNECT-UDP.
 	connectUDP = "connect-udp"
@@ -40,6 +41,9 @@ const (
 // Handler relays TCP and UDP for authenticated clients and passes every
 // other request on to the next handler (the website).
 type Handler struct {
+	// Stable security domain for retaining tunnels across reloads. Omit it
+	// to revoke this handler's tunnels on every reload. Never reuse across tenants.
+	RelayID string `json:"relay_id,omitempty"`
 	// Accounts allowed to use the relay; one per device.
 	Users []User `json:"users,omitempty"`
 
@@ -66,8 +70,9 @@ type Handler struct {
 	UDPIdleTimeout caddy.Duration `json:"udp_idle_timeout,omitempty"`
 
 	// Most tunnels (TCP connections and UDP flows) open at once, across all
-	// users. Default: 20000.
-	MaxTunnels int `json:"max_tunnels,omitempty"`
+	// users. Default: 1024; size this against memory and file descriptors.
+	MaxTunnels        int `json:"max_tunnels,omitempty"`
+	MaxTunnelsPerUser int `json:"max_tunnels_per_user,omitempty"`
 
 	// Log every proxy request with its headers (credentials reduced to
 	// the user name). Noisy; for finding out what a device sends.
@@ -121,6 +126,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	if h.MaxTunnels == 0 {
 		h.MaxTunnels = defaultMaxTunnels
 	}
+	if h.MaxTunnelsPerUser == 0 {
+		h.MaxTunnelsPerUser = defaultMaxUserTunnels
+	}
 	if h.auth, err = newAuthenticator(h.Users); err != nil {
 		return err
 	}
@@ -142,7 +150,11 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		if err != nil {
 			return err
 		}
-		h.server = appIface.(*App).addServer(srv)
+		app := appIface.(*App)
+		if err := app.claimRelayID(h.RelayID); err != nil {
+			return err
+		}
+		h.server = app.addServer(srv)
 	}
 	registerHandler(h)
 	return nil
@@ -150,6 +162,9 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 
 // Validate checks the configuration.
 func (h *Handler) Validate() error {
+	if len(h.RelayID) > 256 || strings.TrimSpace(h.RelayID) != h.RelayID {
+		return fmt.Errorf("relay_id must have at most 256 bytes and no leading or trailing whitespace")
+	}
 	if d := time.Duration(h.ConnectTimeout); d < time.Second || d > 2*time.Minute {
 		return fmt.Errorf("connect_timeout must be between 1s and 2m, not %s", d)
 	}
@@ -158,6 +173,9 @@ func (h *Handler) Validate() error {
 	}
 	if h.MaxTunnels < 1 {
 		return fmt.Errorf("max_tunnels must be at least 1")
+	}
+	if h.MaxTunnelsPerUser < 1 {
+		return fmt.Errorf("max_tunnels_per_user must be at least 1")
 	}
 	return nil
 }
@@ -272,6 +290,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if kind == udpRequest && malformedUpgrade(r) {
 		return h.refuse(w, r, refuseRequest)
 	}
+	if kind == udpRequest && r.ProtoMajor >= 2 && r.URL.Scheme != "https" {
+		return h.refuse(w, r, refuseRequest)
+	}
 	if !validTarget {
 		return h.refuse(w, r, refuseBadTarget)
 	}
@@ -285,6 +306,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return h.refuse(w, r, refuseTooMany)
 	}
 	defer openTunnels.Add(-1)
+	releaseUser, admitted := reserveUserTunnel(h, acct.name)
+	if !admitted {
+		return h.refuse(w, r, refuseTooMany)
+	}
+	defer releaseUser()
 
 	// Until the tunnel is established, a client that goes away (the request
 	// context) cancels it. After that the request context means different
@@ -460,13 +486,17 @@ func (h *Handler) logRequest(r *http.Request, kind requestKind, authenticated bo
 	headers := make(map[string]string, len(r.Header))
 	for name, values := range r.Header {
 		v := strings.Join(values, ", ")
-		if name == "Authorization" || name == "Proxy-Authorization" {
+		canonical := http.CanonicalHeaderKey(name)
+		if canonical == "Authorization" || canonical == "Proxy-Authorization" {
 			user, _, ok := parseBasic(v)
 			if ok {
 				v = "Basic (user " + strconv.Quote(user) + ")"
 			} else {
 				v = "(hidden)"
 			}
+		} else if canonical == "Cookie" || canonical == "Set-Cookie" ||
+			strings.Contains(strings.ToLower(name), "token") || strings.Contains(strings.ToLower(name), "api-key") {
+			v = "(hidden)"
 		}
 		headers[name] = v
 	}

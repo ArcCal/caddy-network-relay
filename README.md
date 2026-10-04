@@ -183,7 +183,7 @@ caddy network-relay profile --host relay.example.com --user ipad --domains-file 
 
 ### Removing a user / changing a password
 
-Delete that user's line from the Caddyfile (to change the password, replace it with the line a new `passwd` prints), then run `systemctl reload caddy`. That user's open connections **are closed immediately**; other users are not affected. After changing a password, regenerate the profile and install it again.
+Delete that user's line from the Caddyfile (to change the password, replace it with the line a new `passwd` prints), then run `systemctl reload caddy`. That user's open connections **are closed immediately**. Other users retain their tunnels only when `relay_id` and destination policy are unchanged; without `relay_id`, all old tunnels are revoked. After changing a password, regenerate the profile and install it again.
 
 ### Upgrading
 
@@ -279,14 +279,13 @@ Needs Go 1.26 (the exact version is in `go.mod`; with `GOTOOLCHAIN=auto` it is d
 go build -tags http2legacy -o caddy ./cmd/caddy
 ```
 
-`cmd/caddy` is Caddy's standard modules plus this plugin. xcaddy works too (the repository is private, so use a local directory):
-
-```bash
-XCADDY_GO_BUILD_FLAGS="-tags http2legacy" xcaddy build --with github.com/arccal/caddy-network-relay=./caddy-network-relay
-```
-
-- `-tags http2legacy`: required when building with Go 1.27 or newer; otherwise UDP over HTTP/2 (extended CONNECT) is only turned on when the environment variable `GODEBUG=http2xconnect=1` is set (the plugin logs a warning). With Go 1.26 it makes no difference.
-- Adding `Environment=GODEBUG=http2xconnect=1` to the systemd unit never hurts ([deploy/caddy.service](deploy/caddy.service) does exactly that).
+`cmd/caddy` includes Caddy's standard modules and this plugin. Build from this
+repository root: the `go.mod` replacements select the reviewed transport sources
+in `third_party`. Go ignores a dependency's replacements, so an ordinary xcaddy
+`--with` build does **not** include these fixes. Custom builds must apply both
+replacements in their main module. The patched x/net HTTP/2 implementation is
+used on all supported Go versions; the `http2legacy` tag remains accepted for
+existing build scripts. See [transport patch provenance](third_party/README.md).
 
 ### Caddyfile
 
@@ -308,7 +307,7 @@ Key points:
 2. `network_relay` is automatically ordered before every other directive in the site (no `order` needed). Requests without the right password are passed to the directives after it (your website); CONNECT requests without a password get 405 (just like an ordinary Caddy static site) and are not passed on, so that no directive can answer 2xx and have that taken as "tunnel established".
 3. The plugin **automatically takes over HTTP/3 for the server this site belongs to** (Caddy's own HTTP/3 is turned off for that server, and the plugin serves it on the same UDP port instead); no extra configuration is needed. If you removed `h3` from `servers { protocols ... }`, the plugin does not serve HTTP/3 either, and the profile then needs `--no-http3`.
 4. Other sites on the same Caddy keep working as usual. But if a device goes through the relay to **another domain served by the same Caddy**, the CONNECT is received by that domain's site and fails: add those domains to the profile with `--exclude-domain`.
-5. On reload, connections of devices whose user and password did not change stay up; removed users and users whose password changed are disconnected immediately.
+5. On reload, a tunnel stays up only when its explicit `relay_id`, destination policy and credentials remain valid. Omitting the ID or tightening destination policy revokes old tunnels; removed users and changed passwords revoke their tunnels immediately.
 
 ---
 
@@ -324,7 +323,9 @@ The `network_relay` directive (`"handler": "network_relay"` in JSON):
 | `blocked_ports [<port>...]` | `25` | Ports devices may not reach (TCP and UDP). 25 is the port for sending mail; it is blocked so that the relay cannot be used to send spam |
 | `connect_timeout <duration>` | `10s` | Timeout for connecting to a TCP destination, 1s–2m |
 | `udp_idle_timeout <duration>` | `5m` | How long a UDP flow may go without packets in either direction before it is closed, 2m–1h |
-| `max_tunnels <count>` | `20000` | Limit on the TCP connections and UDP flows forwarded at the same time, across all users; beyond it the answer is 503 |
+| `max_tunnels <count>` | `1024` | Limit on the TCP connections and UDP flows forwarded at the same time, across all users; beyond it the answer is 503 |
+| `relay_id <id>` | none | Unique security-domain ID. Matching IDs, unchanged destination policy and unchanged credentials allow tunnels to survive reload. Without an ID, reload revokes all old tunnels. Do not share IDs across tenants |
+| `max_tunnels_per_user <count>` | `128` | Per-user concurrent tunnel budget, shared across reloads of the same relay ID |
 | `log_requests` | off | Log one line for each proxy request (with its headers; credentials show only the user name) |
 
 Status codes and `Proxy-Status` (RFC 9209) on refusal:
@@ -404,3 +405,10 @@ When an Apple device relays UDP over HTTP/3, the UDP packets travel in QUIC DATA
 UDP over HTTP/2 needs extended CONNECT (RFC 8441), which Go's HTTP/2 implementation turns off by default; the plugin turns it on at startup (details in the [design document](docs/design.md)).
 
 More: the [design document](docs/design.md) (protocol details, spec conformance, known limitations, tests), [deployment details](docs/deploy.md) (which files the script writes, manual upgrades, changing the domain), and [notes on the domain lists](deploy/domains/README.md).
+
+### Production validation
+
+See [production readiness and rollout](docs/production-readiness.md) for resource
+budgets, transport patch maintenance, configuration migration and outstanding
+Apple/device and staging checks. Passing automated tests is not a guarantee of
+production readiness for an untested deployment.
