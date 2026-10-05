@@ -3,12 +3,17 @@ package networkrelay
 import (
 	"bytes"
 	"context"
-	"errors"
+	"encoding/binary"
 	"fmt"
+	"net"
+	"net/netip"
+	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/quic-go/quic-go"
 	"golang.org/x/net/dns/dnsmessage"
 )
 
@@ -28,7 +33,7 @@ func TestHashVerificationBudget(t *testing.T) {
 }
 
 func TestRelaySecurityDomains(t *testing.T) {
-	a, err := newAuthenticator([]User{{"alice", testHash}})
+	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +57,7 @@ func TestRelaySecurityDomains(t *testing.T) {
 			defer unregisterHandler(other)
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
-			lt := &liveTunnel{acct: account{name: "alice", hash: testHash}, owner: first, cancel: cancel}
+			lt := &liveTunnel{acct: a.accountOf("alice"), owner: first, cancel: cancel}
 			if !addTunnel(lt) {
 				t.Fatal("initial add")
 			}
@@ -94,43 +99,57 @@ func TestPerUserTunnelBudget(t *testing.T) {
 	again()
 }
 
-func TestSharedCredentialWaitersBounded(t *testing.T) {
-	a, err := newAuthenticator([]User{{"alice", testHash}})
+// Requests waiting for another request's verification of the same header
+// cost no hash, so they take none of the limited places (G-2): a device
+// opening many tunnels at once with new credentials is never refused.
+func TestSharedCredentialWaitersAreNotRefused(t *testing.T) {
+	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range cap(a.slots) {
 		a.slots <- struct{}{}
 	}
-	defer func() {
-		for range cap(a.slots) {
-			<-a.slots
-		}
-	}()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, cap(authenticationPending))
-	for range cap(authenticationPending) {
-		go func() { _, err := a.verify(ctx, BasicAuthorization("unknown", "same")); done <- err }()
+	good := BasicAuthorization("alice", testPassword)
+	verified.Lock()
+	delete(verified.m, headerID(good))
+	verified.Unlock()
+	conn := &connState{}
+	from := requester{ip: netip.MustParseAddr("192.0.2.77"), conn: conn}
+	waiters := 3 * cap(authenticationPending)
+	done := make(chan error, waiters)
+	for range waiters {
+		go func() { _, err := a.verifyFrom(context.Background(), good, from); done <- err }()
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for len(authenticationPending) != cap(authenticationPending) {
+	for {
+		a.mu.Lock()
+		n := len(a.inflight)
+		a.mu.Unlock()
+		if n == 1 {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("waiters did not arrive")
+			t.Fatal("the verification did not start")
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, err := a.verify(ctx, BasicAuthorization("unknown", "same")); !errors.Is(err, errAuthBusy) {
-		t.Fatalf("unbounded same-header waiters: %v", err)
+	if n := len(authenticationPending); n != 1 {
+		t.Fatalf("%d places taken for one header", n)
 	}
-	cancel()
-	for range cap(authenticationPending) {
-		if err := <-done; !errors.Is(err, context.Canceled) {
-			t.Fatal(err)
+	if n := conn.pending.Load(); n != 1 {
+		t.Fatalf("the connection counts %d pending verifications for one header", n)
+	}
+	for range cap(a.slots) {
+		<-a.slots
+	}
+	for range waiters {
+		if err := <-done; err != nil {
+			t.Fatalf("a waiter was refused: %v", err)
 		}
 	}
-	if len(authenticationPending) != 0 {
-		t.Fatal("admission permits leaked")
+	if n := conn.pending.Load(); n != 0 {
+		t.Fatalf("pending count leaked: %d", n)
 	}
 }
 
@@ -195,4 +214,132 @@ func FuzzCapsuleBoundaries(f *testing.F) {
 			}
 		})
 	})
+}
+
+func TestConnectionLimitSharesPerClient(t *testing.T) {
+	l := newConnectionLimit(3, 2)
+	a := &net.UDPAddr{IP: net.ParseIP("192.0.2.1"), Port: 1}
+	b := &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 1}
+	sameSubnet := &net.UDPAddr{IP: net.ParseIP("2001:db8::2"), Port: 2}
+	r1, ok1 := l.acquire(a)
+	_, ok2 := l.acquire(a)
+	if _, ok := l.acquire(a); !ok1 || !ok2 || ok {
+		t.Fatal("a client's share is not two connections")
+	}
+	_, ok3 := l.acquire(b)
+	if _, ok := l.acquire(sameSubnet); !ok3 || ok {
+		t.Fatal("the total is not three connections")
+	}
+	r1()
+	r1() // releasing twice frees one slot
+	if _, ok := l.acquire(sameSubnet); !ok || l.open() != 3 {
+		t.Fatalf("released slot not reused (open %d)", l.open())
+	}
+}
+
+// h3ClientLimit sets the per-client share of HTTP/3 connections for a test.
+func h3ClientLimit(t *testing.T, n int) {
+	h3Connections.mu.Lock()
+	old := h3Connections.maxPerClient
+	h3Connections.maxPerClient = n
+	h3Connections.mu.Unlock()
+	t.Cleanup(func() {
+		h3Connections.mu.Lock()
+		h3Connections.maxPerClient = old
+		h3Connections.mu.Unlock()
+	})
+}
+
+func TestH3ConnectionsPerClient(t *testing.T) {
+	h3ClientLimit(t, 2)
+	port, _ := startRelay(t, nil, nil)
+	get := [][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}}
+	first, second := dialRawH3(t, port), dialRawH3(t, port)
+	for _, h := range []*rawH3{first, second} {
+		if _, _, rsp := h.request(get); rsp.status != "200" {
+			t.Fatal(rsp.status)
+		}
+	}
+	if code := dialRawH3(t, port).connError(); code != quic.ApplicationErrorCode(0x107) {
+		t.Fatalf("close code %x, want H3_EXCESSIVE_LOAD", code)
+	}
+	first.conn.CloseWithError(0, "")
+	deadline := time.Now().Add(5 * time.Second)
+	for h3Connections.open() > 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("closed connection still counted")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, _, rsp := dialRawH3(t, port).request(get); rsp.status != "200" {
+		t.Fatal(rsp.status)
+	}
+}
+
+// retryCounter counts QUIC Retry packets a client receives.
+type retryCounter struct {
+	net.PacketConn
+	retries atomic.Int32
+}
+
+func (c *retryCounter) ReadFrom(b []byte) (int, net.Addr, error) {
+	n, a, err := c.PacketConn.ReadFrom(b)
+	// Long header, QUIC version 1, packet type Retry (RFC 9000 §17.2.5).
+	if n > 5 && b[0]&0xb0 == 0xb0 && binary.BigEndian.Uint32(b[1:5]) == 1 {
+		c.retries.Add(1)
+	}
+	return n, a, err
+}
+
+// Under a handshake flood, new clients are sent a Retry and still connect;
+// otherwise the handshake takes no extra round trip.
+func TestQUICRetryUnderHandshakeLoad(t *testing.T) {
+	port, _ := startRelay(t, nil, nil)
+	connect := func() int32 {
+		pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer pc.Close()
+		rc := &retryCounter{PacketConn: pc}
+		c := client(port)
+		c.PacketConn = rc
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		h, err := c.dialH3(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		h.Close()
+		return rc.retries.Load()
+	}
+	if n := connect(); n != 0 {
+		t.Fatalf("%d Retry packets without load", n)
+	}
+	handshakes.Lock()
+	handshakes.tokens, handshakes.last = 0, time.Now().Add(time.Hour)
+	handshakes.Unlock()
+	t.Cleanup(func() {
+		handshakes.Lock()
+		handshakes.tokens, handshakes.last = handshakeBurst, time.Time{}
+		handshakes.Unlock()
+	})
+	// One Retry per Initial packet: a ClientHello can span two.
+	if n := connect(); n < 1 {
+		t.Fatal("no Retry under load")
+	}
+}
+
+func TestDefaultMaxTunnelsFollowsMemory(t *testing.T) {
+	for _, c := range []struct {
+		memory uint64
+		want   int
+	}{{0, 4096}, {256 << 20, 512}, {1 << 30, 1024}, {8 << 30, 8192}, {64 << 30, 20000}} {
+		if got := defaultMaxTunnels(c.memory); got != c.want {
+			t.Errorf("defaultMaxTunnels(%d MiB) = %d, want %d", c.memory>>20, got, c.want)
+		}
+	}
+	if _, err := os.Stat("/proc/meminfo"); err == nil && totalMemory() == 0 {
+		t.Error("MemTotal not read from /proc/meminfo")
+	}
 }

@@ -7,7 +7,7 @@
 | `/usr/local/bin/caddy` | Caddy with the plugin (`go build -tags http2legacy -trimpath`) |
 | `/etc/systemd/system/caddy.service` | From [deploy/caddy.service](../deploy/caddy.service): runs as the `caddy` user, with only the capabilities to bind low ports and administer the network, and `GODEBUG=http2xconnect=1` |
 | `/etc/caddy/Caddyfile` | The first line is `# Managed by caddy-network-relay deploy/install.sh`, followed by the domain and the first user. Mode 640, owned by `root:caddy` |
-| `/etc/caddy/relay/` | Mode 700, only root can enter: `<user>.password` (the first user's password, 600) and the profiles (600) |
+| `/etc/caddy/relay/` | Mode 700, only root can enter: the profiles (600), which contain the first user's password; it is stored nowhere else (delete them once installed). Installers before October 2026 also kept `<user>.password` here |
 | `/var/lib/caddy/` | The `caddy` user's home directory; Caddy's certificates and ACME account are in `.local/share/caddy/` |
 | `/var/www/relay/index.html` | The default website (not overwritten if it already exists). It can be replaced with any static website |
 | `/etc/sysctl.d/60-caddy-network-relay.conf` | Raises the UDP receive and send buffer limits to 7.5 MB (quic-go's recommendation); limits that are already higher are left out |

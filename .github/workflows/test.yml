@@ -1,5 +1,7 @@
 # Lint and test on every push and pull request; build Caddy with the plugin
-# for Linux x86_64 and arm64.
+# for Linux x86_64 and arm64. Weekly, rerun everything so that new
+# vulnerability records for the dependencies and the pinned transports
+# (third_party) fail the build even when nothing was pushed.
 name: test
 
 on:
@@ -8,6 +10,8 @@ on:
     paths-ignore: ["**.md", "docs/**"]
   pull_request:
     paths-ignore: ["**.md", "docs/**"]
+  schedule:
+    - cron: "23 5 * * 1"
   workflow_dispatch:
 
 permissions:
@@ -18,8 +22,8 @@ jobs:
     name: lint and test (Go 1.26)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
@@ -39,8 +43,8 @@ jobs:
     name: test (Go 1.27)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version: "1.27"
       # Local transport patches keep the same reviewed implementation and
@@ -55,12 +59,12 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v5
-      - uses: actions/setup-go@v6
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
       - run: CGO_ENABLED=0 GOARCH=${{ matrix.arch }} go build -tags http2legacy -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: caddy-network-relay-linux-${{ matrix.arch }}
           path: caddy

@@ -20,7 +20,7 @@ func init() {
 // UnmarshalCaddyfile sets up the handler from Caddyfile tokens:
 //
 //	network_relay {
-//		user <name> <password_hash>
+//		user <name> [<password_hash>] [certificate <sha256>] [expires <time>]
 //		udp_template <path>
 //		blocked_destinations [<cidr>...]
 //		blocked_ports [<port>...]
@@ -42,10 +42,30 @@ func (h *Handler) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 			}
 		case "user":
 			args := d.RemainingArgs()
-			if len(args) != 2 {
-				return d.Errf("user needs a name and a password hash: user <name> <hash>")
+			usage := "user <name> [<password hash>] [certificate <sha256>] [expires <RFC 3339 time>]"
+			if len(args) < 2 {
+				return d.Errf("user needs a name and a credential: %s", usage)
 			}
-			h.Users = append(h.Users, User{Name: args[0], PasswordHash: args[1]})
+			u := User{Name: args[0]}
+			rest := args[1:]
+			if rest[0] != "certificate" && rest[0] != "expires" {
+				u.PasswordHash, rest = rest[0], rest[1:]
+			}
+			for len(rest) > 0 {
+				if len(rest) < 2 {
+					return d.Errf("%q needs a value: %s", rest[0], usage)
+				}
+				switch rest[0] {
+				case "certificate":
+					u.CertificateSHA256 = rest[1]
+				case "expires":
+					u.Expires = rest[1]
+				default:
+					return d.Errf("unknown user option %q: %s", rest[0], usage)
+				}
+				rest = rest[2:]
+			}
+			h.Users = append(h.Users, u)
 		case "udp_template":
 			if !d.AllArgs(&h.UDPTemplate) {
 				return d.ArgErr()

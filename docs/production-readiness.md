@@ -12,20 +12,35 @@ network have been certified. No production service has been deployed.
   unrelated tenants. Changing destination policy revokes existing tunnels.
 - Fresh installs generate `relay_id <domain>`. Upgrades preserve the existing
   Caddyfile; add the ID deliberately before relying on retained tunnels.
-- The default process tunnel ceiling is 1024, with 128 tunnels per user. The
-  process count is checked against each handler's configured ceiling; use the
-  same ceiling across handlers. Size limits against memory, CPU, descriptors,
-  network capacity and the largest expected user workload.
-- Two 64KiB buffers per TCP tunnel consume about 128MiB at the default ceiling,
-  before QUIC/TLS/socket/runtime overhead. Admission limits bound counts, not
-  an exact RSS budget. Apply cgroup/systemd resource budgets after staging tests.
+- The default process tunnel ceiling is a quarter of the machine's memory
+  (MemTotal) at 256 KiB per tunnel, between 512 and 20000 (4096 when memory is
+  unknown), with 512 tunnels per user. In containers, set max_tunnels for the
+  container's memory limit. The process count is checked against each
+  handler's configured ceiling; use the same ceiling across handlers. Size
+  limits against memory, CPU, descriptors, network capacity and the largest
+  expected user workload.
+- Admission limits bound counts, not an exact RSS budget. Apply cgroup/systemd
+  resource budgets after staging tests.
 - Authentication computations are process-wide, limited to min(4,GOMAXPROCS).
-  All uncached waiters, including duplicate headers, have a shared finite budget.
-  Supported Argon2 parameters are at most 64MiB, ten iterations and four lanes;
-  bcrypt cost is at most 14. Regenerate over-budget hashes before upgrading.
+  New credentials are limited per client address (burst 30, then 1/s), per
+  connection (4 at once) and process-wide; verified credentials are cached for
+  the process with a sliding 10-minute lifetime and survive reloads that keep
+  the user. Generated passwords use PBKDF2-SHA256 (1000 iterations); supported
+  Argon2 parameters are at most 64MiB, ten iterations and four lanes; bcrypt
+  cost is at most 14. Regenerate over-budget hashes before upgrading.
 - Request headers default to 32KiB and a ten-second read timeout. Explicit Caddy
-  settings are honored. H3 has a process-wide 256 incomplete-header budget and
-  1024 admitted connections across overlapping configurations.
+  settings are honored. H3 bounds incomplete headers per connection (16) and
+  process-wide (4096), admits connections after the handshake (4096 across
+  overlapping configurations, 64 per client address) and answers handshake
+  floods (over 200/s) with Retry.
+- HTTP/2 servers in the process default to 1024 concurrent streams and 4 MiB
+  stream / 16 MiB connection receive windows (explicit Caddy settings win).
+- Client certificates need `client_auth { mode request }` in the site's TLS
+  options and the global `servers { strict_sni_host insecure_off }`; the relay
+  refuses to start under strict SNI-Host matching. Do not rely on client_auth
+  for access control in other sites on the same listener.
+- The installer keeps no plaintext password; the generated profiles hold it
+  until the operator deletes them.
 - Linux and Darwin enforce no-fragmentation UDP socket policy. Other platforms
   fail CONNECT-UDP closed instead of silently permitting fragmentation.
 - Service units no longer print the environment or grant CAP_NET_ADMIN.
@@ -94,12 +109,35 @@ moves while the jobs run. These checks do not replace staging validation.
   corrected Go 1.26 complete suite subsequently passed (266.277 s); the
   Go 1.27 complete suite passed in 306.541 s.
 
+## Verification of the 2026-10-05 changes
+
+Admission limits, certificate users, profiles with identities, DDM
+declarations and the installer without a stored password were checked in a
+Linux build container (Go 1.26.8) without IPv6 sockets:
+
+- The complete race-enabled suite passed (`RELAY_STRESS_MB=4`, 248 s),
+  including certificate login over HTTP/3, HTTP/2 and HTTP/1.1, per-client
+  HTTP/3 connection and header limits, Retry under a handshake flood, and the
+  128-device capacity test dialing from distinct loopback addresses.
+- Patched upstream QUIC, HTTP/3 and HTTP/2 suites passed; quic-go's IPv6 and
+  dual-stack socket tests were skipped because the container has no IPv6.
+- The 17 installer tests and shellcheck passed. OpenSSL decoded the generated
+  PKCS#12 files (3DES/SHA-1, client-auth EKU). The real binary validated a
+  Caddyfile with `client_auth` and `strict_sni_host insecure_off`, and refused
+  one without the latter.
+- govulncheck could not reach vuln.go.dev from the container; CI runs it.
+- Nothing was tried on Apple devices or an MDM server.
+
 ## Required staging checks before rollout
 
 1. Test real iPhone/iPad/Mac supported OS versions: profile installation, routing
    scope, DNS privacy, H3 and H2 fallback, Wi-Fi/cellular switching, IPv6/NAT64,
    minimum MTU, revocation, reload and certificate rotation. Check minimum OS
    versions for every emitted profile key and the applicable enrollment mode.
+   Client-certificate profiles (`--identity`, PKCS#12 with 3DES/SHA-1
+   protection) and DDM declarations (`--ddm`) have not been tried on devices
+   or with an MDM server; nested QUIC through HTTP/3 datagrams before path MTU
+   discovery has grown the outer packets is also unverified on devices.
 2. Exercise the expected concurrent devices, users and tunnel mix. Measure RSS,
    CPU, FD count, packet/byte rate, rejection rate and p99. Test slow peers,
    blackholes, high-rate UDP, and a compromised account. Configure the per-user payload and UDP packet budgets for expected use;

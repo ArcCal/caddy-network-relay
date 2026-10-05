@@ -20,12 +20,21 @@ Local changes:
   change, recorded in the source provenance manifest.
 - quic-go/http3: expose ReadHeaderTimeout, apply a stream read deadline while
   receiving HEADERS, clear it before calling the handler, bound incomplete
-  headers across connections, and preserve extended CONNECT's original scheme.
+  headers per connection (16; more closes the connection with
+  H3_EXCESSIVE_LOAD) and across connections (4096), and preserve extended
+  CONNECT's original scheme.
+- quic-go/http3: expose the request stream to handlers (RequestStream) without
+  sending the response header, so the relay needs no reflection.
 - x-net/http2: expose CloseWrite and ResetStream to handlers; retain and accept
   the receive direction after a CONNECT FIN; release stream state after both
   directions finish; reject CONNECT trailers; preserve the original scheme.
 - x-net/http2: use the reviewed HTTP/2 implementation on Go 1.27 as well, instead
   of forwarding to the standard library which lacks these handler extensions.
+- x-net/http2: SetExtendedConnectProtocol/ExtendedConnectProtocol replace a
+  go:linkname to the unexported switch; DefaultServerMaxConcurrentStreams and
+  DefaultServerMaxUploadBuffer{PerConnection,PerStream} set the server
+  defaults that Caddy leaves unset; a Write after the handler finished panics
+  with its intended message instead of a nil dereference.
 
 The application exercises these changes through actual H2/H3 frames in
 `readiness_protocol_test.go`, in addition to existing interoperability, reload

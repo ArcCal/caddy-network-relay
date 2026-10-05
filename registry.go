@@ -10,6 +10,7 @@ import (
 
 var (
 	errRevoked = errors.New("user removed or password changed")
+	errExpired = errors.New("the account expired")
 	errExiting = errors.New("Caddy is exiting")
 )
 
@@ -38,7 +39,7 @@ func registerHandler(h *Handler) {
 	for old := range registry.handlers {
 		if sameRelay(old, h) {
 			for name := range h.traffic {
-				if old.auth.has(account{name: name, hash: h.auth.users[name].PasswordHash}) && old.traffic[name] != nil {
+				if old.auth.has(h.auth.accountOf(name)) && old.traffic[name] != nil {
 					h.traffic[name] = old.traffic[name]
 				}
 			}
