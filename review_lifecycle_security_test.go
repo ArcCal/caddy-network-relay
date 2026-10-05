@@ -80,8 +80,9 @@ func TestReviewAuthenticationCancelledDuringHash(t *testing.T) {
 	h := &reviewPausedHash{started: make(chan struct{}), finish: make(chan struct{})}
 	a := &authenticator{
 		users:  map[string]User{"alice": {Name: "alice", PasswordHash: "test-hash"}},
-		hashes: map[string]passwordHash{"alice": h}, key: []byte("test-hmac-key"),
-		cache: map[[32]byte]cacheEntry{}, inflight: map[[32]byte]*flight{}, slots: make(chan struct{}, 1),
+		creds:  map[string]string{"alice": "test-hash||"},
+		hashes: map[string]passwordHash{"alice": h},
+		failed: map[[32]byte]time.Time{}, inflight: map[[32]byte]*flight{}, slots: make(chan struct{}, 1),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -119,7 +120,7 @@ func TestReviewTLSClientAuthChangeRevokesTunnels(t *testing.T) {
 			defer unregisterHandler(new)
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
-			lt := &liveTunnel{acct: account{name: "alice", hash: testHash}, owner: old, cancel: cancel}
+			lt := &liveTunnel{acct: a.accountOf("alice"), owner: old, cancel: cancel}
 			if !addTunnel(lt) {
 				t.Fatal("initial tunnel was not registered")
 			}
@@ -216,7 +217,7 @@ func TestReviewTLSCustomVerifierSnapshotAndLateTunnelDenial(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancelCause(context.Background())
 	defer cancel(nil)
-	lt := &liveTunnel{acct: account{name: "alice", hash: testHash}, owner: old, cancel: cancel}
+	lt := &liveTunnel{acct: a.accountOf("alice"), owner: old, cancel: cancel}
 	if !addTunnel(lt) {
 		t.Fatal("initial tunnel was denied")
 	}
@@ -327,14 +328,14 @@ func TestReviewTLSLeafFileReplacementRevokesExistingTunnels(t *testing.T) {
 
 func TestReviewH3HandshakeAdmissionBounded(t *testing.T) {
 	ep := &endpoint{users: []endpointUser{{server: &http3.Server{}}}}
-	initial := len(h3Connections)
+	initial := len(h3Handshakes)
 	var cancels []context.CancelFunc
 	t.Cleanup(func() {
 		for _, cancel := range cancels {
 			cancel()
 		}
 	})
-	for range cap(h3Connections) - initial {
+	for range cap(h3Handshakes) - initial {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancels = append(cancels, cancel)
 		if _, err := ep.connectionContext(ctx, nil); err != nil {
@@ -348,7 +349,7 @@ func TestReviewH3HandshakeAdmissionBounded(t *testing.T) {
 		cancel()
 	}
 	deadline := time.Now().Add(time.Second)
-	for len(h3Connections) > initial {
+	for len(h3Handshakes) > initial {
 		if time.Now().After(deadline) {
 			t.Fatal("failed handshakes leaked admission")
 		}
@@ -357,6 +358,7 @@ func TestReviewH3HandshakeAdmissionBounded(t *testing.T) {
 }
 
 func TestReviewH3TLSGenerationMatchesHandler(t *testing.T) {
+	initialHandshakes, initialConnections := len(h3Handshakes), h3Connections.open()
 	cert, err := tls.X509KeyPair([]byte(pki().certPEM), []byte(pki().keyPEM))
 	if err != nil {
 		t.Fatal(err)
@@ -435,6 +437,21 @@ func TestReviewH3TLSGenerationMatchesHandler(t *testing.T) {
 	}
 	if string(body) != "old generation" {
 		t.Fatalf("TLS from old generation reached %q", body)
+	}
+	if got := len(h3Handshakes); got != initialHandshakes {
+		t.Fatalf("completed connection retained handshake admission: %d, want %d", got, initialHandshakes)
+	}
+	if got := h3Connections.open(); got != initialConnections+1 {
+		t.Fatalf("established connection admission: %d, want %d", got, initialConnections+1)
+	}
+	_ = rsp.Body.Close()
+	_ = r.conn.CloseWithError(0, "")
+	deadline := time.Now().Add(time.Second)
+	for h3Connections.open() != initialConnections {
+		if time.Now().After(deadline) {
+			t.Fatal("closed connection leaked established admission")
+		}
+		time.Sleep(time.Millisecond)
 	}
 }
 
@@ -617,5 +634,80 @@ func TestReviewTCPReturnsAfterCopyWorkersStop(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("copy workers did not release the pump")
+	}
+}
+
+type reviewBlockingFINClient struct {
+	reviewBlockingClient
+	closeStarted chan struct{}
+}
+
+func (c *reviewBlockingFINClient) Write(p []byte) (int, error) { return len(p), nil }
+func (c *reviewBlockingFINClient) closeWrite() bool {
+	close(c.closeStarted)
+	<-c.interrupted
+	<-c.allowExit
+	return false
+}
+
+func TestReviewTCPCancellationInterruptsAndJoinsBlockedFIN(t *testing.T) {
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	relay, err := net.Dial("tcp", l.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer relay.Close()
+	peer, err := l.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer peer.Close()
+	c := &reviewBlockingFINClient{reviewBlockingClient: reviewBlockingClient{
+		readStarted: make(chan struct{}), interrupted: make(chan struct{}), allowExit: make(chan struct{}),
+	}, closeStarted: make(chan struct{})}
+	release := sync.OnceFunc(func() { close(c.allowExit) })
+	t.Cleanup(release)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		_, _, why, aborted := pumpTCP(ctx, c, relay.(*net.TCPConn))
+		if !aborted || why != abortCancelled {
+			t.Errorf("blocked FIN cancellation: reason=%v, aborted=%v", why, aborted)
+		}
+		close(done)
+	}()
+	if err := peer.(*net.TCPConn).CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	for _, started := range []chan struct{}{c.readStarted, c.closeStarted} {
+		select {
+		case <-started:
+		case <-time.After(time.Second):
+			t.Fatal("blocked FIN worker did not start")
+		}
+	}
+	cancel()
+	select {
+	case <-c.interrupted:
+	case <-done:
+		t.Fatal("pump returned while FIN worker still owns client I/O")
+	case <-time.After(time.Second):
+		t.Fatal("cancellation did not interrupt blocked FIN")
+	}
+	select {
+	case <-done:
+		t.Fatal("pump returned before interrupted FIN worker exited")
+	case <-time.After(25 * time.Millisecond):
+	}
+	release()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("FIN worker did not release the pump")
 	}
 }

@@ -220,23 +220,30 @@ systemctl is-active --quiet caddy 2>/dev/null && was_active=1
 was_enabled=0
 systemctl is-enabled --quiet caddy 2>/dev/null && was_enabled=1
 
-password_file=$SECRETS/$RELAY_USER.password
+# The password exists only in this script's memory: it goes into the
+# profiles and is not stored anywhere else on the server. Installers before
+# 2026-10 kept it in this file; an upgrade still uses it for the self-check.
+legacy_password_file=$SECRETS/$RELAY_USER.password
+password=''
+if ((UPGRADE)) && [[ -f $legacy_password_file ]]; then
+    password=$(head -n 1 "$legacy_password_file")
+fi
 # A first install that stops before the service starts leaves nothing
 # behind, so the next run is a first install again.
 started=0
 undo_fresh() {
     if (($? != 0 && !UPGRADE && !started)); then
-        rm -f "$CADDYFILE" "$password_file"
+        rm -f "$CADDYFILE"
     fi
 }
 trap undo_fresh EXIT
 if ((!UPGRADE)); then
-    say "==> Generating a random password for user $RELAY_USER (not shown; saved in $password_file)"
+    say "==> Generating a random password for user $RELAY_USER (not shown; it is only put into the profiles)"
     out=$("$CACHE/caddy.new" network-relay passwd --name "$RELAY_USER")
     password=$(sed -n 's/^password: //p' <<<"$out")
     user_line=$(grep '^user ' <<<"$out")
     [[ -n $password && -n $user_line ]] || die 'Generating the password failed.'
-    (umask 077 && printf '%s\n' "$password" >"$password_file")
+    unset out
     email_line=''
     [[ -n $EMAIL ]] && email_line=$'\temail '"$EMAIL"
     tmp=$(mktemp "$ETC/.Caddyfile.XXXXXX")
@@ -352,35 +359,46 @@ systemctl restart caddy || rollback
 sleep "${RELAY_TEST_SLEEP:-2}"
 systemctl is-active --quiet caddy || rollback
 
-say "==> Waiting for the certificate and running the self-check (a first install waits for Let's Encrypt, up to 3 minutes)"
+manual_check="$BIN network-relay check --server $DOMAIN --address 127.0.0.1 --user $RELAY_USER"
 check_ok=0
-for _ in $(seq "${RELAY_TEST_TRIES:-36}"); do
-    if "$BIN" network-relay check --server "$DOMAIN" --address 127.0.0.1 --user "$RELAY_USER" \
-        --password-stdin --timeout 10s <"$password_file" >"$CACHE/check.log" 2>&1; then
-        check_ok=1
-        break
-    fi
-    systemctl is-active --quiet caddy || rollback
-    sleep "${RELAY_TEST_SLEEP:-5}"
-done
-cat "$CACHE/check.log"
+if [[ -n $password ]]; then
+    say "==> Waiting for the certificate and running the self-check (a first install waits for Let's Encrypt, up to 3 minutes)"
+    for _ in $(seq "${RELAY_TEST_TRIES:-36}"); do
+        # A pipe, not a file: the password is never written to disk.
+        if printf '%s\n' "$password" | "$BIN" network-relay check --server "$DOMAIN" --address 127.0.0.1 \
+            --user "$RELAY_USER" --password-stdin --timeout 10s >"$CACHE/check.log" 2>&1; then
+            check_ok=1
+            break
+        fi
+        systemctl is-active --quiet caddy || rollback
+        sleep "${RELAY_TEST_SLEEP:-5}"
+    done
+    cat "$CACHE/check.log"
+else
+    check_ok=1
+    say "==> The installer does not keep the password, so it cannot test the relay with it. Test it with (asks for the password):"
+    say "      $manual_check"
+fi
 
-say "==> Generating profiles"
 lists=("$SRC/deploy/domains/google-ai-social.txt")
 profile=$SECRETS/$DOMAIN-$RELAY_USER.mobileconfig
 global=$SECRETS/$DOMAIN-$RELAY_USER-global.mobileconfig
-if [[ ! -e $profile ]]; then
-    "$BIN" network-relay profile --host "$DOMAIN" --user "$RELAY_USER" --password-stdin \
-        --domains-file "${lists[0]}" -o "$profile" <"$password_file"
+if [[ -n $password ]]; then
+    say "==> Generating profiles"
+    if [[ ! -e $profile ]]; then
+        printf '%s\n' "$password" | "$BIN" network-relay profile --host "$DOMAIN" --user "$RELAY_USER" --password-stdin \
+            --domains-file "${lists[0]}" -o "$profile"
+    fi
+    if [[ ! -e $global ]]; then
+        gfw=()
+        ((GFWLIST)) && gfw=(--gfwlist)
+        printf '%s\n' "$password" | "$BIN" network-relay profile --host "$DOMAIN" --user "$RELAY_USER" --password-stdin \
+            --domains-file "${lists[0]}" --domains-file "$SRC/deploy/domains/global-services.txt" "${gfw[@]}" \
+            --ui-toggle-enabled false --name "$DOMAIN (global services)" -o "$global" \
+            || say "(The global profile was not generated, most likely because downloading the gfwlist failed. You can run this again with --no-gfwlist.)"
+    fi
 fi
-if [[ ! -e $global ]]; then
-    gfw=()
-    ((GFWLIST)) && gfw=(--gfwlist)
-    "$BIN" network-relay profile --host "$DOMAIN" --user "$RELAY_USER" --password-stdin \
-        --domains-file "${lists[0]}" --domains-file "$SRC/deploy/domains/global-services.txt" "${gfw[@]}" \
-        --ui-toggle-enabled false --name "$DOMAIN (global services)" -o "$global" <"$password_file" \
-        || say "(The global profile was not generated, most likely because downloading the gfwlist failed. You can run this again with --no-gfwlist.)"
-fi
+unset password
 
 host_ip=$(tailscale ip -4 2>/dev/null | head -1 || true)
 host_ip=${host_ip:-${public_ip:-SERVER_IP}}
@@ -388,19 +406,30 @@ cat <<MSG
 
 Done. Caddy with network_relay is running and starts at boot.
   Configuration: $CADDYFILE      Log: journalctl -u caddy -n 100 --no-pager
-  Profiles (they contain the password; only root can read them):
+MSG
+if [[ -e $profile || -e $global ]]; then
+    cat <<MSG
+  Profiles (they contain the password, which is stored nowhere else on this server; only root can read them):
     $profile           Google/AI/X and more go through the relay
     $global    the listed services + gfwlist go through the relay; cannot be turned off in Settings
   To download to a Mac (run this in the Mac's Terminal):
     scp root@$host_ip:$global ~/Downloads/
-  Before installing on a device, remove any old relay profile from it. Afterwards, delete the copy on the Mac.
+  Before installing on a device, remove any old relay profile from it. Once the devices have it, delete
+  the profiles here and on the Mac: rm $SECRETS/*.mobileconfig (for another device, create a user as in docs/deploy.md).
 MSG
+fi
+if [[ -f $legacy_password_file ]]; then
+    cat <<MSG
+  An earlier version of this installer kept the password in $legacy_password_file.
+  It is no longer needed; delete it once you no longer use it: rm $legacy_password_file
+MSG
+fi
 if ((!check_ok)); then
     cat <<MSG
 
 Note: the local self-check did not fully pass (see the FAIL lines above). The service keeps running so you can investigate:
-  - If the certificate is not issued yet, wait a minute or two, then run
-      $BIN network-relay check --server $DOMAIN --address 127.0.0.1 --user $RELAY_USER --password-stdin < $password_file
+  - If the certificate is not issued yet, wait a minute or two, then run (it asks for the password)
+      $manual_check
   - The cloud provider's firewall/security group must allow TCP 80, TCP 443 and UDP 443.
 MSG
     exit 1

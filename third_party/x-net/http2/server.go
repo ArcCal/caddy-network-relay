@@ -2938,12 +2938,12 @@ func (w *responseWriter) WriteString(s string) (n int, err error) {
 
 // either dataB or dataS is non-zero.
 func (w *responseWriter) write(lenData int, dataB []byte, dataS string) (n int, err error) {
-	if w.rws.writeClosed {
-		return 0, io.ErrClosedPipe
-	}
 	rws := w.rws
 	if rws == nil {
 		panic("Write called after Handler finished")
+	}
+	if rws.writeClosed {
+		return 0, io.ErrClosedPipe
 	}
 	if !rws.wroteHeader {
 		w.WriteHeader(200)
@@ -2997,13 +2997,8 @@ func (w *responseWriter) CloseWrite() error {
 
 // ResetStream ends a stream with a protocol-specific error code.
 func (w *responseWriter) ResetStream(code uint32) error {
-	rws := w.rws
-	rws.writeClosed = true
-	rws.stream.resetRequested.Store(true)
-	return rws.conn.writeFrameFromHandler(FrameWriteRequest{
-		write:  StreamError{StreamID: rws.stream.id, Code: ErrCode(code)},
-		stream: rws.stream,
-	})
+	w.rws.writeClosed = true
+	return w.InterruptStream(code)
 }
 
 // InterruptStream resets the stream without changing response-writer state.
@@ -3011,11 +3006,29 @@ func (w *responseWriter) ResetStream(code uint32) error {
 // must wait for all such calls and writes to finish before returning.
 func (w *responseWriter) InterruptStream(code uint32) error {
 	rws := w.rws
-	rws.stream.resetRequested.Store(true)
-	return rws.conn.writeFrameFromHandler(FrameWriteRequest{
-		write:  StreamError{StreamID: rws.stream.id, Code: ErrCode(code)},
-		stream: rws.stream,
-	})
+	st, sc := rws.stream, rws.conn
+	st.resetRequested.Store(true)
+	sc.serveG.checkNotOn()
+	se := StreamError{StreamID: st.id, Code: ErrCode(code)}
+	select {
+	case sc.serveMsgCh <- func(sc *serverConn) {
+		if sc.streams[st.id] != st {
+			return
+		}
+		// Queue the reset as a control frame, then release local readers and
+		// writers even if an earlier frame is blocked on the network. DATA
+		// already writing asynchronously was encoded by startFrameWrite, so
+		// it no longer references the handler's buffer. The control reset
+		// survives closeStream removing the stream's pending frame queue.
+		sc.resetStream(se)
+		if st.state != stateClosed { // a buffered reset may complete synchronously
+			sc.closeStream(st, se)
+		}
+	}:
+		return nil
+	case <-sc.doneServing:
+		return errClientDisconnected
+	}
 }
 
 var _ http.Pusher = (*responseWriter)(nil)
