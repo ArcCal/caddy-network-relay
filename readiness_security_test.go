@@ -3,8 +3,8 @@ package networkrelay
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +28,7 @@ func TestHashVerificationBudget(t *testing.T) {
 }
 
 func TestRelaySecurityDomains(t *testing.T) {
-	a, err := newAuthenticator([]User{{"alice", testHash}})
+	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,43 +94,57 @@ func TestPerUserTunnelBudget(t *testing.T) {
 	again()
 }
 
-func TestSharedCredentialWaitersBounded(t *testing.T) {
-	a, err := newAuthenticator([]User{{"alice", testHash}})
+// Requests waiting for another request's verification of the same header
+// cost no hash, so they take none of the limited places (G-2): a device
+// opening many tunnels at once with new credentials is never refused.
+func TestSharedCredentialWaitersAreNotRefused(t *testing.T) {
+	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	for range cap(a.slots) {
 		a.slots <- struct{}{}
 	}
-	defer func() {
-		for range cap(a.slots) {
-			<-a.slots
-		}
-	}()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	done := make(chan error, cap(authenticationPending))
-	for range cap(authenticationPending) {
-		go func() { _, err := a.verify(ctx, BasicAuthorization("unknown", "same")); done <- err }()
+	good := BasicAuthorization("alice", testPassword)
+	verified.Lock()
+	delete(verified.m, headerID(good))
+	verified.Unlock()
+	conn := &connState{}
+	from := requester{ip: netip.MustParseAddr("192.0.2.77"), conn: conn}
+	waiters := 3 * cap(authenticationPending)
+	done := make(chan error, waiters)
+	for range waiters {
+		go func() { _, err := a.verifyFrom(context.Background(), good, from); done <- err }()
 	}
 	deadline := time.Now().Add(2 * time.Second)
-	for len(authenticationPending) != cap(authenticationPending) {
+	for {
+		a.mu.Lock()
+		n := len(a.inflight)
+		a.mu.Unlock()
+		if n == 1 {
+			break
+		}
 		if time.Now().After(deadline) {
-			t.Fatal("waiters did not arrive")
+			t.Fatal("the verification did not start")
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, err := a.verify(ctx, BasicAuthorization("unknown", "same")); !errors.Is(err, errAuthBusy) {
-		t.Fatalf("unbounded same-header waiters: %v", err)
+	if n := len(authenticationPending); n != 1 {
+		t.Fatalf("%d places taken for one header", n)
 	}
-	cancel()
-	for range cap(authenticationPending) {
-		if err := <-done; !errors.Is(err, context.Canceled) {
-			t.Fatal(err)
+	if n := conn.pending.Load(); n != 1 {
+		t.Fatalf("the connection counts %d pending verifications for one header", n)
+	}
+	for range cap(a.slots) {
+		<-a.slots
+	}
+	for range waiters {
+		if err := <-done; err != nil {
+			t.Fatalf("a waiter was refused: %v", err)
 		}
 	}
-	if len(authenticationPending) != 0 {
-		t.Fatal("admission permits leaked")
+	if n := conn.pending.Load(); n != 0 {
+		t.Fatalf("pending count leaked: %d", n)
 	}
 }
 

@@ -57,22 +57,34 @@ func readPassword(prompt string) (string, error) {
 }
 
 func passwdCommand() *cobra.Command {
-	var name string
-	var stdin bool
+	var name, expires string
+	var stdin, fastHash bool
 	c := &cobra.Command{
-		Use:   "passwd --name <user> [--stdin]",
-		Short: "Create a user: random password and Argon2id hash",
+		Use:   "passwd --name <user> [--stdin [--fast-hash]] [--expires <time>]",
+		Short: "Create a user: random password and its hash",
 		Long: `Creates a user for the network_relay directive. Prints a random password
 (144 random bits) and the line to put in the Caddyfile:
 
-    user <name> <argon2id hash>
+    user <name> <hash>
 
-With --stdin, reads your own password (at least 12 characters) from standard
-input instead and prints only the Caddyfile line.`,
+A generated password is too random to guess, online or from a stolen hash,
+so it gets a fast hash (PBKDF2-SHA256, the format the Rust relay uses too)
+that costs the server almost nothing to check. With --stdin, reads your own
+password (at least 12 characters) from standard input instead, hashes it
+with Argon2id and prints only the Caddyfile line; add --fast-hash when that
+password is itself a random secret of at least 24 characters.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateUserName(name); err != nil {
 				return err
+			}
+			if fastHash && !stdin {
+				return errors.New("--fast-hash goes with --stdin; generated passwords get it anyway")
+			}
+			if expires != "" {
+				if _, err := time.Parse(time.RFC3339, expires); err != nil {
+					return fmt.Errorf("--expires %q is not an RFC 3339 time such as 2027-01-31T00:00:00Z", expires)
+				}
 			}
 			password := RandomPassword()
 			if stdin {
@@ -84,15 +96,28 @@ input instead and prints only the Caddyfile line.`,
 					return errors.New("the password must be at least 12 characters")
 				}
 			}
+			hash := HashPassword(password)
+			if !stdin || fastHash {
+				var err error
+				if hash, err = HashGeneratedSecret(password); err != nil {
+					return err
+				}
+			}
 			if !stdin {
 				fmt.Printf("password: %s\n", password)
 			}
-			fmt.Printf("user %s %s\n", name, HashPassword(password))
+			line := fmt.Sprintf("user %s %s", name, hash)
+			if expires != "" {
+				line += " expires " + expires
+			}
+			fmt.Println(line)
 			return nil
 		},
 	}
 	c.Flags().StringVar(&name, "name", "", "user name (letters, digits, - _ .)")
 	c.Flags().BoolVar(&stdin, "stdin", false, "read the password from standard input")
+	c.Flags().BoolVar(&fastHash, "fast-hash", false, "with --stdin: the password is a random secret of 24+ characters")
+	c.Flags().StringVar(&expires, "expires", "", "when the account stops working (RFC 3339)")
 	_ = c.MarkFlagRequired("name")
 	return c
 }

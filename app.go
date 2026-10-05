@@ -124,6 +124,9 @@ func (a *App) addServer(srv *caddyhttp.Server) *relayServer {
 			srv.ListenProtocols[i] = withoutProtocol(srv.ListenProtocols[i], "h3")
 		}
 	}
+	// Per-connection state for the limits on new credentials (HTTP/1.1 and
+	// HTTP/2; HTTP/3 connections get theirs in withQUICConn).
+	srv.RegisterConnContext(func(ctx context.Context, _ net.Conn) context.Context { return withConnState(ctx) })
 	// Caddy waits for open requests when it exits; tunnels would keep it
 	// waiting forever.
 	srv.RegisterOnShutdown(func() {
