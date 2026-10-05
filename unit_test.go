@@ -142,6 +142,34 @@ func TestPolicy(t *testing.T) {
 			t.Errorf("%s blocked", s)
 		}
 	}
+	// Ranges in the IANA special-purpose registries.
+	for _, s := range []string{"192.88.99.1", "3fff::1", "5f00::1", "2001:2::1", "2001:10::1", "2001:20::1", "255.255.255.255"} {
+		if p.allows(netip.MustParseAddr(s)) {
+			t.Errorf("%s allowed", s)
+		}
+	}
+	// IPv6 forms that carry an IPv4 address are checked by it too.
+	embedded, _ := newPolicy([]string{"10.0.0.0/8", "127.0.0.0/8", "192.0.2.0/24"}, nil)
+	if got := embeddedIPv4(netip.MustParseAddr("64:ff9b::a00:1")); !slices.Equal(got, []netip.Addr{netip.MustParseAddr("10.0.0.1")}) {
+		t.Errorf("NAT64: %v", got)
+	}
+	for _, s := range []string{
+		"64:ff9b::a00:1",  // NAT64 to 10.0.0.1
+		"64:ff9b::7f00:1", // NAT64 to 127.0.0.1
+		"2002:a00:1::1",   // 6to4 of 10.0.0.1
+		"::a00:1",         // IPv4-compatible 10.0.0.1
+		// RFC 4380 example: server 65.54.227.120, client 192.0.2.45.
+		"2001:0:4136:e378:8000:63bf:3fff:fdd2",
+	} {
+		if embedded.allows(netip.MustParseAddr(s)) {
+			t.Errorf("%s allowed", s)
+		}
+	}
+	for _, s := range []string{"64:ff9b::808:808", "2002:808:808::1", "2606:4700:4700::1111", "2001:db8::1"} {
+		if !embedded.allows(netip.MustParseAddr(s)) {
+			t.Errorf("%s blocked", s)
+		}
+	}
 	// The IPv4 rule applies to mapped addresses even with the mapped
 	// range unblocked.
 	only, _ := newPolicy([]string{"127.0.0.0/8"}, nil)
@@ -194,7 +222,7 @@ func TestPolicy(t *testing.T) {
 	}
 	p.blocked = nil // the documentation ranges above are blocked anyway
 	p.resolver = fakeResolver{"self.example": {netip.MustParseAddr("2001:db8:1::9")}}
-	for _, s := range []string{"203.0.113.9", "::ffff:203.0.113.9", "2001:db8:1::9"} {
+	for _, s := range []string{"203.0.113.9", "::ffff:203.0.113.9", "2001:db8:1::9", "64:ff9b::cb00:7109"} {
 		if p.allows(netip.MustParseAddr(s)) {
 			t.Errorf("own address %s allowed", s)
 		}
@@ -295,7 +323,7 @@ func TestPasswordHashes(t *testing.T) {
 }
 
 func TestAuthenticator(t *testing.T) {
-	a, err := newAuthenticator([]User{{"alice", testHash}})
+	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,21 +356,18 @@ func TestAuthenticator(t *testing.T) {
 		a.remember(id, account{}, false)
 		a.mu.Unlock()
 	}
-	a.mu.Lock()
-	oks := 0
-	for _, e := range a.cache {
-		if e.ok {
-			oks++
+	for _, h := range []string{good, "basic " + strings.TrimPrefix(good, "Basic ")} {
+		if _, ok := a.cached(headerID(h)); !ok { // "Basic" and "basic" are different headers
+			t.Errorf("success for %q evicted", h)
 		}
 	}
-	a.mu.Unlock()
-	if oks != 2 { // "Basic" and "basic" are different headers
-		t.Errorf("success entries: %d", oks)
+	if len(a.failed) > maxCacheItems {
+		t.Errorf("failure cache unbounded: %d", len(a.failed))
 	}
-	if _, err := newAuthenticator([]User{{"a", testHash}, {"a", testHash}}); err == nil {
+	if _, err := newAuthenticator([]User{{Name: "a", PasswordHash: testHash}, {Name: "a", PasswordHash: testHash}}); err == nil {
 		t.Error("duplicate user accepted")
 	}
-	if _, err := newAuthenticator([]User{{".x", testHash}}); err == nil {
+	if _, err := newAuthenticator([]User{{Name: ".x", PasswordHash: testHash}}); err == nil {
 		t.Error("bad user name accepted")
 	}
 }
@@ -486,7 +511,7 @@ func TestDomainLists(t *testing.T) {
 // Verifications waiting for a slot are bounded, stop when their request
 // goes away, and never run for a request that is gone.
 func TestAuthenticatorQueue(t *testing.T) {
-	a, err := newAuthenticator([]User{{"alice", testHash}})
+	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -541,9 +566,9 @@ func TestAuthenticatorQueue(t *testing.T) {
 
 	// A request with the same header as one that goes away verifies for
 	// itself instead of failing.
-	a.mu.Lock()
-	clear(a.cache)
-	a.mu.Unlock()
+	verified.Lock()
+	delete(verified.m, headerID(good))
+	verified.Unlock()
 	ctxA, cancelA := context.WithCancel(context.Background())
 	first := make(chan error, 1)
 	go func() { _, err := a.verify(ctxA, good); first <- err }()
@@ -565,10 +590,8 @@ func TestAuthenticatorQueue(t *testing.T) {
 	// Nothing from the cancelled requests was cached as a failure.
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, e := range a.cache {
-		if !e.ok {
-			t.Error("a cancelled verification was cached")
-		}
+	if len(a.failed) != 0 {
+		t.Errorf("%d cancelled verifications were cached as failures", len(a.failed))
 	}
 }
 

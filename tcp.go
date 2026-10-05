@@ -93,6 +93,7 @@ func pumpTCPLimited(ctx context.Context, cc clientConn, t *net.TCPConn, budget *
 
 	upDone, downDone := false, false
 	gone := cc.gone()
+	var writeClosed <-chan bool
 	fail := func(r abortReason) (int64, int64, abortReason, bool) {
 		cancel()
 		_ = t.SetLinger(0)
@@ -101,12 +102,26 @@ func pumpTCPLimited(ctx context.Context, cc clientConn, t *net.TCPConn, budget *
 		workers.Wait()
 		return upN.Load(), downN.Load(), r, true
 	}
-	for !upDone || !downDone {
+	for !upDone || !downDone || writeClosed != nil {
 		select {
 		case <-ctx.Done():
 			return fail(abortCancelled)
 		case <-gone:
 			return fail(abortCancelled)
+		case endsTunnel := <-writeClosed:
+			writeClosed = nil
+			if endsTunnel {
+				cancel()
+				t.Close()
+				cc.close()
+				// HTTP/2 handlers without directional FIN end the whole
+				// tunnel here; stop any outstanding request-body read.
+				if h2, ok := cc.(*h2Client); ok {
+					_ = h2.body.Close()
+				}
+				workers.Wait()
+				return upN.Load(), downN.Load(), 0, false
+			}
 		case r := <-results:
 			if r.up {
 				up, upDone = r.n, true
@@ -122,18 +137,16 @@ func pumpTCPLimited(ctx context.Context, cc clientConn, t *net.TCPConn, budget *
 				_ = t.CloseWrite()
 			default:
 				gone = nil // closing our side may fire it
-				if cc.closeWrite() {
-					cancel()
-					t.Close()
-					cc.close()
-					// HTTP/2 handlers without directional FIN end the whole
-					// tunnel here; stop any outstanding request-body read.
-					if h2, ok := cc.(*h2Client); ok {
-						_ = h2.body.Close()
-					}
-					workers.Wait()
-					return up, down, 0, false
-				}
+				// Sending the HTTP/2 FIN can wait behind a blocked socket
+				// write from another stream. Keep selecting cancellation so
+				// interruptClient can release it, then join before returning.
+				closed := make(chan bool, 1)
+				writeClosed = closed
+				workers.Add(1)
+				go func() {
+					defer workers.Done()
+					closed <- cc.closeWrite()
+				}()
 			}
 		}
 	}

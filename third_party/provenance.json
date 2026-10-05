@@ -256,8 +256,8 @@
         {
           "path": "http3/response_writer.go",
           "upstream_sha256": "b71da978ea850e6303fe78dab9ae594e06382d70a2e36008170da61b95268114",
-          "local_sha256": "b71da978ea850e6303fe78dab9ae594e06382d70a2e36008170da61b95268114",
-          "modified": false
+          "local_sha256": "23d936decd4a04c88ba0142ef0664fb6d9984efdb472e5f765a9c84a3dc8b8dc",
+          "modified": true
         },
         {
           "path": "http3/server.go",
@@ -268,7 +268,7 @@
         {
           "path": "http3/server_conn.go",
           "upstream_sha256": "a95e03f55347db9adbcb67976ac9eea15301a5d9a6948c0dcaeb45daa277a402",
-          "local_sha256": "f2cf4a6cc2b0ad5bc76d87a42f8f3d9c4ab4945d76517eb48473fd27ede182be",
+          "local_sha256": "620a20a038245b8d6e732350cef6f03daa6202bb937981750f8663fe2a17b48c",
           "modified": true
         },
         {
@@ -1555,7 +1555,7 @@
         {
           "path": "http2/config.go",
           "upstream_sha256": "d167984b5523fecaf2b99b626c7a4be2d7fc2268b6719b01913263cb80ca4d5a",
-          "local_sha256": "0960d14eeb46446b37062d4ca6019a5b4142da50ebc1c71d084c7501abc28293",
+          "local_sha256": "45cfce3c9a42b7c01026d6b0b4c35c035f4bd4a7359f54da993eb65859e29d07",
           "modified": true
         },
         {
@@ -1651,8 +1651,8 @@
         {
           "path": "http2/http2.go",
           "upstream_sha256": "e1b38f7628feed3fd9482d2e705f07a8aecf58d8068c09e012a56b6b448452c2",
-          "local_sha256": "e1b38f7628feed3fd9482d2e705f07a8aecf58d8068c09e012a56b6b448452c2",
-          "modified": false
+          "local_sha256": "9cf6c67b9dd805d6057af401c654148dd704c2d0ddd6b4b73ef57725cf334d53",
+          "modified": true
         },
         {
           "path": "http2/pipe.go",
@@ -1663,7 +1663,7 @@
         {
           "path": "http2/server.go",
           "upstream_sha256": "cf07329cd7d5d95909a5404f3b29f10f4252189012b98ad4c8fdbfca384cb9d1",
-          "local_sha256": "3eae8f9b8882e52a00b42e2dac52e44788ec731c847cdcfb95c4ac214fd0a29e",
+          "local_sha256": "e690f00842d29b9fb1aa59e6b97266907e6bbc7363e3d10b4f1e7f09657de78d",
           "modified": true
         },
         {

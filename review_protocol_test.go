@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -337,6 +338,133 @@ func TestUDPFINReleasesFlowControlledH2Writer(t *testing.T) {
 	}
 	if openTunnels.Load() != 0 {
 		t.Fatal("completed UDP tunnel retained its quota")
+	}
+}
+
+func TestH2CancellationReleasesSocketBlockedWriter(t *testing.T) {
+	checkH2SocketBlockedCancellation(t, false)
+}
+
+func TestH2CancellationReleasesSocketBlockedFIN(t *testing.T) {
+	checkH2SocketBlockedCancellation(t, true)
+}
+
+func checkH2SocketBlockedCancellation(t *testing.T, targetFIN bool) {
+	t.Helper()
+	port, _ := startRelay(t, nil, nil)
+	target, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer target.Close()
+	var sent atomic.Int64
+	begin := make(chan struct{})
+	startWrite := sync.OnceFunc(func() { close(begin) })
+	defer startWrite()
+	targetDone := make(chan struct{})
+	go func() {
+		defer close(targetDone)
+		conn, err := target.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		<-begin
+		_ = conn.(*net.TCPConn).SetWriteBuffer(64 << 10)
+		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		buf := bytes.Repeat([]byte{0xa5}, 64<<10)
+		for i := 0; i < 2048; i++ {
+			n, err := conn.Write(buf)
+			sent.Add(int64(n))
+			if err != nil {
+				return
+			}
+		}
+	}()
+	r := dialRawH2(t, port)
+	defer r.conn.Close()
+	if err := r.conn.NetConn().(*net.TCPConn).SetReadBuffer(1024); err != nil {
+		t.Fatal(err)
+	}
+	// Give H2 ample credit, so the pending writer is blocked on the TCP
+	// socket rather than waiting for a stream or connection WINDOW_UPDATE.
+	if err := r.fr.WriteSettings(http2.Setting{ID: http2.SettingInitialWindowSize, Val: 1 << 30}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.fr.WriteWindowUpdate(0, (1<<30)-65535); err != nil {
+		t.Fatal(err)
+	}
+	r.headers(1, connectTCPFields(target.Addr().String()))
+	if h, ok := r.next(1).(*http2.MetaHeadersFrame); !ok || h.PseudoValue("status") != "200" {
+		t.Fatal("tunnel not established")
+	}
+	var finish, finished chan struct{}
+	var finishTarget func()
+	if targetFIN {
+		finTarget, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer finTarget.Close()
+		finish, finished = make(chan struct{}), make(chan struct{})
+		finishTarget = sync.OnceFunc(func() { close(finish) })
+		defer finishTarget()
+		go func() {
+			defer close(finished)
+			conn, err := finTarget.Accept()
+			if err != nil {
+				return
+			}
+			<-finish
+			_ = conn.Close()
+		}()
+		r.headers(3, connectTCPFields(finTarget.Addr().String()))
+		if h, ok := r.next(3).(*http2.MetaHeadersFrame); !ok || h.PseudoValue("status") != "200" {
+			t.Fatal("second tunnel not established")
+		}
+	}
+	startWrite()
+	// Stop reading the client socket and wait until backpressure propagates
+	// through the relay to the target's small send buffer.
+	deadline := time.Now().Add(5 * time.Second)
+	last, stableSince := sent.Load(), time.Now()
+	for {
+		now := time.Now()
+		n := sent.Load()
+		if n != last {
+			last, stableSince = n, now
+		}
+		if n > 1<<20 && now.Sub(stableSince) >= 100*time.Millisecond {
+			break
+		}
+		if now.After(deadline) {
+			t.Fatalf("target did not encounter socket backpressure, sent %d bytes", n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if targetFIN {
+		// The second tunnel's directional FIN must queue behind the first
+		// stream's socket write. Its handler must still process cancellation.
+		finishTarget()
+		<-finished
+		time.Sleep(50 * time.Millisecond)
+	}
+	closeAllTunnels()
+	deadline = time.Now().Add(time.Second)
+	for openTunnels.Load() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	retained := openTunnels.Load()
+	// Close after recording the result: the client must not have to help
+	// release a canceled tunnel's workers and quota.
+	_ = r.conn.Close()
+	select {
+	case <-targetDone:
+	case <-time.After(time.Second):
+		t.Error("target writer did not exit after cancellation")
+	}
+	if retained != 0 {
+		t.Fatalf("canceled socket-blocked tunnel retained %d slots", retained)
 	}
 }
 

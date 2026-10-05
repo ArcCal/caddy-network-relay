@@ -63,7 +63,7 @@ Optional: `--email you@example.com` (Let's Encrypt uses it to tell you about cer
 1. `This machine's public IPv4: x.x.x.x; relay.example.com resolves to: x.x.x.x` — the two IPs are the same. If they differ, it stops without having changed anything: fix the DNS, wait until `dig` shows the new IP, and run it again.
 2. `==> Installing dependencies`, `==> Preparing Go 1.26.8` (a download of about 70 MB).
 3. `==> Building Caddy with the network_relay plugin` — lots of `go: downloading ...` lines scroll by, then it is quiet for a few minutes. This is the slowest step: about 10 minutes on a machine with 1 GB of memory.
-4. `==> Generating a random password for user iphone (not shown; saved in /etc/caddy/relay/iphone.password)`.
+4. `==> Generating a random password for user iphone (not shown; it is only put into the profiles)`.
 5. `==> Checking the configuration`, `==> Installing and starting the service`.
 6. `==> Waiting for the certificate and running the self-check` — the first time it waits for Let's Encrypt to issue the certificate, from tens of seconds to 3 minutes. It should end with:
 
@@ -89,10 +89,10 @@ all checks passed
 | Only the two `HTTP/3` lines FAIL (`timeout`) | The local self-check goes to 127.0.0.1, so this is rare; most likely `sysctl` was refused | Look at `journalctl -u caddy -n 50` and send me the error |
 | Everything FAILs, and `journalctl` shows `acme ... connection` errors | The VPS cannot reach Let's Encrypt, or TCP 80 is blocked by the cloud firewall | Allow TCP 80, then `systemctl restart caddy` |
 
-Manual self-check (the password is read from the file and not shown):
+Manual self-check (the password is taken from the profile, the only place it is stored, and not shown):
 
 ```bash
-caddy network-relay check --server relay.example.com --address 127.0.0.1 --user iphone --password-stdin < /etc/caddy/relay/iphone.password
+sed -n 's|.*<string>Basic \(.*\)</string>|\1|p' /etc/caddy/relay/relay.example.com-iphone.mobileconfig | base64 -d | cut -d: -f2- | caddy network-relay check --server relay.example.com --address 127.0.0.1 --user iphone --password-stdin
 ```
 
 ## 3. Checking the ports from outside
@@ -119,7 +119,7 @@ cd ~/Downloads && unzip -o caddy-network-relay-main.zip && cd caddy-network-rela
 ./caddy network-relay check --server relay.example.com --user iphone
 ```
 
-(Paste the password when prompted; it is in `/etc/caddy/relay/iphone.password` on the VPS, so `cat` it. **Quit proxy software such as Clash/Stash on the Mac first**, or you will be testing them instead.)
+(Paste the password when prompted; on the VPS, `sed -n 's|.*<string>Basic \(.*\)</string>|\1|p' /etc/caddy/relay/relay.example.com-iphone.mobileconfig | base64 -d | cut -d: -f2-` shows it. **Quit proxy software such as Clash/Stash on the Mac first**, or you will be testing them instead.)
 
 - All 7 lines `ok`: the cloud firewall, DNS and certificate are all right.
 - Only the two `HTTP/3` lines FAIL: **the cloud firewall does not allow UDP 443**. iPhones then fall back to HTTP/2, which works but is somewhat slower; allow it and test again.
@@ -180,7 +180,7 @@ On the VPS, edit `/etc/caddy/Caddyfile` and add a `log_requests` line inside `ne
 
 ```
 	network_relay {
-		user iphone $argon2id$...
+		user iphone $pbkdf2-sha256$...
 		log_requests
 	}
 ```

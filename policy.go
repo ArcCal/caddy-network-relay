@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -14,17 +15,21 @@ import (
 )
 
 // DefaultBlockedDestinations keeps clients away from the relay's own host,
-// private networks, cloud metadata services and reserved ranges. With the
+// private networks, cloud metadata services, and the reserved,
+// benchmarking, documentation and other ranges that the IANA
+// special-purpose registries mark as not globally reachable. With the
 // default list, the addresses of this host's network interfaces are blocked
 // too: a connection to the host's own public address stays on the host (on
 // Linux it goes over the loopback interface, which firewalls such as ufw
 // let through), so it would reach services that only the firewall keeps
-// from the internet.
+// from the internet. IPv6 forms that carry an IPv4 address (NAT64, 6to4,
+// Teredo) are checked by the IPv4 address they carry as well.
 var DefaultBlockedDestinations = []string{
 	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
 	"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15",
-	"198.51.100.0/24", "203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
-	"::/127", "64:ff9b:1::/48", "100::/64", "2001:db8::/32",
+	"198.51.100.0/24", "203.0.113.0/24", "192.88.99.0/24", "224.0.0.0/4", "240.0.0.0/4",
+	"::/127", "64:ff9b:1::/48", "100::/64", "2001:2::/48",
+	"2001:10::/28", "2001:20::/28", "2001:db8::/32", "3fff::/20", "5f00::/16",
 	"fc00::/7", "fe80::/10", "ff00::/8",
 }
 
@@ -223,13 +228,42 @@ func newPolicy(blocked []string, ports []int) (*policy, error) {
 	return p, nil
 }
 
+// embeddedIPv4 returns the IPv4 addresses carried inside an IPv6 address
+// that the network translates or tunnels to that IPv4 address: the NAT64
+// well-known prefix (RFC 6052), 6to4 (RFC 3056), Teredo server and client
+// (RFC 4380), and deprecated IPv4-compatible addresses (RFC 4291
+// §2.5.5.1).
+func embeddedIPv4(ip netip.Addr) []netip.Addr {
+	if !ip.Is6() || ip.Is4In6() {
+		return nil
+	}
+	o := ip.As16()
+	zero := func(b []byte) bool { return strings.Trim(string(b), "\x00") == "" }
+	v4 := func(b []byte) netip.Addr { return netip.AddrFrom4([4]byte(b)) }
+	switch {
+	case o[0] == 0x00 && o[1] == 0x64 && o[2] == 0xff && o[3] == 0x9b && zero(o[4:12]):
+		return []netip.Addr{v4(o[12:16])}
+	case o[0] == 0x20 && o[1] == 0x02:
+		return []netip.Addr{v4(o[2:6])}
+	case o[0] == 0x20 && o[1] == 0x01 && o[2] == 0x00 && o[3] == 0x00:
+		return []netip.Addr{v4(o[4:8]), netip.AddrFrom4([4]byte{^o[12], ^o[13], ^o[14], ^o[15]})}
+	case zero(o[:12]):
+		return []netip.Addr{v4(o[12:16])}
+	}
+	return nil
+}
+
 // allows reports whether ip may be reached. IPv4-mapped IPv6 addresses are
-// checked as the IPv4 address they carry.
+// checked as the IPv4 address they are, and IPv6 addresses that carry an
+// IPv4 address (NAT64, 6to4, Teredo) also by that address.
 func (p *policy) allows(ip netip.Addr) bool {
 	ip = ip.Unmap().WithZone("")
-	for _, prefix := range p.blocked {
-		if prefix.Contains(ip) {
-			return false
+	candidates := append([]netip.Addr{ip}, embeddedIPv4(ip)...)
+	for _, c := range candidates {
+		for _, prefix := range p.blocked {
+			if prefix.Contains(c) {
+				return false
+			}
 		}
 	}
 	if p.hostAddrs != nil {
@@ -238,7 +272,7 @@ func (p *policy) allows(ip netip.Addr) bool {
 			return false // fail closed if interface discovery never succeeded
 		}
 		for _, own := range ownAddrs {
-			if own.WithZone("") == ip {
+			if slices.Contains(candidates, own.Unmap().WithZone("")) {
 				return false
 			}
 		}

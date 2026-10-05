@@ -95,17 +95,30 @@ func setDefault[T ~int | ~int32 | ~uint32 | ~int64](v *T, minval, maxval, defval
 	}
 }
 
+// Server defaults for settings that neither http2.Server nor
+// http.Server.HTTP2 sets. Set them before servers start, for example in an
+// init function.
+var (
+	DefaultServerMaxConcurrentStreams         uint32 = defaultMaxStreams
+	DefaultServerMaxUploadBufferPerConnection int32  = 1 << 20
+	DefaultServerMaxUploadBufferPerStream     int32  = 1 << 20
+)
+
 func setConfigDefaults(conf *http2Config, server bool) {
-	setDefault(&conf.MaxConcurrentStreams, 1, math.MaxUint32, defaultMaxStreams)
+	if server {
+		setDefault(&conf.MaxConcurrentStreams, 1, math.MaxUint32, DefaultServerMaxConcurrentStreams)
+	} else {
+		setDefault(&conf.MaxConcurrentStreams, 1, math.MaxUint32, defaultMaxStreams)
+	}
 	setDefault(&conf.MaxEncoderHeaderTableSize, 1, math.MaxUint32, initialHeaderTableSize)
 	setDefault(&conf.MaxDecoderHeaderTableSize, 1, math.MaxUint32, initialHeaderTableSize)
 	if server {
-		setDefault(&conf.MaxUploadBufferPerConnection, initialWindowSize, math.MaxInt32, 1<<20)
+		setDefault(&conf.MaxUploadBufferPerConnection, initialWindowSize, math.MaxInt32, DefaultServerMaxUploadBufferPerConnection)
 	} else {
 		setDefault(&conf.MaxUploadBufferPerConnection, initialWindowSize, math.MaxInt32, transportDefaultConnFlow)
 	}
 	if server {
-		setDefault(&conf.MaxUploadBufferPerStream, 1, math.MaxInt32, 1<<20)
+		setDefault(&conf.MaxUploadBufferPerStream, 1, math.MaxInt32, DefaultServerMaxUploadBufferPerStream)
 	} else {
 		setDefault(&conf.MaxUploadBufferPerStream, 1, math.MaxInt32, transportDefaultStreamFlow)
 	}

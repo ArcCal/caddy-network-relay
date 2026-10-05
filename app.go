@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -124,6 +125,9 @@ func (a *App) addServer(srv *caddyhttp.Server) *relayServer {
 			srv.ListenProtocols[i] = withoutProtocol(srv.ListenProtocols[i], "h3")
 		}
 	}
+	// Per-connection state for the limits on new credentials (HTTP/1.1 and
+	// HTTP/2; HTTP/3 connections get theirs in withQUICConn).
+	srv.RegisterConnContext(func(ctx context.Context, _ net.Conn) context.Context { return withConnState(ctx) })
 	// Caddy waits for open requests when it exits; tunnels would keep it
 	// waiting forever.
 	srv.RegisterOnShutdown(func() {
@@ -266,7 +270,7 @@ type endpoint struct {
 	key  string
 	conn net.PacketConn
 	tr   *quic.Transport
-	ln   *quic.EarlyListener
+	ln   *quic.Listener
 	// users holds one entry per configuration using the endpoint, oldest
 	// first; the newest one gets new connections. Guarded by endpoints.
 	users   []endpointUser
@@ -302,8 +306,99 @@ var endpoints = struct {
 	m map[string]*endpoint
 }{m: map[string]*endpoint{}}
 
-// Process-wide admission, including old configurations during reload.
-var h3Connections = make(chan struct{}, 1024)
+// HTTP/3 connections are admitted once their handshake completed, which
+// proves the client's address, so spoofed Initial packets never hold a
+// slot. The limits are process-wide, including old configurations during
+// reload, and one client address (an IPv4 address or an IPv6 /64) gets at
+// most a share, so a few clients cannot take every slot.
+const (
+	h3MaxConnections       = 4096
+	h3ConnectionsPerClient = 64
+)
+
+var h3Connections = newConnectionLimit(h3MaxConnections, h3ConnectionsPerClient)
+
+// Unfinished handshakes have a separate process-wide bound. This permit is
+// released when Accept returns the completed handshake, rather than held
+// for the established connection's lifetime. Per-client admission below
+// waits for address validation, so spoofed Initials cannot consume a
+// particular client's share.
+var h3Handshakes = make(chan struct{}, 1024)
+
+type handshakeReleaseKey struct{}
+
+type connectionLimit struct {
+	mu           sync.Mutex
+	max          int
+	maxPerClient int
+	total        int
+	perClient    map[netip.Prefix]int
+}
+
+func newConnectionLimit(max, maxPerClient int) *connectionLimit {
+	return &connectionLimit{max: max, maxPerClient: maxPerClient, perClient: map[netip.Prefix]int{}}
+}
+
+// acquire admits a connection from addr, returning its release, or false
+// when the total or that client's share is used up.
+func (l *connectionLimit) acquire(addr net.Addr) (func(), bool) {
+	var key netip.Prefix
+	if ap, err := netip.ParseAddrPort(addr.String()); err == nil {
+		key = clientPrefix(ap.Addr())
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.total >= l.max || l.perClient[key] >= l.maxPerClient {
+		return nil, false
+	}
+	l.total++
+	l.perClient[key]++
+	return sync.OnceFunc(func() {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		l.total--
+		if l.perClient[key]--; l.perClient[key] == 0 {
+			delete(l.perClient, key)
+		}
+	}), true
+}
+
+// open is the number of admitted connections.
+func (l *connectionLimit) open() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.total
+}
+
+// New QUIC handshakes per second from addresses not yet validated, beyond
+// which clients must first prove their address with a Retry (RFC 9000
+// §8.1.2). Below it a handshake costs no extra round trip.
+const (
+	handshakeRate  = 200.0
+	handshakeBurst = 400.0
+)
+
+var handshakes = struct {
+	sync.Mutex
+	tokens float64
+	last   time.Time
+}{tokens: handshakeBurst}
+
+// handshakeNeedsRetry is the Transport's VerifySourceAddress.
+func handshakeNeedsRetry(net.Addr) bool {
+	now := time.Now()
+	handshakes.Lock()
+	defer handshakes.Unlock()
+	if !handshakes.last.IsZero() {
+		handshakes.tokens = min(handshakeBurst, handshakes.tokens+now.Sub(handshakes.last).Seconds()*handshakeRate)
+	}
+	handshakes.last = now
+	if handshakes.tokens < 1 {
+		return true
+	}
+	handshakes.tokens--
+	return false
+}
 
 // Start at QUIC's minimum datagram size and let path MTU discovery grow
 // packets. The inner datagram size must not dictate the outer handshake
@@ -350,8 +445,10 @@ func acquireEndpoint(network, hostport string, u endpointUser, logger *zap.Logge
 		return nil, fmt.Errorf("%v (is something else, such as Caddy's own HTTP/3, using this UDP port?)", err)
 	}
 	ep := &endpoint{key: key, conn: conn, users: []endpointUser{u}, logger: logger, closed: make(chan struct{})}
-	ep.tr = &quic.Transport{Conn: conn, ConnContext: ep.connectionContext}
-	ep.ln, err = ep.tr.ListenEarly(&tls.Config{
+	ep.tr = &quic.Transport{
+		Conn: conn, ConnContext: ep.connectionContext, VerifySourceAddress: handshakeNeedsRetry,
+	}
+	ep.ln, err = ep.tr.Listen(&tls.Config{
 		GetEncryptedClientHelloKeys: func(hello *tls.ClientHelloInfo) ([]tls.EncryptedClientHelloKey, error) {
 			u, ok := hello.Context().Value(endpointUserKey{}).(endpointUser)
 			if !ok {
@@ -391,18 +488,20 @@ func acquireEndpoint(network, hostport string, u endpointUser, logger *zap.Logge
 // Bind the TLS policy and HTTP handler to one generation before the
 // handshake. Looking up the newest user again after TLS could route a
 // connection authenticated by an older policy to a stricter new server.
-// Charge admission here too, so unfinished TLS handshakes share the bound.
+// Bound unfinished TLS handshakes separately from established connections.
 func (ep *endpoint) connectionContext(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
 	u, ok := ep.current()
 	if !ok {
 		return nil, errEndpointClosed
 	}
 	select {
-	case h3Connections <- struct{}{}:
+	case h3Handshakes <- struct{}{}:
 	default:
 		return nil, errH3ConnectionLimit
 	}
-	context.AfterFunc(ctx, func() { <-h3Connections })
+	release := sync.OnceFunc(func() { <-h3Handshakes })
+	context.AfterFunc(ctx, release)
+	ctx = context.WithValue(ctx, handshakeReleaseKey{}, release)
 	return context.WithValue(ctx, endpointUserKey{}, u), nil
 }
 
@@ -412,13 +511,23 @@ func (ep *endpoint) accept() {
 		if err != nil {
 			return
 		}
+		if release, ok := conn.Context().Value(handshakeReleaseKey{}).(func()); ok {
+			release()
+		}
 		u, ok := conn.Context().Value(endpointUserKey{}).(endpointUser)
 		if !ok {
 			_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
 			return
 		}
 		s := u.server
+		release, ok := h3Connections.acquire(conn.RemoteAddr())
+		if !ok {
+			_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeExcessiveLoad), "connection limit")
+			continue
+		}
+		context.AfterFunc(conn.Context(), release)
 		go func() {
+			defer release()
 			// ServeQUICConn does not take ownership of externally supplied
 			// connections, including failures while setting up HTTP/3.
 			defer conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")

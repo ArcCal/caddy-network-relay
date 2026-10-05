@@ -25,6 +25,7 @@ import (
 
 	"github.com/caddyserver/caddy/v2"
 	_ "github.com/caddyserver/caddy/v2/modules/standard"
+	"github.com/quic-go/quic-go"
 )
 
 const testPassword = "correct-horse-battery"
@@ -128,10 +129,22 @@ func relayConfig(port int, relay map[string]any, server map[string]any) []byte {
 
 var caddyMu sync.Mutex
 
+// resetClientLimits forgets what earlier tests spent of the limits per
+// client address: every test client dials from 127.0.0.1.
+func resetClientLimits() {
+	attemptBuckets.Lock()
+	clear(attemptBuckets.m)
+	attemptBuckets.Unlock()
+	handshakes.Lock()
+	handshakes.tokens, handshakes.last = handshakeBurst, time.Time{}
+	handshakes.Unlock()
+}
+
 // startRelay runs Caddy with the relay for the duration of the test.
 func startRelay(t *testing.T, relay map[string]any, server map[string]any) (int, func(map[string]any)) {
 	t.Helper()
 	caddyMu.Lock()
+	resetClientLimits()
 	port := freePort(t)
 	if err := caddy.Load(relayConfig(port, relay, server), true); err != nil {
 		caddyMu.Unlock()
@@ -325,7 +338,16 @@ func TestUDPRoundTrip(t *testing.T) {
 				// Datagrams can be lost; retry a few times.
 				var got []byte
 				for attempt := 0; attempt < 5; attempt++ {
-					if err := p.Send(msg); err != nil {
+					// The client's packets start at 1200 bytes, too small for
+					// a 1200-byte payload, until its path MTU discovery has
+					// found a larger size (a few round trips).
+					var tooLarge *quic.DatagramTooLargeError
+					for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(5 * time.Millisecond) {
+						if err = p.Send(msg); !errors.As(err, &tooLarge) || time.Now().After(deadline) {
+							break
+						}
+					}
+					if err != nil {
 						t.Fatalf("send %d: %v", size, err)
 					}
 					rctx, cancel := context.WithTimeout(ctx, time.Second)

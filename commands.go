@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	caddycmd "github.com/caddyserver/caddy/v2/cmd"
@@ -26,21 +27,26 @@ import (
 func init() {
 	caddycmd.RegisterCommand(caddycmd.Command{
 		Name:  "network-relay",
-		Usage: "<passwd|profile|check> [flags]",
+		Usage: "<passwd|identity|profile|check> [flags]",
 		Short: "Tools for the network_relay plugin: users, device profiles, self-test",
 		Long: `
-passwd   creates a user: a random password and the line for the Caddyfile.
-profile  writes the .mobileconfig that sets up an iPhone, iPad or Mac.
-check    tests a running relay like a device would, over HTTP/3, HTTP/2 and HTTP/1.1.
+passwd    creates a user: a random password and the line for the Caddyfile.
+identity  creates a client certificate for a user, instead of or besides a password.
+profile   writes the .mobileconfig that sets up an iPhone, iPad or Mac
+          (or, with --ddm, the declaration for an MDM server).
+check     tests a running relay like a device would, over HTTP/3, HTTP/2 and HTTP/1.1.
 
 Run "caddy network-relay <command> --help" for the flags of each command.`,
 		CobraFunc: func(cmd *cobra.Command) {
-			cmd.AddCommand(passwdCommand(), profileCommand(), checkCommand())
+			cmd.AddCommand(passwdCommand(), identityCommand(), profileCommand(), checkCommand())
 		},
 	})
 }
 
-// readPassword reads a password: the first line of standard input when it
+// stdinLines reads standard input line by line across readPassword calls.
+var stdinLines = sync.OnceValue(func() *bufio.Reader { return bufio.NewReader(os.Stdin) })
+
+// readPassword reads a password: the next line of standard input when it
 // is not a terminal, otherwise a prompt without echo.
 func readPassword(prompt string) (string, error) {
 	if term.IsTerminal(int(os.Stdin.Fd())) {
@@ -49,7 +55,7 @@ func readPassword(prompt string) (string, error) {
 		fmt.Fprintln(os.Stderr)
 		return string(b), err
 	}
-	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
+	line, err := stdinLines().ReadString('\n')
 	if err != nil && !(errors.Is(err, io.EOF) && line != "") {
 		return "", fmt.Errorf("reading the password from standard input: %w", err)
 	}
@@ -57,22 +63,34 @@ func readPassword(prompt string) (string, error) {
 }
 
 func passwdCommand() *cobra.Command {
-	var name string
-	var stdin bool
+	var name, expires string
+	var stdin, fastHash bool
 	c := &cobra.Command{
-		Use:   "passwd --name <user> [--stdin]",
-		Short: "Create a user: random password and Argon2id hash",
+		Use:   "passwd --name <user> [--stdin [--fast-hash]] [--expires <time>]",
+		Short: "Create a user: random password and its hash",
 		Long: `Creates a user for the network_relay directive. Prints a random password
 (144 random bits) and the line to put in the Caddyfile:
 
-    user <name> <argon2id hash>
+    user <name> <hash>
 
-With --stdin, reads your own password (at least 12 characters) from standard
-input instead and prints only the Caddyfile line.`,
+A generated password is too random to guess, online or from a stolen hash,
+so it gets a fast hash (PBKDF2-SHA256, the format the Rust relay uses too)
+that costs the server almost nothing to check. With --stdin, reads your own
+password (at least 12 characters) from standard input instead, hashes it
+with Argon2id and prints only the Caddyfile line; add --fast-hash when that
+password is itself a random secret of at least 24 characters.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := validateUserName(name); err != nil {
 				return err
+			}
+			if fastHash && !stdin {
+				return errors.New("--fast-hash goes with --stdin; generated passwords get it anyway")
+			}
+			if expires != "" {
+				if _, err := time.Parse(time.RFC3339, expires); err != nil {
+					return fmt.Errorf("--expires %q is not an RFC 3339 time such as 2027-01-31T00:00:00Z", expires)
+				}
 			}
 			password := RandomPassword()
 			if stdin {
@@ -84,17 +102,89 @@ input instead and prints only the Caddyfile line.`,
 					return errors.New("the password must be at least 12 characters")
 				}
 			}
+			hash := HashPassword(password)
+			if !stdin || fastHash {
+				var err error
+				if hash, err = HashGeneratedSecret(password); err != nil {
+					return err
+				}
+			}
 			if !stdin {
 				fmt.Printf("password: %s\n", password)
 			}
-			fmt.Printf("user %s %s\n", name, HashPassword(password))
+			line := fmt.Sprintf("user %s %s", name, hash)
+			if expires != "" {
+				line += " expires " + expires
+			}
+			fmt.Println(line)
 			return nil
 		},
 	}
 	c.Flags().StringVar(&name, "name", "", "user name (letters, digits, - _ .)")
 	c.Flags().BoolVar(&stdin, "stdin", false, "read the password from standard input")
+	c.Flags().BoolVar(&fastHash, "fast-hash", false, "with --stdin: the password is a random secret of 24+ characters")
+	c.Flags().StringVar(&expires, "expires", "", "when the account stops working (RFC 3339)")
 	_ = c.MarkFlagRequired("name")
 	return c
+}
+
+func identityCommand() *cobra.Command {
+	var name, out string
+	var days int
+	c := &cobra.Command{
+		Use:   "identity --name <user> [--days <n>] [-o <file.p12>]",
+		Short: "Create a client certificate for a user",
+		Long: `Creates an ECDSA key and a self-signed client certificate for a user, in a
+password-protected PKCS#12 file for "caddy network-relay profile --identity".
+The device then authenticates in the TLS handshake instead of (or as well as)
+with a password, and the key cannot be copied off the device.
+
+Prints the Caddyfile line that pins the certificate by its SHA-256
+fingerprint, and the PKCS#12 password (shown only once). The relay site also
+needs Caddy to ask devices for certificates:
+
+    tls {
+        client_auth {
+            mode request
+        }
+    }
+
+"request" asks without requiring one, so browsers and password users are
+unaffected.`,
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			id, err := GenerateIdentity(name, days)
+			if err != nil {
+				return err
+			}
+			if out == "" {
+				out = name + ".p12"
+			}
+			if err := writePrivateFile(out, id.P12); err != nil {
+				return err
+			}
+			fmt.Fprintf(os.Stderr, "wrote %s (the key and certificate; mode 600, delete it once installed)\n", out)
+			fmt.Printf("# Caddyfile, in network_relay (or add \"certificate %s\" to an existing user line to allow both):\n", id.Fingerprint)
+			fmt.Printf("user %s certificate %s\n", name, id.Fingerprint)
+			fmt.Printf("# PKCS#12 password (the device asks for it when installing the profile):\n")
+			fmt.Printf("identity password: %s\n", id.Password)
+			fmt.Printf("# then: caddy network-relay profile --host <relay domain> --user %s --identity %s\n", name, out)
+			return nil
+		},
+	}
+	c.Flags().StringVar(&name, "name", "", "user name (letters, digits, - _ .)")
+	c.Flags().IntVar(&days, "days", 825, "days the certificate is valid")
+	c.Flags().StringVarP(&out, "out", "o", "", "file to write (default <name>.p12)")
+	_ = c.MarkFlagRequired("name")
+	return c
+}
+
+// warnCommandLinePassword warns when --password was given.
+func warnCommandLinePassword(cmd *cobra.Command) {
+	if cmd.Flags().Changed("password") {
+		fmt.Fprintln(os.Stderr, "warning: a password on the command line is visible to other users "+
+			"of this machine and stays in the shell history; leave out --password to be asked")
+	}
 }
 
 type optionalBool struct{ v **bool }
@@ -119,9 +209,9 @@ func (o optionalBool) Type() string { return "true|false" }
 
 func profileCommand() *cobra.Command {
 	var p Profile
-	var out, gfwFile string
+	var out, gfwFile, identityFile string
 	var domainFiles []string
-	var gfwlist, passwordStdin bool
+	var gfwlist, passwordStdin, embedIdentityPassword, ddm bool
 	c := &cobra.Command{
 		Use:   "profile --host <domain> --user <name> [flags]",
 		Short: "Write a .mobileconfig for iPhone, iPad and Mac",
@@ -129,19 +219,61 @@ func profileCommand() *cobra.Command {
 (iOS/iPadOS 17+, macOS 14+). It contains the password in clear text: keep it
 private and delete copies after installing it.
 
+With --identity, the profile also installs a client certificate made by
+"caddy network-relay identity", and the device authenticates with it; then
+no password is needed. The device asks for the certificate's PKCS#12
+password while installing, unless --embed-identity-password puts it in.
+
+With --ddm, writes the declarative device management declaration
+(com.apple.configuration.network.relay, OS 27+) for an MDM server instead;
+it refers to a certificate by the MDM's asset identifier (--identity-asset).
+
 Without any --match-* option, all traffic goes through the relay (except
 --exclude-*). The password is asked for, or read from standard input with
 --password-stdin; it never needs to be on the command line.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			var err error
-			if p.Password == "" || passwordStdin {
+			warnCommandLinePassword(cmd)
+			if embedIdentityPassword && identityFile == "" {
+				return errors.New("--embed-identity-password goes with --identity")
+			}
+			if p.IdentityAsset != "" && !ddm {
+				return errors.New("--identity-asset goes with --ddm")
+			}
+			if identityFile != "" && ddm {
+				return errors.New("a DDM declaration refers to the certificate by --identity-asset instead of --identity")
+			}
+			if p.IdentityCertificateUUID != "" {
+				if ddm {
+					return errors.New("a DDM declaration refers to the certificate by --identity-asset instead of --identity-certificate-uuid")
+				}
+				if identityFile != "" {
+					return errors.New("give either --identity or --identity-certificate-uuid")
+				}
+				if !isUUID(p.IdentityCertificateUUID) {
+					return errors.New("the identity certificate UUID must be a UUID")
+				}
+			}
+			hasIdentity := identityFile != "" || p.IdentityAsset != "" || p.IdentityCertificateUUID != ""
+			if passwordStdin || p.Password == "" && !hasIdentity {
 				if p.Password, err = readPassword("Password for " + p.User + ": "); err != nil {
 					return err
 				}
+				if p.Password == "" {
+					return errors.New("the password is empty")
+				}
 			}
-			if p.Password == "" {
-				return errors.New("the password is empty")
+			if identityFile != "" {
+				p.Identity = &IdentityPayload{}
+				if p.Identity.P12, err = os.ReadFile(identityFile); err != nil {
+					return err
+				}
+				if embedIdentityPassword {
+					if p.Identity.Password, err = readPassword("PKCS#12 password: "); err != nil {
+						return err
+					}
+				}
 			}
 			// Asked for a list of domains: an empty result must not turn into
 			// a profile that relays everything.
@@ -188,17 +320,21 @@ Without any --match-* option, all traffic goes through the relay (except
 				return errors.New("no domain to relay is left (empty lists, or only the relay itself); " +
 					"leave out every --match-* and list option to relay all traffic")
 			}
-			xml, err := p.Generate()
+			generate, ext := p.Generate, ".mobileconfig"
+			if ddm {
+				generate, ext = p.GenerateDDM, ".json"
+			}
+			text, err := generate()
 			if err != nil {
 				return err
 			}
 			if out == "" {
-				out = normalizeDomain(p.Host) + "-" + p.User + ".mobileconfig"
+				out = normalizeDomain(p.Host) + "-" + p.User + ext
 			}
-			if err := writePrivateFile(out, []byte(xml)); err != nil {
+			if err := writePrivateFile(out, []byte(text)); err != nil {
 				return err
 			}
-			fmt.Fprintf(os.Stderr, "wrote %s (contains the password; mode 600): %d match domains\n", out, len(p.MatchDomains))
+			fmt.Fprintf(os.Stderr, "wrote %s (contains the credentials; mode 600): %d match domains\n", out, len(p.MatchDomains))
 			return nil
 		},
 	}
@@ -207,6 +343,10 @@ Without any --match-* option, all traffic goes through the relay (except
 	f.StringVar(&p.User, "user", "", "user name")
 	f.StringVar(&p.Password, "password", "", "password (better: leave out and type it, or --password-stdin)")
 	f.BoolVar(&passwordStdin, "password-stdin", false, "read the password from standard input")
+	f.StringVar(&identityFile, "identity", "", "client certificate (PKCS#12 from \"caddy network-relay identity\") to authenticate with")
+	f.BoolVar(&embedIdentityPassword, "embed-identity-password", false, "put the certificate's password (asked for) into the profile")
+	f.BoolVar(&ddm, "ddm", false, "write a DDM declaration (JSON) for an MDM server instead (OS 27+)")
+	f.StringVar(&p.IdentityAsset, "identity-asset", "", "with --ddm: identifier of the MDM's identity asset declaration")
 	f.IntVar(&p.Port, "port", 443, "the relay's port")
 	f.StringArrayVar(&p.MatchDomains, "match-domain", nil, "relay this domain and its subdomains (repeatable)")
 	f.StringArrayVar(&p.ExcludedDomains, "exclude-domain", nil, "never relay this domain and its subdomains (repeatable)")
@@ -307,6 +447,7 @@ func checkCommand() *cobra.Command {
 Exits with 0 when everything passed.`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			warnCommandLinePassword(cmd)
 			if password == "" || passwordStdin {
 				var err error
 				if password, err = readPassword("Password for " + user + ": "); err != nil {

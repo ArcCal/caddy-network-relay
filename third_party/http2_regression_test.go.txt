@@ -4,6 +4,7 @@
 package http2_test
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"testing"
@@ -146,6 +147,93 @@ func TestRelayInterruptStreamUnblocksFlowControlledWrite(t *testing.T) {
 			}
 		}
 		st.wantConnFlowControlConsumed(0)
+	})
+}
+
+func TestRelayInterruptStreamUnblocksNetworkWrite(t *testing.T) {
+	synctestTest(t, func(t testing.TB) {
+		write := make(chan struct{})
+		interrupt := make(chan struct{})
+		done := make(chan struct{})
+		payload := bytes.Repeat([]byte{0xa5}, 32<<10)
+		st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+			defer close(done)
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-write
+			writeDone := make(chan error, 1)
+			go func() {
+				_, err := w.Write(payload)
+				writeDone <- err
+			}()
+			<-interrupt
+			if err := w.(interface{ InterruptStream(uint32) error }).InterruptStream(uint32(ErrCodeCancel)); err != nil {
+				t.Error(err)
+			}
+			if err := <-writeDone; err == nil {
+				t.Error("network-blocked write completed without a cancellation error")
+			}
+			// A caller may reuse its Write buffer immediately after cancellation.
+			clear(payload)
+			if err := w.(interface{ ResetStream(uint32) error }).ResetStream(uint32(ErrCodeCancel)); err != nil {
+				t.Error(err)
+			}
+		})
+		defer st.Close()
+		st.greet()
+		st.writeHeaders(HeadersFrameParam{
+			StreamID:      1,
+			BlockFragment: st.encodeHeaderRaw(":method", "CONNECT", ":authority", "target:443"),
+			EndHeaders:    true,
+		})
+		st.wantFrameType(FrameHeaders)
+		// H2 still has its full initial window; only the underlying socket
+		// write is blocked. A queued reset cannot reach the peer yet.
+		conn := st.cc.(*synctestNetConn)
+		conn.SetReadBufferSize(0)
+		close(write)
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("handler ended before cancellation")
+		default:
+		}
+		close(interrupt)
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("cancellation waited for a reset blocked on the network")
+		}
+		if st.streamExists(1) {
+			t.Error("canceled stream retained local capacity")
+		}
+		// Resuming the peer must deliver the encoded DATA unchanged followed
+		// by the original reset code, without referencing a pooled writer.
+		conn.SetReadBufferSize(64 << 10)
+		synctest.Wait()
+		var sawData bool
+		for {
+			f := st.readFrame()
+			if f == nil {
+				t.Fatal("missing cancellation reset after network resumed")
+			}
+			if data, ok := f.(*DataFrame); ok {
+				sawData = true
+				if !bytes.Equal(data.Data(), bytes.Repeat([]byte{0xa5}, len(data.Data()))) {
+					t.Error("in-flight DATA referenced the reused handler buffer")
+				}
+			}
+			if rst, ok := f.(*RSTStreamFrame); ok {
+				if rst.ErrCode != ErrCodeCancel {
+					t.Fatalf("cancellation reset = %s, want CANCEL", rst.ErrCode)
+				}
+				break
+			}
+		}
+		if !sawData {
+			t.Error("test did not exercise an in-flight DATA write")
+		}
 	})
 }
 

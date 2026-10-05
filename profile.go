@@ -2,6 +2,8 @@ package networkrelay
 
 import (
 	"crypto/rand"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -15,12 +17,25 @@ import (
 const identifierPrefix = "com.github.arccal.network-relay"
 
 // Profile describes a configuration profile (.mobileconfig) with a
-// com.apple.relay.managed payload for iOS/iPadOS 17+, macOS 14+.
+// com.apple.relay.managed payload for iOS/iPadOS 17+, macOS 14+ (deprecated
+// from OS 27 in favour of the DDM declaration, see GenerateDDM).
+//
+// The device authenticates with a password, which it sends in every
+// CONNECT request, and/or an identity certificate (a
+// com.apple.security.pkcs12 payload referenced by PayloadCertificateUUID),
+// which it presents in the TLS handshake.
 type Profile struct {
-	Host     string
-	Port     int // 443 when 0
-	User     string
+	Host string
+	Port int // 443 when 0
+	User string
+	// Password for Basic authentication; optional with an identity.
 	Password string
+	// Identity is a client identity (from GenerateIdentity) to install
+	// with the profile.
+	Identity *IdentityPayload
+	// IdentityAsset, for DDM declarations only, is the identifier of the
+	// MDM server's identity asset declaration.
+	IdentityAsset string
 	// UDPTemplate is the path of the CONNECT-UDP URI template; the
 	// default one when empty.
 	UDPTemplate string
@@ -46,6 +61,15 @@ type Profile struct {
 	Name string
 	// Which relay URLs to include; both when both are false.
 	NoHTTP3, NoHTTP2 bool
+}
+
+// IdentityPayload is a PKCS#12 identity installed with the profile.
+type IdentityPayload struct {
+	P12 []byte
+	// Password is embedded in the profile when set; otherwise the device
+	// asks for it during installation, so the profile file alone does not
+	// unlock the key.
+	Password string
 }
 
 // RelayURL is the relay URL, which is the full CONNECT-UDP URI template.
@@ -121,52 +145,80 @@ func xmlSafe(s string) bool {
 	return true
 }
 
-// Generate returns the profile as XML.
-func (p *Profile) Generate() (string, error) {
+// check validates what both output formats share.
+func (p *Profile) check() error {
 	if p.NoHTTP3 && p.NoHTTP2 {
-		return "", errors.New("the profile needs HTTP/3, HTTP/2 or both")
+		return errors.New("the profile needs HTTP/3, HTTP/2 or both")
+	}
+	if p.Password == "" && p.Identity == nil && p.IdentityAsset == "" && p.IdentityCertificateUUID == "" {
+		return errors.New("the profile needs a password, an identity certificate, or both")
+	}
+	if p.IdentityCertificateUUID != "" && (p.Identity != nil || p.IdentityAsset != "") {
+		return errors.New("give only one identity: an embedded certificate, an installed certificate UUID, or a DDM asset")
+	}
+	if p.Identity != nil && len(p.Identity.P12) == 0 {
+		return errors.New("the identity file is empty")
 	}
 	if p.Port < 0 || p.Port > 65535 {
-		return "", errors.New("the relay port must be between 1 and 65535")
+		return errors.New("the relay port must be between 1 and 65535")
 	}
 	if err := validateUserName(p.User); err != nil {
-		return "", err
+		return err
 	}
 	if strings.ContainsAny(p.Password, "\r\n") || !utf8.ValidString(p.Password) {
-		return "", errors.New("the password contains characters that cannot be sent in a header")
+		return errors.New("the password contains characters that cannot be sent in a header")
 	}
 	if err := checkDomain(p.Host); err != nil {
-		return "", err
+		return err
 	}
 	for _, list := range [][]string{p.MatchDomains, p.ExcludedDomains, p.MatchFQDNs, p.ExcludedFQDNs} {
 		for _, d := range list {
 			if err := checkDomain(strings.TrimSuffix(d, ".")); err != nil {
-				return "", err
+				return err
 			}
 		}
 	}
 	if p.RelayUUID != "" && !isUUID(p.RelayUUID) {
-		return "", errors.New("the relay UUID must be a UUID")
+		return errors.New("the relay UUID must be a UUID")
 	}
 	if p.IdentityCertificateUUID != "" && !isUUID(p.IdentityCertificateUUID) {
-		return "", errors.New("the identity certificate UUID must be a UUID")
+		return errors.New("the identity certificate UUID must be a UUID")
 	}
-	if !xmlSafe(p.Name) || !xmlSafe(p.Password) {
-		return "", errors.New("the profile contains a character XML cannot represent")
+	if !xmlSafe(p.Name) || !xmlSafe(p.Password) || p.Identity != nil && !xmlSafe(p.Identity.Password) {
+		return errors.New("the profile contains a character XML cannot represent")
 	}
 	tmpl := p.UDPTemplate
 	if tmpl == "" {
 		tmpl = DefaultUDPTemplate
 	}
-	if _, err := parseUDPTemplate(tmpl); err != nil {
+	_, err := parseUDPTemplate(tmpl)
+	return err
+}
+
+// visibleName is the name shown in Settings.
+func (p *Profile) visibleName() string {
+	if p.Name != "" {
+		return p.Name
+	}
+	return strings.ToLower(p.Host)
+}
+
+func (p *Profile) identifier() string {
+	return identifierPrefix + "." + strings.ToLower(p.Host) + "." + p.User
+}
+
+// Generate returns the profile as XML.
+func (p *Profile) Generate() (string, error) {
+	if err := p.check(); err != nil {
 		return "", err
 	}
-	host := strings.ToLower(p.Host)
-	name := p.Name
-	if name == "" {
-		name = host
+	if p.IdentityAsset != "" {
+		return "", errors.New("an identity asset reference is only for DDM declarations")
 	}
-	id := identifierPrefix + "." + host + "." + p.User
+	host := strings.ToLower(p.Host)
+	name := p.visibleName()
+	id := p.identifier()
+	certUUID := newUUID()
 	scope := "all of this device's traffic"
 	if matches := append(append([]string{}, p.MatchDomains...), p.MatchFQDNs...); len(matches) > 0 {
 		for i := range matches {
@@ -185,7 +237,28 @@ func (p *Profile) Generate() (string, error) {
 <dict>
   <key>PayloadContent</key>
   <array>
-    <dict>
+`)
+	if p.Identity != nil {
+		w(`    <dict>
+      <key>PayloadType</key>
+      <string>com.apple.security.pkcs12</string>
+      <key>PayloadVersion</key>
+      <integer>1</integer>
+      <key>PayloadIdentifier</key>
+      <string>%s.identity</string>
+      <key>PayloadUUID</key>
+      <string>%s</string>
+      <key>PayloadDisplayName</key>
+      <string>%s identity</string>
+      <key>PayloadCertificateFileName</key>
+      <string>%s.p12</string>
+`, xmlEscape(id), certUUID, xmlEscape(name), xmlEscape(p.User))
+		if p.Identity.Password != "" {
+			w("      <key>Password</key>\n      <string>%s</string>\n", xmlEscape(p.Identity.Password))
+		}
+		w("      <key>PayloadContent</key>\n      <data>%s</data>\n    </dict>\n", base64.StdEncoding.EncodeToString(p.Identity.P12))
+	}
+	w(`    <dict>
       <key>PayloadType</key>
       <string>com.apple.relay.managed</string>
       <key>PayloadVersion</key>
@@ -209,14 +282,18 @@ func (p *Profile) Generate() (string, error) {
 	if p.IdentityCertificateUUID != "" {
 		w("          <key>PayloadCertificateUUID</key>\n          <string>%s</string>\n", strings.ToUpper(p.IdentityCertificateUUID))
 	}
-	w(`          <key>AdditionalHTTPHeaderFields</key>
+	if p.Password != "" {
+		w(`          <key>AdditionalHTTPHeaderFields</key>
           <dict>
             <key>Authorization</key>
             <string>%s</string>
           </dict>
-        </dict>
-      </array>
 `, xmlEscape(BasicAuthorization(p.User, p.Password)))
+	}
+	if p.Identity != nil {
+		w("          <key>PayloadCertificateUUID</key>\n          <string>%s</string>\n", certUUID)
+	}
+	w("        </dict>\n      </array>\n")
 	for _, list := range []struct {
 		key    string
 		values []string
@@ -260,4 +337,65 @@ func (p *Profile) Generate() (string, error) {
 </plist>
 `, xmlEscape(name), xmlEscape(description), xmlEscape(id), newUUID())
 	return b.String(), nil
+}
+
+// GenerateDDM returns the declarative device management declaration
+// (com.apple.configuration.network.relay, iOS/macOS/visionOS 27+) for an
+// MDM server, as JSON. A client identity is referenced as an asset
+// declaration (IdentityAssetReference) that the MDM server provides.
+func (p *Profile) GenerateDDM() (string, error) {
+	if err := p.check(); err != nil {
+		return "", err
+	}
+	if p.Identity != nil {
+		return "", errors.New("a DDM declaration references the identity as an asset: give the asset's identifier instead")
+	}
+	if p.IdentityCertificateUUID != "" {
+		return "", errors.New("a DDM declaration references the identity as an asset: give the asset's identifier instead of a certificate UUID")
+	}
+	if p.IdentityAsset != "" && !xmlSafe(p.IdentityAsset) {
+		return "", errors.New("the identity asset identifier contains a control character")
+	}
+	relay := map[string]any{}
+	if !p.NoHTTP3 {
+		relay["HTTP3RelayURL"] = p.RelayURL()
+	}
+	if !p.NoHTTP2 {
+		relay["HTTP2RelayURL"] = p.RelayURL()
+	}
+	if p.Password != "" {
+		relay["AdditionalHTTPHeaderFields"] = map[string]string{"Authorization": BasicAuthorization(p.User, p.Password)}
+	}
+	if p.IdentityAsset != "" {
+		relay["IdentityAssetReference"] = p.IdentityAsset
+	}
+	payload := map[string]any{"VisibleName": p.visibleName(), "Relays": []any{relay}}
+	for _, list := range []struct {
+		key    string
+		values []string
+	}{{"MatchDomains", p.MatchDomains}, {"ExcludedDomains", p.ExcludedDomains},
+		{"MatchFQDNs", p.MatchFQDNs}, {"ExcludedFQDNs", p.ExcludedFQDNs}} {
+		if len(list.values) > 0 {
+			payload[list.key] = normalizedAll(list.values)
+		}
+	}
+	if p.RelayUUID != "" {
+		payload["RelayUUID"] = strings.ToUpper(p.RelayUUID)
+	}
+	if p.UIToggleEnabled != nil {
+		payload["UIToggleEnabled"] = *p.UIToggleEnabled
+	}
+	if p.AllowDNSFailover != nil {
+		payload["AllowDNSFailover"] = *p.AllowDNSFailover
+	}
+	b, err := json.MarshalIndent(map[string]any{
+		"Type":        "com.apple.configuration.network.relay",
+		"Identifier":  p.identifier(),
+		"ServerToken": newUUID(),
+		"Payload":     payload,
+	}, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(b) + "\n", nil
 }
