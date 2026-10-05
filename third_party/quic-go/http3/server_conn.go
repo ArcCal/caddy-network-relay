@@ -18,8 +18,12 @@ import (
 	"github.com/quic-go/quic-go/qlogwriter"
 )
 
-// Bound incomplete request headers across connections and configurations.
-var pendingHeaders = make(chan struct{}, 256)
+// Bound incomplete request headers per connection, and across connections
+// and configurations. A connection gets a share it cannot exceed, so one
+// client cannot take the process-wide slots from everyone else.
+const pendingHeadersPerConn = 16
+
+var pendingHeaders = make(chan struct{}, 4096)
 
 // RawServerConn is an HTTP/3 server connection.
 // It can be used for advanced use cases where the application wants to manage the QUIC connection lifecycle.
@@ -36,6 +40,9 @@ type RawServerConn struct {
 
 	decoder       *qpack.Decoder
 	priorityAware atomic.Bool // whether the client sent an RFC 9218 priority signal
+
+	// pendingHeaders is this connection's share of the global slots.
+	pendingHeaders chan struct{}
 
 	qlogger qlogwriter.Recorder
 	logger  *slog.Logger
@@ -57,6 +64,7 @@ func newRawServerConn(
 		requestHandler: requestHandler,
 		maxHeaderBytes: maxHeaderBytes,
 		decoder:        qpack.NewDecoder(),
+		pendingHeaders: make(chan struct{}, pendingHeadersPerConn),
 		qlogger:        qlogger,
 		logger:         logger,
 	}
@@ -107,13 +115,25 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 		_ = str.SetReadDeadline(time.Now().Add(c.readHeaderTimeout))
 	}
 	select {
+	case c.pendingHeaders <- struct{}{}:
+	default:
+		// No client needs this many requests without headers: close the
+		// connection rather than let it hold more slots.
+		c.CloseWithError(quic.ApplicationErrorCode(ErrCodeExcessiveLoad), "too many incomplete requests")
+		return
+	}
+	select {
 	case pendingHeaders <- struct{}{}:
 	default:
+		<-c.pendingHeaders
 		str.CancelRead(quic.StreamErrorCode(ErrCodeExcessiveLoad))
 		str.CancelWrite(quic.StreamErrorCode(ErrCodeExcessiveLoad))
 		return
 	}
-	releaseHeader := sync.OnceFunc(func() { <-pendingHeaders })
+	releaseHeader := sync.OnceFunc(func() {
+		<-pendingHeaders
+		<-c.pendingHeaders
+	})
 	defer releaseHeader()
 	if c.idleTimeout > 0 {
 		// This only applies if the stream is the first active stream,

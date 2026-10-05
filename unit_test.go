@@ -142,6 +142,34 @@ func TestPolicy(t *testing.T) {
 			t.Errorf("%s blocked", s)
 		}
 	}
+	// Ranges in the IANA special-purpose registries.
+	for _, s := range []string{"192.88.99.1", "3fff::1", "5f00::1", "2001:2::1", "2001:10::1", "2001:20::1", "255.255.255.255"} {
+		if p.allows(netip.MustParseAddr(s)) {
+			t.Errorf("%s allowed", s)
+		}
+	}
+	// IPv6 forms that carry an IPv4 address are checked by it too.
+	embedded, _ := newPolicy([]string{"10.0.0.0/8", "127.0.0.0/8", "192.0.2.0/24"}, nil)
+	if got := embeddedIPv4(netip.MustParseAddr("64:ff9b::a00:1")); !slices.Equal(got, []netip.Addr{netip.MustParseAddr("10.0.0.1")}) {
+		t.Errorf("NAT64: %v", got)
+	}
+	for _, s := range []string{
+		"64:ff9b::a00:1",  // NAT64 to 10.0.0.1
+		"64:ff9b::7f00:1", // NAT64 to 127.0.0.1
+		"2002:a00:1::1",   // 6to4 of 10.0.0.1
+		"::a00:1",         // IPv4-compatible 10.0.0.1
+		// RFC 4380 example: server 65.54.227.120, client 192.0.2.45.
+		"2001:0:4136:e378:8000:63bf:3fff:fdd2",
+	} {
+		if embedded.allows(netip.MustParseAddr(s)) {
+			t.Errorf("%s allowed", s)
+		}
+	}
+	for _, s := range []string{"64:ff9b::808:808", "2002:808:808::1", "2606:4700:4700::1111", "2001:db8::1"} {
+		if !embedded.allows(netip.MustParseAddr(s)) {
+			t.Errorf("%s blocked", s)
+		}
+	}
 	// The IPv4 rule applies to mapped addresses even with the mapped
 	// range unblocked.
 	only, _ := newPolicy([]string{"127.0.0.0/8"}, nil)
@@ -194,7 +222,7 @@ func TestPolicy(t *testing.T) {
 	}
 	p.blocked = nil // the documentation ranges above are blocked anyway
 	p.resolver = fakeResolver{"self.example": {netip.MustParseAddr("2001:db8:1::9")}}
-	for _, s := range []string{"203.0.113.9", "::ffff:203.0.113.9", "2001:db8:1::9"} {
+	for _, s := range []string{"203.0.113.9", "::ffff:203.0.113.9", "2001:db8:1::9", "64:ff9b::cb00:7109"} {
 		if p.allows(netip.MustParseAddr(s)) {
 			t.Errorf("own address %s allowed", s)
 		}

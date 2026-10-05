@@ -32,8 +32,7 @@ func init() {
 const (
 	defaultConnectTimeout = 10 * time.Second
 	defaultUDPIdleTimeout = 5 * time.Minute
-	defaultMaxTunnels     = 1024
-	defaultMaxUserTunnels = 128
+	defaultMaxUserTunnels = 512
 
 	// connectUDP is the upgrade token / :protocol of CONNECT-UDP.
 	connectUDP = "connect-udp"
@@ -71,8 +70,11 @@ type Handler struct {
 	UDPIdleTimeout caddy.Duration `json:"udp_idle_timeout,omitempty"`
 
 	// Most tunnels (TCP connections and UDP flows) open at once, across all
-	// users. Default: 1024; size this against memory and file descriptors.
-	MaxTunnels        int `json:"max_tunnels,omitempty"`
+	// users. Default: a quarter of the machine's memory at 256 KiB per
+	// tunnel, between 512 and 20000 (4096 when memory is unknown).
+	MaxTunnels int `json:"max_tunnels,omitempty"`
+	// Most tunnels one user has open at once; a device that relays all its
+	// traffic can have hundreds. Default: 512.
 	MaxTunnelsPerUser int `json:"max_tunnels_per_user,omitempty"`
 	// Shared upload/download payload budgets per user. Zero disables a budget.
 	MaxBytesPerSecondPerUser      int64 `json:"max_bytes_per_second_per_user,omitempty"`
@@ -129,7 +131,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		h.UDPIdleTimeout = caddy.Duration(defaultUDPIdleTimeout)
 	}
 	if h.MaxTunnels == 0 {
-		h.MaxTunnels = defaultMaxTunnels
+		h.MaxTunnels = defaultMaxTunnels(totalMemory())
 	}
 	if h.MaxTunnelsPerUser == 0 {
 		h.MaxTunnelsPerUser = defaultMaxUserTunnels

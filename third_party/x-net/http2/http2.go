@@ -49,6 +49,18 @@ var (
 	disableExtendedConnectProtocol = true
 )
 
+// SetExtendedConnectProtocol turns SETTINGS_ENABLE_CONNECT_PROTOCOL (RFC
+// 8441) on or off for servers started afterwards; GODEBUG=http2xconnect=1
+// turns it on too.
+func SetExtendedConnectProtocol(enabled bool) {
+	disableExtendedConnectProtocol = !enabled
+}
+
+// ExtendedConnectProtocol reports whether servers offer extended CONNECT.
+func ExtendedConnectProtocol() bool {
+	return !disableExtendedConnectProtocol
+}
+
 func init() {
 	e := os.Getenv("GODEBUG")
 	if strings.Contains(e, "http2debug=1") {
