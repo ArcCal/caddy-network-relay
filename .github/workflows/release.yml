@@ -29,12 +29,12 @@ jobs:
     outputs:
       sha: ${{ steps.revision.outputs.sha }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && github.ref || github.event.release.tag_name || github.ref }}
       - id: revision
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
       - run: go vet ./...
@@ -63,12 +63,12 @@ jobs:
           - { os: darwin, arch: arm64 }
           - { os: darwin, arch: amd64 }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           # Run by hand: the branch picked in the Actions page (the release
           # step then creates the tag there if needed). Otherwise the tag.
           ref: ${{ needs.verify.outputs.sha }}
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
       - name: Build
@@ -81,7 +81,7 @@ jobs:
           name=caddy-network-relay-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}
           tar -czf "$name.tar.gz" caddy
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.os }}-${{ matrix.arch }}
           path: caddy-network-relay-*.tar.gz*
@@ -91,11 +91,11 @@ jobs:
     needs: [verify, build]
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
           target_commitish: ${{ needs.verify.outputs.sha }}

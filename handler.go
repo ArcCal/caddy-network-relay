@@ -7,6 +7,7 @@ package networkrelay
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -31,8 +32,7 @@ func init() {
 const (
 	defaultConnectTimeout = 10 * time.Second
 	defaultUDPIdleTimeout = 5 * time.Minute
-	defaultMaxTunnels     = 1024
-	defaultMaxUserTunnels = 128
+	defaultMaxUserTunnels = 512
 
 	// connectUDP is the upgrade token / :protocol of CONNECT-UDP.
 	connectUDP = "connect-udp"
@@ -70,8 +70,11 @@ type Handler struct {
 	UDPIdleTimeout caddy.Duration `json:"udp_idle_timeout,omitempty"`
 
 	// Most tunnels (TCP connections and UDP flows) open at once, across all
-	// users. Default: 1024; size this against memory and file descriptors.
-	MaxTunnels        int `json:"max_tunnels,omitempty"`
+	// users. Default: a quarter of the machine's memory at 256 KiB per
+	// tunnel, between 512 and 20000 (4096 when memory is unknown).
+	MaxTunnels int `json:"max_tunnels,omitempty"`
+	// Most tunnels one user has open at once; a device that relays all its
+	// traffic can have hundreds. Default: 512.
 	MaxTunnelsPerUser int `json:"max_tunnels_per_user,omitempty"`
 	// Shared upload/download payload budgets per user. Zero disables a budget.
 	MaxBytesPerSecondPerUser      int64 `json:"max_bytes_per_second_per_user,omitempty"`
@@ -128,7 +131,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		h.UDPIdleTimeout = caddy.Duration(defaultUDPIdleTimeout)
 	}
 	if h.MaxTunnels == 0 {
-		h.MaxTunnels = defaultMaxTunnels
+		h.MaxTunnels = defaultMaxTunnels(totalMemory())
 	}
 	if h.MaxTunnelsPerUser == 0 {
 		h.MaxTunnelsPerUser = defaultMaxUserTunnels
@@ -157,6 +160,16 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		appIface, err := ctx.App("network_relay")
 		if err != nil {
 			return err
+		}
+		// A CONNECT names its destination as the Host, which never matches
+		// the TLS server name. Caddy enforces that they match when a site
+		// on the server has TLS client_auth (as certificate users need),
+		// unless told otherwise; then every TCP tunnel would fail with 421.
+		if srv.StrictSNIHost != nil && *srv.StrictSNIHost {
+			return errors.New("strict_sni_host is on for this server, which refuses every CONNECT " +
+				"(Caddy turns it on when a site uses client_auth, as certificate users need); " +
+				"add the global option servers { strict_sni_host insecure_off }, and do not rely on " +
+				"client_auth for access control in other sites of this server")
 		}
 		app := appIface.(*App)
 		if err := app.claimRelayID(h.RelayID); err != nil {
@@ -274,7 +287,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return next.ServeHTTP(w, r)
 	}
 	creds := credentials(r)
-	acct, err := h.auth.verify(r.Context(), creds)
+	var acct account
+	var err error
+	if certAcct, ok := h.clientCertificate(r); ok {
+		acct = certAcct
+	} else {
+		acct, err = h.auth.verifyFrom(r.Context(), creds, clientOf(r))
+	}
 	if h.LogRequests {
 		h.logRequest(r, kind, err == nil)
 	}
@@ -340,6 +359,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	unfollow := context.AfterFunc(r.Context(), func() { cancel(context.Canceled) })
 	defer unfollow()
 
+	if !acct.expires.IsZero() {
+		expiry := time.AfterFunc(time.Until(acct.expires), func() { cancel(errExpired) })
+		defer expiry.Stop()
+	}
+
 	lt := &liveTunnel{acct: acct, owner: h, cancel: cancel}
 	if !addTunnel(lt) {
 		return h.refuse(w, r, &refusal{http.StatusForbidden, "http_request_denied", errRevoked.Error()})
@@ -357,6 +381,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return h.serveTCP(ctx, w, r, addrs, log, start, unfollow, h.traffic[acct.name])
 	}
 	return h.serveUDP(ctx, w, r, addrs, log, start, unfollow, h.traffic[acct.name])
+}
+
+// clientCertificate returns the account of the client certificate the
+// request's TLS connection presented, if a user has its fingerprint. Caddy
+// requests certificates only when the TLS connection policy says so
+// (client_auth); Go's TLS has checked that the client holds the key.
+func (h *Handler) clientCertificate(r *http.Request) (account, bool) {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return account{}, false
+	}
+	return h.auth.verifyCertificate(sha256.Sum256(r.TLS.PeerCertificates[0].Raw))
 }
 
 func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, why *refusal) error {

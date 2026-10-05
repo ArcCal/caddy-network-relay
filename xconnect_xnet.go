@@ -3,9 +3,8 @@ package networkrelay
 import (
 	"os"
 	"strings"
-	_ "unsafe" // for go:linkname
 
-	_ "golang.org/x/net/http2" // Caddy's HTTP/2 server
+	"golang.org/x/net/http2" // Caddy's HTTP/2 server, from third_party/x-net
 )
 
 // CONNECT-UDP over HTTP/2 is an extended CONNECT request (RFC 8441, RFC
@@ -14,16 +13,24 @@ import (
 // keeps it off unless the environment says GODEBUG=http2xconnect=1. The
 // relay turns it on, unless GODEBUG explicitly says http2xconnect=0.
 //
-//go:linkname http2DisableExtendedConnect golang.org/x/net/http2.disableExtendedConnectProtocol
-var http2DisableExtendedConnect bool
-
+// SetExtendedConnectProtocol and the server defaults below exist only in
+// the patched x/net in third_party: a build without it (an ordinary
+// `xcaddy --with`, which ignores this module's replace directives) fails
+// to compile instead of silently losing the patches.
 func init() {
 	if !strings.Contains(os.Getenv("GODEBUG"), "http2xconnect=0") {
-		http2DisableExtendedConnect = false
+		http2.SetExtendedConnectProtocol(true)
 	}
+	// Every relayed TCP connection or UDP flow is a stream; a device that
+	// relays all its traffic has hundreds at once, and uploads share the
+	// connection's window. x/net's defaults (250 streams, 1 MiB windows)
+	// would queue them. These apply to the other sites in this Caddy too.
+	http2.DefaultServerMaxConcurrentStreams = 1024
+	http2.DefaultServerMaxUploadBufferPerStream = 4 << 20
+	http2.DefaultServerMaxUploadBufferPerConnection = 16 << 20
 }
 
-func http2ExtendedConnect() bool { return !http2DisableExtendedConnect }
+func http2ExtendedConnect() bool { return http2.ExtendedConnectProtocol() }
 
 // goH2ClientExtendedConnect: the HTTP/2 client can send extended CONNECT
 // (used by `caddy network-relay check` and the tests).

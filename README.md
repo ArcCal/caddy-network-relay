@@ -17,7 +17,7 @@ A [Caddy](https://caddyserver.com/) plugin that turns your server into a proxy f
 - [One-step install (Debian / Ubuntu)](#one-step-install-debian--ubuntu)
 - [Installing the profile on iPhone / iPad / Mac](#installing-the-profile-on-iphone--ipad--mac)
 - [Switching from the old network-relay (Rust version)](#switching-from-the-old-network-relay-rust-version)
-- [Day-to-day operations](#day-to-day-operations): add users, remove users, change passwords, upgrade, read logs, regenerate profiles, uninstall
+- [Day-to-day operations](#day-to-day-operations): add users, client certificates, remove users, change passwords, upgrade, read logs, regenerate profiles, uninstall
 - [Testing on a real device](docs/test-on-device.md): steps and troubleshooting for checking an iPhone/Mac after deploying
 - [Common pitfalls (read this)](#common-pitfalls-read-this)
 - [Already using Caddy: manual integration](#already-using-caddy-manual-integration)
@@ -90,7 +90,7 @@ The script: checks the system, DNS and ports (and stops without changing anythin
 
 ### The two generated profiles
 
-Both are in `/etc/caddy/relay/`, readable only by root, and **contain the password in plain text**:
+Both are in `/etc/caddy/relay/`, readable only by root, and **contain the password in plain text**. The password is stored nowhere else on the server (the Caddyfile only has its hash), so once the devices have the profile, delete the files: `rm /etc/caddy/relay/*.mobileconfig`. For a new profile later, create a new password as in [Adding a user](#adding-a-user).
 
 | File | What goes through the relay | Can it be turned off in Settings |
 |---|---|---|
@@ -163,7 +163,7 @@ Use one user per device, so that retiring a device means deleting only its line.
 caddy network-relay passwd --name ipad
 ```
 
-It prints two lines: `password: ...` (the password, shown only this once) and `user ipad $argon2id$...`. Add the whole `user ...` line to `/etc/caddy/Caddyfile`, below the existing `user` line inside `network_relay { ... }`:
+It prints two lines: `password: ...` (the password, shown only this once) and `user ipad $pbkdf2-sha256$...` (a generated password is too random to guess, so a fast hash protects it as well as a slow one would, and checking it costs the server almost nothing). `--expires 2027-01-31T00:00:00Z` adds an expiry: from then on the account stops working and its open tunnels close. Add the whole `user ...` line to `/etc/caddy/Caddyfile`, below the existing `user` line inside `network_relay { ... }`:
 
 ```bash
 nano /etc/caddy/Caddyfile
@@ -181,6 +181,43 @@ Generate a profile for the new user (when prompted, paste the password from abov
 caddy network-relay profile --host relay.example.com --user ipad --domains-file /root/caddy-network-relay-main/deploy/domains/google-ai-social.txt --domains-file /root/caddy-network-relay-main/deploy/domains/global-services.txt --gfwlist --ui-toggle-enabled false -o /etc/caddy/relay/relay.example.com-ipad-global.mobileconfig
 ```
 
+### Using a client certificate instead of a password
+
+A device can authenticate with a certificate in the TLS handshake instead of a password in every request; the key stays in the device's keychain and cannot be copied off it the way a password in a profile can. Create it (prints the Caddyfile line and the certificate's password, shown only this once):
+
+```bash
+caddy network-relay identity --name ipad -o /etc/caddy/relay/ipad.p12
+```
+
+Add the printed `user ipad certificate <sha256>` line to `network_relay { ... }` (or add `certificate <sha256>` to an existing user line to allow both), and let Caddy ask devices for certificates. Both settings below are needed: `client_auth` with `mode request` asks for a certificate without requiring one (browsers and password users are unaffected), and because Caddy otherwise requires every request's host name to equal the TLS server name when `client_auth` is on (a CONNECT's host name is its destination), the relay refuses to start until `strict_sni_host insecure_off` is set. Do not rely on `client_auth` for access control in other sites on the same port.
+
+```caddyfile
+{
+	servers {
+		strict_sni_host insecure_off
+	}
+}
+
+relay.example.com, :443 {
+	tls {
+		client_auth {
+			mode request
+		}
+	}
+	network_relay {
+		user ipad certificate 3f1c...
+	}
+}
+```
+
+Then `systemctl reload caddy` and make the profile (the device asks for the certificate's password while installing it; `--embed-identity-password` puts it in the profile instead):
+
+```bash
+caddy network-relay profile --host relay.example.com --user ipad --identity /etc/caddy/relay/ipad.p12 -o /etc/caddy/relay/relay.example.com-ipad.mobileconfig
+```
+
+Delete the `.p12` and the profile once installed. Certificate authentication has not been verified on Apple devices by this project yet; test it on one device before relying on it.
+
 ### Removing a user / changing a password
 
 Delete that user's line from the Caddyfile (to change the password, replace it with the line a new `passwd` prints), then run `systemctl reload caddy`. That user's open connections **are closed immediately**. Other users retain their tunnels only when `relay_id` and destination and traffic-budget policies are unchanged; without `relay_id`, all old tunnels are revoked. After changing a password, regenerate the profile and install it again.
@@ -193,7 +230,7 @@ Download the new source ZIP, upload it and unzip it (as in [Step 2](#step-2-down
 cd /root/caddy-network-relay-main && bash deploy/install.sh
 ```
 
-Users, passwords, the Caddyfile and the profiles all stay as they are; it only rebuilds, replaces the binary and restarts. If the new version fails to start, the old one is put back automatically.
+Users, passwords, the Caddyfile and the profiles all stay as they are; it only rebuilds, replaces the binary and restarts. If the new version fails to start, the old one is put back automatically. The installer does not keep the password, so after an upgrade it prints the self-check command to run yourself. (Installers before October 2026 kept it in `/etc/caddy/relay/<user>.password`; an upgrade still uses that file for the self-check and reminds you to delete it.)
 
 ### Status and logs
 
@@ -205,20 +242,20 @@ systemctl status caddy --no-pager
 journalctl -u caddy -n 100 --no-pager
 ```
 
-Self-check (the password is read from the file and not shown):
+Self-check (asks for the password; it is not shown):
 
 ```bash
-caddy network-relay check --server relay.example.com --address 127.0.0.1 --user iphone --password-stdin < /etc/caddy/relay/iphone.password
+caddy network-relay check --server relay.example.com --address 127.0.0.1 --user iphone
 ```
 
 To see which requests a device actually sends: add a `log_requests` line inside `network_relay { ... }`, run `systemctl reload caddy`, then read the log. It samples at most 10 requests per second process-wide (burst 20), reports suppressed counts, and is not a complete access log; remove it when you are done.
 
 ### Regenerating the profiles
 
-After the service lists or the gfwlist change, delete the old file and generate it again (a new file for the same domain and user replaces the old one when it is installed):
+After the service lists or the gfwlist change, delete the old file and generate it again (a new file for the same domain and user replaces the old one when it is installed). It asks for the user's password; if nobody has it any more, give the user a new one first ([Removing a user / changing a password](#removing-a-user--changing-a-password)):
 
 ```bash
-caddy network-relay profile --host relay.example.com --user iphone --password-stdin --domains-file /root/caddy-network-relay-main/deploy/domains/google-ai-social.txt --domains-file /root/caddy-network-relay-main/deploy/domains/global-services.txt --gfwlist --ui-toggle-enabled false -o /etc/caddy/relay/relay.example.com-iphone-global.mobileconfig < /etc/caddy/relay/iphone.password
+caddy network-relay profile --host relay.example.com --user iphone --domains-file /root/caddy-network-relay-main/deploy/domains/google-ai-social.txt --domains-file /root/caddy-network-relay-main/deploy/domains/global-services.txt --gfwlist --ui-toggle-enabled false -o /etc/caddy/relay/relay.example.com-iphone-global.mobileconfig
 ```
 
 ### Uninstalling
@@ -294,7 +331,7 @@ See [deploy/Caddyfile.example](deploy/Caddyfile.example):
 ```caddyfile
 relay.example.com, :443 {
 	network_relay {
-		user iphone $argon2id$v=19$m=19456,t=2,p=1$...
+		user iphone $pbkdf2-sha256$i=1000,l=32$...
 	}
 	root * /var/www/relay
 	file_server
@@ -317,15 +354,15 @@ The `network_relay` directive (`"handler": "network_relay"` in JSON):
 
 | Option | Default | Description |
 |---|---|---|
-| `user <name> <hash>` | none | One user; may be repeated. The name is 1–64 letters, digits, `-` `_` `.`, and does not start with `.`. The hash is the Argon2id hash printed by `caddy network-relay passwd` (hashes from the old Rust version work too); bcrypt and the output of `caddy hash-password` are also accepted |
+| `user <name> [<hash>] [certificate <sha256>] [expires <time>]` | none | One user; may be repeated. The name is 1–64 letters, digits, `-` `_` `.`, and does not start with `.`. The hash is printed by `caddy network-relay passwd` (PBKDF2-SHA256 for generated passwords, Argon2id for your own; hashes from the Rust version work too); bcrypt and the output of `caddy hash-password` are also accepted. `certificate` pins a client certificate by its SHA-256 fingerprint (see [Using a client certificate](#using-a-client-certificate-instead-of-a-password)); a user needs a hash, a certificate or both. `expires` (RFC 3339) ends the account and closes its tunnels at that time |
 | `udp_template <path>` | `/.well-known/masque/udp/{target_host}/{target_port}/` | The URI template path for CONNECT-UDP (RFC 9298). If you change it, generate the profiles with the same value in `--udp-template`. Supports `{var}` and the `{?a,b}` / `{&a,b}` forms |
-| `blocked_destinations [<CIDR>...]` | Loopback (including the public addresses on the server's own interfaces), private networks, link-local (including cloud metadata at 169.254.169.254), multicast, reserved and documentation addresses, and so on | Addresses devices may not reach. Every address a domain resolves to is checked; IPv4-mapped IPv6 addresses are checked as IPv4. Setting it **replaces** the default list; the option name without any addresses blocks nothing (**dangerous**: devices can then reach services on the server that only listen on 127.0.0.1) |
+| `blocked_destinations [<CIDR>...]` | Loopback (including the public addresses on the server's own interfaces), private networks, link-local (including cloud metadata at 169.254.169.254), multicast, reserved and documentation addresses, and so on | Addresses devices may not reach. Every address a domain resolves to is checked; IPv4-mapped IPv6 addresses are checked as IPv4, and IPv6 addresses that carry an IPv4 address (NAT64 `64:ff9b::/96`, 6to4, Teredo, IPv4-compatible) also by that IPv4 address. Setting it **replaces** the default list; the option name without any addresses blocks nothing (**dangerous**: devices can then reach services on the server that only listen on 127.0.0.1) |
 | `blocked_ports [<port>...]` | `25` | Ports devices may not reach (TCP and UDP). 25 is the port for sending mail; it is blocked so that the relay cannot be used to send spam |
 | `connect_timeout <duration>` | `10s` | Timeout for connecting to a TCP destination, 1s–2m |
 | `udp_idle_timeout <duration>` | `5m` | How long a UDP flow may go without packets in either direction before it is closed, 2m–1h |
-| `max_tunnels <count>` | `1024` | Limit on the TCP connections and UDP flows forwarded at the same time, across all users; beyond it the answer is 503 |
+| `max_tunnels <count>` | a quarter of the server's memory at 256 KiB per tunnel, 512–20000 (4096 when memory is unknown) | Limit on the TCP connections and UDP flows forwarded at the same time, across all users; beyond it the answer is 503 |
 | `relay_id <id>` | none | Unique security-domain ID. Matching IDs, unchanged destination policy and unchanged credentials allow tunnels to survive reload. Without an ID, reload revokes all old tunnels. Do not share IDs across tenants |
-| `max_tunnels_per_user <count>` | `128` | Per-user concurrent tunnel budget, shared across reloads of the same relay ID |
+| `max_tunnels_per_user <count>` | `512` | Per-user concurrent tunnel budget, shared across reloads of the same relay ID; a device relaying all its traffic can have hundreds |
 | `max_bytes_per_second_per_user <bytes>` | `0` (unlimited) | Aggregate TCP/UDP payload budget across upload, download and all tunnels of one user; TCP waits with cancellation, UDP drops excess packets. Burst: 128 KiB |
 | `max_udp_packets_per_second_per_user <packets>` | `0` (unlimited) | Aggregate UDP upload/download packet budget per user; burst is min(rate, 1024) |
 | `log_requests` | off | Sample redacted requests, process-wide limit 10/s and burst 20; suppressed counts accompany the next sample |
@@ -358,7 +395,15 @@ All of them are `caddy network-relay <command>`, and each has `--help`.
 caddy network-relay passwd --name iphone
 ```
 
-Generates a 144-bit random password and its hash. `--stdin`: read your own password from standard input (at least 12 characters) and print only the `user` line.
+Generates a 144-bit random password and its (fast, PBKDF2-SHA256) hash. `--stdin`: read your own password from standard input (at least 12 characters), hash it with Argon2id and print only the `user` line; add `--fast-hash` when that password is itself a random secret of at least 24 characters. `--expires <RFC 3339 time>`: the account stops working then.
+
+### `identity`
+
+```bash
+caddy network-relay identity --name ipad -o ipad.p12
+```
+
+Creates an ECDSA P-256 key and a self-signed client certificate (`--days`, default 825) in a password-protected PKCS#12 file, and prints the `user <name> certificate <sha256>` line and the file's password. See [Using a client certificate](#using-a-client-certificate-instead-of-a-password).
 
 ### `profile`
 
@@ -369,7 +414,11 @@ caddy network-relay profile --host relay.example.com --user iphone
 | Flag | Description |
 |---|---|
 | `--host`, `--user` | Required |
-| `--password` / `--password-stdin` | Without either, you are prompted for it (input not shown), which is recommended; `--password-stdin` reads the first line of standard input |
+| `--password` / `--password-stdin` | Without either, you are prompted for it (input not shown), which is recommended; `--password-stdin` reads the first line of standard input. `--password` warns: other users of the machine can see it, and it stays in the shell history |
+| `--identity F.p12` | Install this client certificate (from `identity`) with the profile and authenticate with it (`PayloadCertificateUUID`); no password is needed then, unless one is given too |
+| `--embed-identity-password` | Put the certificate's password (asked for) into the profile; without it, the device asks for it while installing |
+| `--ddm` | Write the declarative device management declaration `com.apple.configuration.network.relay` (JSON, for an MDM server; iOS/macOS 27 deprecate the `com.apple.relay.managed` profile payload) instead of a `.mobileconfig` |
+| `--identity-asset ID` | With `--ddm`: the identifier of the MDM's identity asset declaration to authenticate with (`IdentityAssetReference`) |
 | `--port` | Set it when the port is not 443 |
 | `--match-domain D` | This domain and its subdomains go through the relay; repeatable. **When none of `--match-*`, `--domains-file` and `--gfwlist` is given, all traffic goes through the relay** |
 | `--domains-file F` | One domain per line in the file; `#` starts a comment; repeatable |
