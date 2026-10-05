@@ -314,6 +314,9 @@ func (a *authenticator) verify(ctx context.Context, header string) (account, err
 		if e, ok := a.cache[id]; ok {
 			if time.Now().Before(e.expires) {
 				a.mu.Unlock()
+				if err := ctx.Err(); err != nil {
+					return account{}, err
+				}
 				return result(e.acct, e.ok)
 			}
 			delete(a.cache, id)
@@ -337,6 +340,9 @@ func (a *authenticator) verify(ctx context.Context, header string) (account, err
 			}
 			if f.abandoned {
 				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return account{}, err
 			}
 			return result(f.acct, f.ok)
 		}
@@ -396,6 +402,11 @@ func (a *authenticator) check(ctx context.Context, header string) (account, bool
 	}
 	ok = h.verify([]byte(password))
 	<-a.slots
+	// Hash functions cannot stop midway. Once that bounded work finishes,
+	// cancellation must still win rather than authenticate a dead request.
+	if err := ctx.Err(); err != nil {
+		return account{}, false, err
+	}
 	if !known || !ok {
 		return account{name: name}, false, nil
 	}

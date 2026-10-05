@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 )
 
@@ -31,34 +32,39 @@ func pumpTCPLimited(ctx context.Context, cc clientConn, t *net.TCPConn, budget *
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	results := make(chan copyResult, 2)
+	var workers sync.WaitGroup
+	workers.Add(2)
+	var upN atomic.Int64
 	go func() {
+		defer workers.Done()
 		buf := make([]byte, tcpBufferSize)
-		var n int64
 		for {
 			m, rerr := cc.Read(buf)
 			if m > 0 {
 				if err := budget.waitTCP(ctx, m); err != nil {
-					results <- copyResult{up: true, n: n, err: err}
+					results <- copyResult{up: true, n: upN.Load(), err: err}
 					return
 				}
-				if _, werr := t.Write(buf[:m]); werr != nil {
-					results <- copyResult{up: true, n: n, err: werr, targetEr: true}
+				written, werr := t.Write(buf[:m])
+				upN.Add(int64(written))
+				if werr != nil {
+					results <- copyResult{up: true, n: upN.Load(), err: werr, targetEr: true}
 					return
 				}
-				n += int64(m)
 			}
 			if rerr == io.EOF {
-				results <- copyResult{up: true, n: n}
+				results <- copyResult{up: true, n: upN.Load()}
 				return
 			}
 			if rerr != nil {
-				results <- copyResult{up: true, n: n, err: rerr}
+				results <- copyResult{up: true, n: upN.Load(), err: rerr}
 				return
 			}
 		}
 	}()
 	var downN atomic.Int64
 	go func() {
+		defer workers.Done()
 		buf := make([]byte, tcpBufferSize)
 		for {
 			m, rerr := t.Read(buf)
@@ -67,11 +73,12 @@ func pumpTCPLimited(ctx context.Context, cc clientConn, t *net.TCPConn, budget *
 					results <- copyResult{n: downN.Load(), err: err}
 					return
 				}
-				if _, werr := cc.Write(buf[:m]); werr != nil {
+				written, werr := cc.Write(buf[:m])
+				downN.Add(int64(written))
+				if werr != nil {
 					results <- copyResult{n: downN.Load(), err: werr}
 					return
 				}
-				downN.Add(int64(m))
 			}
 			if rerr == io.EOF {
 				results <- copyResult{n: downN.Load()}
@@ -87,9 +94,12 @@ func pumpTCPLimited(ctx context.Context, cc clientConn, t *net.TCPConn, budget *
 	upDone, downDone := false, false
 	gone := cc.gone()
 	fail := func(r abortReason) (int64, int64, abortReason, bool) {
+		cancel()
 		_ = t.SetLinger(0)
 		t.Close()
-		return up, downN.Load(), r, true
+		interruptClient(cc, r)
+		workers.Wait()
+		return upN.Load(), downN.Load(), r, true
 	}
 	for !upDone || !downDone {
 		select {
@@ -113,12 +123,21 @@ func pumpTCPLimited(ctx context.Context, cc clientConn, t *net.TCPConn, budget *
 			default:
 				gone = nil // closing our side may fire it
 				if cc.closeWrite() {
+					cancel()
 					t.Close()
+					cc.close()
+					// HTTP/2 handlers without directional FIN end the whole
+					// tunnel here; stop any outstanding request-body read.
+					if h2, ok := cc.(*h2Client); ok {
+						_ = h2.body.Close()
+					}
+					workers.Wait()
 					return up, down, 0, false
 				}
 			}
 		}
 	}
 	t.Close()
+	workers.Wait()
 	return up, down, 0, false
 }

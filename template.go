@@ -53,8 +53,19 @@ func parseUDPTemplate(raw string) (*uriTemplate, error) {
 			open = len(rest)
 		}
 		if lit := rest[:open]; lit != "" {
-			if strings.ContainsAny(lit, "}#") || strings.ContainsAny(lit, " \t\r\n") {
-				return nil, fmt.Errorf("UDP template %q: invalid character in %q", raw, lit)
+			// RFC 6570 §2.1 defines the literal grammar. In particular,
+			// malformed percent escapes cannot be repaired by URI parsing,
+			// and would make profiles point at a path this server never sees.
+			for i := 0; i < len(lit); i++ {
+				if strings.ContainsRune("\"'<>\\^`|}#", rune(lit[i])) {
+					return nil, fmt.Errorf("UDP template %q: invalid character in %q", raw, lit)
+				}
+				if lit[i] == '%' {
+					if i+2 >= len(lit) || !isHex(lit[i+1]) || !isHex(lit[i+2]) {
+						return nil, fmt.Errorf("UDP template %q: invalid percent escape in %q", raw, lit)
+					}
+					i += 2
+				}
 			}
 			if strings.Contains(lit, "?") {
 				inQuery = true
@@ -125,6 +136,10 @@ func parseUDPTemplate(raw string) (*uriTemplate, error) {
 		return nil, err
 	}
 	return t, nil
+}
+
+func isHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
 }
 
 // Match reports the target of a request path (with its query, if any, as

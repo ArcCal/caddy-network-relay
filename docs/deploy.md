@@ -5,7 +5,7 @@
 | Path | Contents |
 |---|---|
 | `/usr/local/bin/caddy` | Caddy with the plugin (`go build -tags http2legacy -trimpath`) |
-| `/etc/systemd/system/caddy.service` | From [deploy/caddy.service](../deploy/caddy.service): runs as the `caddy` user, with only the capabilities to bind low ports and administer the network, and `GODEBUG=http2xconnect=1` |
+| `/etc/systemd/system/caddy.service` | From [deploy/caddy.service](../deploy/caddy.service): runs as the `caddy` user, with only `CAP_NET_BIND_SERVICE` to bind low ports, and `GODEBUG=http2xconnect=1` |
 | `/etc/caddy/Caddyfile` | The first line is `# Managed by caddy-network-relay deploy/install.sh`, followed by the domain and the first user. Mode 640, owned by `root:caddy` |
 | `/etc/caddy/relay/` | Mode 700, only root can enter: `<user>.password` (the first user's password, 600) and the profiles (600) |
 | `/var/lib/caddy/` | The `caddy` user's home directory; Caddy's certificates and ACME account are in `.local/share/caddy/` |
@@ -51,6 +51,53 @@ install -m 755 caddy.new /usr/local/bin/caddy && systemctl restart caddy
 ## Multiple users
 
 One user per device: one `user NAME HASH` line per user inside `network_relay { }` in the Caddyfile. The install script only manages the first user's password file; you keep the other users' passwords yourself (or keep only their profiles).
+
+## TLS client certificates
+
+Caddy's `tls` directive can require and verify client certificates on both the
+TCP and QUIC listeners. Use a dedicated relay listener with the same client
+authentication policy on every accepted TLS connection policy. Sites with
+different client certificate requirements must use separate listeners.
+
+CONNECT names the destination in its HTTP authority, while TLS SNI names the
+relay. Caddy automatically enables strict SNI/Host matching with client
+authentication; this would reject CONNECT with 421. Explicitly configure the
+relay listener for proxy authorities:
+
+```caddyfile
+{
+	servers :443 {
+		strict_sni_host insecure_off
+	}
+}
+
+relay.example.com, :443 {
+	tls {
+		client_auth {
+			mode require_and_verify
+			trust_pool file {
+				pem_file /etc/caddy/relay-client-ca.pem
+			}
+		}
+	}
+	network_relay {
+		user iphone <password-hash>
+	}
+}
+```
+
+The relay rejects strict SNI/Host matching and mixed client-authentication
+policies at provisioning, rather than accepting a configuration that cannot
+proxy CONNECT or allows authentication through an unprotected SNI.
+
+Provision a client identity on the Apple device, then generate its relay profile
+with `--identity-certificate-uuid UUID`, using that identity payload's UUID.
+The emitted `PayloadCertificateUUID` is inside the relay dictionary as required
+by [Apple's relay payload schema](https://github.com/apple/device-management/blob/release/mdm/profiles/com.apple.relay.managed.yaml).
+The identity payload is provisioned separately; Basic credentials remain
+required. With `NERelay`, configure `identityData` and its password instead.
+The generated profiles use ordinary certificate trust. TLS raw public key
+authentication (RFC 7250) is not implemented; leave `RawPublicKeys` unset.
 
 ## A port other than 443
 

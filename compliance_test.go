@@ -572,10 +572,7 @@ func TestCapsuleRequestsWithContentHeaders(t *testing.T) {
 	host, uport := echoUDP(t)
 	for _, extra := range [][2]string{{"content-length", "0"}, {"content-type", "application/octet-stream"}} {
 		h := dialRawH3(t, port)
-		_, _, rsp := h.request(append(connectUDPFields(host, uport), extra))
-		if rsp.status != "400" {
-			t.Errorf("h3 with %s: %s", extra[0], rsp.status)
-		}
+		expectMalformedH3(t, h, append(connectUDPFields(host, uport), extra), false)
 		if !http2ExtendedConnect() {
 			continue
 		}

@@ -21,9 +21,12 @@ Local changes:
 - quic-go/http3: expose ReadHeaderTimeout, apply a stream read deadline while
   receiving HEADERS, clear it before calling the handler, bound incomplete
   headers across connections, and preserve extended CONNECT's original scheme.
-- x-net/http2: expose CloseWrite and ResetStream to handlers; retain and accept
-  the receive direction after a CONNECT FIN; release stream state after both
-  directions finish; reject CONNECT trailers; preserve the original scheme.
+- x-net/http2: expose CloseWrite, ResetStream and concurrent-write-safe
+  InterruptStream to handlers; retain and accept the receive direction after a
+  CONNECT FIN; release stream state after both directions finish and return
+  connection flow-control credits exactly once, including pending body reads;
+  close the receive direction if a handler returns after CloseWrite; reject
+  CONNECT trailers; preserve the original scheme.
 - x-net/http2: use the reviewed HTTP/2 implementation on Go 1.27 as well, instead
   of forwarding to the standard library which lacks these handler extensions.
 
@@ -37,6 +40,10 @@ the complete local file list and hashes, the original module checksum and source
 hashes, then runs the original QUIC, HTTP/3 and HTTP/2 tests with the patches.
 Two HTTP/3 assertions are updated to require the intentionally preserved scheme
 instead of an empty scheme; all other upstream assertions are retained.
+The harness also copies `http2_regression_test.go.txt` into the upstream HTTP/2
+test package to verify flow-control credits for both FIN orders, cleanup after
+handler return, cancellation of a blocked response write under the race
+detector, and the reset code after a directional FIN.
 
 Go ignores replace directives in dependencies. Builds must use this repository
 as the main module or repeat both replacements in the main module. An ordinary

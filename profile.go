@@ -39,6 +39,9 @@ type Profile struct {
 	AllowDNSFailover *bool
 	// RelayUUID for managed-app routing; required by user enrollment.
 	RelayUUID string
+	// UUID of an installed identity certificate payload for TLS client auth.
+	// The referenced identity is provisioned separately by the device manager.
+	IdentityCertificateUUID string
 	// Name shown in Settings; the host when empty.
 	Name string
 	// Which relay URLs to include; both when both are false.
@@ -145,6 +148,9 @@ func (p *Profile) Generate() (string, error) {
 	if p.RelayUUID != "" && !isUUID(p.RelayUUID) {
 		return "", errors.New("the relay UUID must be a UUID")
 	}
+	if p.IdentityCertificateUUID != "" && !isUUID(p.IdentityCertificateUUID) {
+		return "", errors.New("the identity certificate UUID must be a UUID")
+	}
 	if !xmlSafe(p.Name) || !xmlSafe(p.Password) {
 		return "", errors.New("the profile contains a character XML cannot represent")
 	}
@@ -199,6 +205,9 @@ func (p *Profile) Generate() (string, error) {
 	}
 	if !p.NoHTTP2 {
 		w("          <key>HTTP2RelayURL</key>\n          <string>%s</string>\n", url)
+	}
+	if p.IdentityCertificateUUID != "" {
+		w("          <key>PayloadCertificateUUID</key>\n          <string>%s</string>\n", strings.ToUpper(p.IdentityCertificateUUID))
 	}
 	w(`          <key>AdditionalHTTPHeaderFields</key>
           <dict>
