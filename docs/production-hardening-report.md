@@ -1,0 +1,35 @@
+# Supplementary report: security, protocol compatibility and deployment verification
+
+This round of changes and tests was carried out on the fix branch, with the goals of IETF tunnel semantics, security, and reliability in large deployments. Nothing was deployed to production, pushed to a remote, or changed in the user's original checkout. Passing tests do not prove that the software has no defects, and they are not an official Apple certification.
+
+## Confirmed problems and how they were handled
+
+| Problem | How it is triggered, and why | Consequence | Handling in this round |
+|---|---|---|---|
+| Authentication-failure logs can be amplified | Resending wrong credentials that are already cached still logged a warning for every request; in a test, 200 requests produced 200 warnings | Consumes log I/O, storage and log-collection capacity | A process-wide budget for authentication logs of 5 per second, burst 10; the next message carries the number suppressed. Diagnostic request logs have their own limit of 10 per second, burst 20 |
+| Valid accounts have no total traffic budget | The number of concurrent tunnels is limited, but a legitimate account can still sustain a high byte rate or a high UDP packet rate | Competes for bandwidth, CPU and socket processing, hurting other users | Added per-user shared byte-rate and UDP packet-rate settings; upload, download and all tunnels share the budget, reconnecting does not restore the burst allowance, and a same-domain reload with an unchanged policy carries the budget over |
+| Threads waiting on the rate limit do not always exit | When the peer resets, the copy function returns, but the thread waiting for an allowance may still hold the parent request's context | With very low rate settings, threads and buffers linger | The copy runs under an internal cancellable context that is cancelled as soon as the function returns; five repeated regression runs checked that reserved allowances are released promptly |
+| Install transactions have no mutual exclusion | Two installer processes read the old state, build, back up and replace at the same time | Interleaved file and service state; the wrong version is restored | An flock in a private directory owned by root is taken before the install state is read; backups go to a unique temporary directory with private permissions |
+| Rollback confuses the enabled and running states | When the original service was enabled but not running, a failed install's rollback disabled it; previously it could also wrongly report that the old service kept running | The service does not start automatically at the next boot, and operators misjudge the state | The active and enabled states are saved and restored separately; a failed first install first stops and disables the candidate service, then removes the unit; error messages describe the actual old state |
+
+The byte budget defaults to 0, meaning unlimited; the UDP packet rate also defaults to 0. Production must configure budgets according to user load, together with ingress rate limiting and host resource limits. The byte burst allowance is 128 KiB; the packet burst allowance is min(configured packet rate, 1024). This provides a total cap; it does not guarantee scheduling fairness among one user's tunnels, and it does not limit all network overhead that has already reached the service.
+
+TCP rate limiting uses backpressure and cancellable waits, and does not change byte content or FIN/RST semantics. UDP packets over the limit are dropped; they are not switched to a reliable stream, and the path MTU and no-fragmentation policies are not bypassed. When the traffic policy changes, old tunnels are revoked so that the old policy does not stay in effect. Logs are now sampled and cannot be used for a complete per-request count.
+
+## Verification completed
+
+- HTTP/1.1, HTTP/2 and HTTP/3 were each verified for the TCP byte budget, data integrity and the UDP packet-rate limit; budget sharing across reloads and account isolation have regression checks.
+- 1,000 separate accounts and H3 connections held at once: transfers continued after a reload; the total cap could not be bypassed; after closing, the tunnel, H3 and per-user quota counts returned to zero. With the race detector on, and client and server in the same process, combined heap growth was 260.6 MiB and file descriptor growth 5,000. With 16 admission workers, admission p50 was 1.433 s and p99 2.009 s. This is not a resource estimate for a production server or a capacity commitment.
+- A separate Caddy process running under real Debian 12 systemd: TCP and UDP over all three protocols, and the refusal without credentials, passed; two H3 tunnels each transferring 64 MiB in both directions passed.
+- Real systemd fault injection verified four cases: the original service running and enabled, stopped but enabled, stopped and disabled, and a failed first install. The lab had the dependencies preinstalled and injected a candidate program that fails to start; the actual configuration validation, service management and recovery used no stand-in for systemctl.
+- The installer's 16 automated tests passed. Builds for Linux/Darwin × amd64/arm64 passed. Detailed results of the complete race runs, upstream transport tests, fuzzing, static checks and vulnerability scan are recorded in production-readiness.md and the local evidence.
+- One concurrent full run on Go 1.26 exposed a bug in the MTU test's own echo side: the two ends probe independently, and the test side exited as soon as the server could not yet echo large packets. The test side was corrected to do its own probing within the original time limit, and passed 20 repeated race-enabled runs. Neither the product's MTU limits nor the test time limits were relaxed.
+
+## Production acceptance cannot yet be declared on this basis
+
+1. Acceptance is still needed on real Apple devices for each supported OS version, for configuration profile installation, and for the management modes; Darwin compiling does not mean its native socket behavior has been verified.
+2. Wi-Fi/cellular switching, real IPv6/NAT64, different public-internet MTUs, certificate rotation and public ACME still need verification in the target environment.
+3. Device counts, peak bandwidth, packet rate and latency targets need to be defined; budgets, file descriptor and memory limits, the egress firewall and rollback thresholds configured; then a gradual rollout on the production network. Cloud NAT public mappings and adjacent network segments cannot be protected by the interface address check alone.
+4. The vulnerability scan used the official GitHub OSV snapshot and found no reachable calls; that does not mean future advisories, or the local transport patches, are free of problems. Before a release, update the database and review the patches again.
+
+The IETF-related regressions cover CONNECT and CONNECT-UDP, HTTP/2 and HTTP/3 extended CONNECT, Capsules and Datagrams, half-close, refusals and resets, path MTU and no-fragmentation. Test coverage and implementation review cannot replace a formal proof of compliance for every deployment path.
