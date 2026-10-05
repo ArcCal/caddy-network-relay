@@ -28,7 +28,7 @@ var DefaultBlockedDestinations = []string{
 	"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8", "169.254.0.0/16",
 	"172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24", "192.168.0.0/16", "198.18.0.0/15",
 	"198.51.100.0/24", "203.0.113.0/24", "192.88.99.0/24", "224.0.0.0/4", "240.0.0.0/4",
-	"::/127", "::ffff:0:0/96", "64:ff9b:1::/48", "100::/64", "2001:2::/48",
+	"::/127", "64:ff9b:1::/48", "100::/64", "2001:2::/48",
 	"2001:10::/28", "2001:20::/28", "2001:db8::/32", "3fff::/20", "5f00::/16",
 	"fc00::/7", "fe80::/10", "ff00::/8",
 }
@@ -210,6 +210,12 @@ func newPolicy(blocked []string, ports []int) (*policy, error) {
 		}
 		if prefix != prefix.Masked() {
 			return nil, fmt.Errorf("blocked destination %q has host bits set (did you mean %s?)", s, prefix.Masked())
+		}
+		// allows checks mapped IPv6 destinations as IPv4. Apply the same
+		// normalization to configured ranges, otherwise a mapped-address
+		// block never matches the destination it names.
+		if prefix.Addr().Is4In6() && prefix.Bits() >= 96 {
+			prefix = netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96)
 		}
 		p.blocked = append(p.blocked, prefix)
 	}

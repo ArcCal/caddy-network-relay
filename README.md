@@ -371,8 +371,9 @@ Status codes and `Proxy-Status` (RFC 9209) on refusal:
 
 | Case | Status | `error=` in `Proxy-Status` |
 |---|---|---|
-| Malformed target; CONNECT-UDP with content headers or a request body; an HTTP/1.1 CONNECT-UDP that is not a GET or has no `Upgrade` in `Connection` | 400 | `http_request_error` |
+| Malformed target; CONNECT-UDP with content headers or a request body; an HTTP/1.1 CONNECT-UDP that is not a GET or has no `Upgrade` in `Connection` | 400 (optional with HTTP/3 stream reset) | `http_request_error` |
 | The CONNECT-UDP path does not match `udp_template` | 404 | — |
+| Unsupported extended CONNECT protocol | 501 | — |
 | Port blocked; user just removed | 403 | `http_request_denied` |
 | Address blocked | 403 | `destination_ip_prohibited` |
 | DNS lookup failed / timed out (5 seconds) | 502 / 504 | `dns_error` / `dns_timeout` |
@@ -428,6 +429,7 @@ caddy network-relay profile --host relay.example.com --user iphone
 | `--ui-toggle-enabled true\|false` | Whether the relay can be turned off by hand in Settings (from iOS/macOS 26); when not given, the system default is true |
 | `--allow-dns-failover true\|false` | Whether falling back to the system's default DNS is allowed (from iOS/macOS 26); when not given, the system default is false |
 | `--relay-uuid` | For managed app routing (required for user enrollment; not supported on macOS) |
+| `--identity-certificate-uuid` | UUID of an installed identity certificate payload; emits Apple's `PayloadCertificateUUID` for TLS client authentication. Provision the identity separately and pin its certificate for the relay user or configure Caddy's client CA trust with Basic authentication. Cannot be combined with `--identity` or `--ddm` |
 | `--name` | The name shown in Settings |
 | `--udp-template` | Set the same value when the server's `udp_template` was changed |
 | `--no-http3` / `--no-http2` | Write only one kind of relay URL |

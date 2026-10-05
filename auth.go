@@ -327,6 +327,11 @@ var authenticationSlots = make(chan struct{}, min(4, max(1, runtime.GOMAXPROCS(0
 // request's verification of the same header.
 var authenticationPending = make(chan struct{}, pendingPerSlot*cap(authenticationSlots))
 
+// Sharing a hash avoids costly work, but each waiting request still holds a
+// handler goroutine and its transport stream. Bound these cheap waiters
+// separately, without charging another hash or client-attempt token.
+var authenticationWaiters = make(chan struct{}, 4096)
+
 var (
 	errBadCredentials = errors.New("wrong or missing credentials")
 	errAuthBusy       = errors.New("too many verifications waiting")
@@ -611,7 +616,13 @@ func (a *authenticator) verifyFrom(ctx context.Context, header string, from requ
 	}
 	id := headerID(header)
 	for {
+		if err := ctx.Err(); err != nil {
+			return account{}, err
+		}
 		if acct, ok := a.cached(id); ok {
+			if err := ctx.Err(); err != nil {
+				return account{}, err
+			}
 			return acct, nil
 		}
 		a.mu.Lock()
@@ -623,16 +634,26 @@ func (a *authenticator) verifyFrom(ctx context.Context, header string, from requ
 			delete(a.failed, id)
 		}
 		if f, ok := a.inflight[id]; ok {
-			// Someone is verifying this header already: waiting costs
-			// nothing, so it takes none of the limited places.
+			// Sharing this hash uses only a bounded cheap-waiter place.
+			select {
+			case authenticationWaiters <- struct{}{}:
+			default:
+				a.mu.Unlock()
+				return account{}, errAuthBusy
+			}
 			a.mu.Unlock()
 			select {
 			case <-f.done:
 			case <-ctx.Done():
+				<-authenticationWaiters
 				return account{}, ctx.Err()
 			}
+			<-authenticationWaiters
 			if f.abandoned {
 				continue
+			}
+			if err := ctx.Err(); err != nil {
+				return account{}, err
 			}
 			return result(f.acct, f.ok)
 		}
@@ -741,6 +762,11 @@ func (a *authenticator) check(ctx context.Context, header string) (account, bool
 	}
 	ok = h.verify([]byte(password))
 	<-a.slots
+	// Hash functions cannot stop midway. Once that bounded work finishes,
+	// cancellation must still win rather than authenticate a dead request.
+	if err := ctx.Err(); err != nil {
+		return account{}, false, err
+	}
 	if !known || !ok {
 		return account{name: name}, false, nil
 	}

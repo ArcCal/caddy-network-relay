@@ -432,7 +432,8 @@ func (neverEnding) Read(p []byte) (int, error) { return len(p), nil }
 func TestProfile(t *testing.T) {
 	no := false
 	p := Profile{Host: "Relay.Example.com", User: "iphone", Password: "p&ss<word>",
-		MatchDomains: []string{"IfConfig.me."}, UIToggleEnabled: &no, RelayUUID: "00112233-4455-6677-8899-aabbccddeeff"}
+		MatchDomains: []string{"IfConfig.me."}, UIToggleEnabled: &no, RelayUUID: "00112233-4455-6677-8899-aabbccddeeff",
+		IdentityCertificateUUID: "aabbccdd-1122-3344-5566-778899aabbcc"}
 	x, err := p.Generate()
 	if err != nil {
 		t.Fatal(err)
@@ -446,6 +447,7 @@ func TestProfile(t *testing.T) {
 		"<key>MatchDomains</key>\n      <array>\n        <string>ifconfig.me</string>",
 		"<key>UIToggleEnabled</key>\n      <false/>",
 		"<string>00112233-4455-6677-8899-AABBCCDDEEFF</string>",
+		"<key>PayloadCertificateUUID</key>\n          <string>AABBCCDD-1122-3344-5566-778899AABBCC</string>",
 		"<string>com.github.arccal.network-relay.relay.example.com.iphone</string>",
 	} {
 		if !strings.Contains(x, want) {
@@ -472,6 +474,7 @@ func TestProfile(t *testing.T) {
 		{Host: "relay.example.com", User: "a", Password: "x", NoHTTP2: true, NoHTTP3: true},
 		{Host: "relay.example.com", User: "a", Password: "x", MatchDomains: []string{"*.example.com"}},
 		{Host: "relay.example.com", User: "a", Password: "x", RelayUUID: "nope"},
+		{Host: "relay.example.com", User: "a", Password: "x", IdentityCertificateUUID: "nope"},
 		{Host: "relay.example.com", User: "a", Password: "x\x01"},
 		{Host: "relay.example.com", User: "a", Password: "x", UDPTemplate: "/{target_host}"},
 	} {

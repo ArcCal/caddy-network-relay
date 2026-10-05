@@ -447,6 +447,14 @@ func TestRefusals(t *testing.T) {
 					// Go's HTTP/2 client refuses this authority itself.
 					continue
 				}
+				if c.status == 400 && v.name == "h3" {
+					// A malformed H3 request must reset with MESSAGE_ERROR;
+					// its optional HTTP error can be discarded by that reset.
+					if code := streamCode(err); code != h3MessageError {
+						t.Fatalf("malformed authority: %v (code %#x)", err, code)
+					}
+					continue
+				}
 				wantStatus(t, err, c.status, c.proxyStatus)
 			}
 			// A closed port refuses.

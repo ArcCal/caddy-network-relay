@@ -54,6 +54,9 @@ type Profile struct {
 	AllowDNSFailover *bool
 	// RelayUUID for managed-app routing; required by user enrollment.
 	RelayUUID string
+	// UUID of an installed identity certificate payload for TLS client auth.
+	// The referenced identity is provisioned separately by the device manager.
+	IdentityCertificateUUID string
 	// Name shown in Settings; the host when empty.
 	Name string
 	// Which relay URLs to include; both when both are false.
@@ -147,8 +150,11 @@ func (p *Profile) check() error {
 	if p.NoHTTP3 && p.NoHTTP2 {
 		return errors.New("the profile needs HTTP/3, HTTP/2 or both")
 	}
-	if p.Password == "" && p.Identity == nil && p.IdentityAsset == "" {
+	if p.Password == "" && p.Identity == nil && p.IdentityAsset == "" && p.IdentityCertificateUUID == "" {
 		return errors.New("the profile needs a password, an identity certificate, or both")
+	}
+	if p.IdentityCertificateUUID != "" && (p.Identity != nil || p.IdentityAsset != "") {
+		return errors.New("give only one identity: an embedded certificate, an installed certificate UUID, or a DDM asset")
 	}
 	if p.Identity != nil && len(p.Identity.P12) == 0 {
 		return errors.New("the identity file is empty")
@@ -174,6 +180,9 @@ func (p *Profile) check() error {
 	}
 	if p.RelayUUID != "" && !isUUID(p.RelayUUID) {
 		return errors.New("the relay UUID must be a UUID")
+	}
+	if p.IdentityCertificateUUID != "" && !isUUID(p.IdentityCertificateUUID) {
+		return errors.New("the identity certificate UUID must be a UUID")
 	}
 	if !xmlSafe(p.Name) || !xmlSafe(p.Password) || p.Identity != nil && !xmlSafe(p.Identity.Password) {
 		return errors.New("the profile contains a character XML cannot represent")
@@ -270,6 +279,9 @@ func (p *Profile) Generate() (string, error) {
 	if !p.NoHTTP2 {
 		w("          <key>HTTP2RelayURL</key>\n          <string>%s</string>\n", url)
 	}
+	if p.IdentityCertificateUUID != "" {
+		w("          <key>PayloadCertificateUUID</key>\n          <string>%s</string>\n", strings.ToUpper(p.IdentityCertificateUUID))
+	}
 	if p.Password != "" {
 		w(`          <key>AdditionalHTTPHeaderFields</key>
           <dict>
@@ -337,6 +349,9 @@ func (p *Profile) GenerateDDM() (string, error) {
 	}
 	if p.Identity != nil {
 		return "", errors.New("a DDM declaration references the identity as an asset: give the asset's identifier instead")
+	}
+	if p.IdentityCertificateUUID != "" {
+		return "", errors.New("a DDM declaration references the identity as an asset: give the asset's identifier instead of a certificate UUID")
 	}
 	if p.IdentityAsset != "" && !xmlSafe(p.IdentityAsset) {
 		return "", errors.New("the identity asset identifier contains a control character")

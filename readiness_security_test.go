@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"net/netip"
@@ -100,8 +101,8 @@ func TestPerUserTunnelBudget(t *testing.T) {
 }
 
 // Requests waiting for another request's verification of the same header
-// cost no hash, so they take none of the limited places (G-2): a device
-// opening many tunnels at once with new credentials is never refused.
+// cost no hash, so they take none of the costly-work places (G-2). A device
+// opening many tunnels at once fits within the separate cheap-waiter bound.
 func TestSharedCredentialWaitersAreNotRefused(t *testing.T) {
 	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
 	if err != nil {
@@ -150,6 +151,69 @@ func TestSharedCredentialWaitersAreNotRefused(t *testing.T) {
 	}
 	if n := conn.pending.Load(); n != 0 {
 		t.Fatalf("pending count leaked: %d", n)
+	}
+}
+
+func TestSharedCredentialWaitersBoundedAndCancelled(t *testing.T) {
+	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	releaseSlots := fillSlots(a)
+	defer releaseSlots()
+	leaderCtx, cancelLeader := context.WithCancel(context.Background())
+	defer cancelLeader()
+	waiterCtx, cancelWaiters := context.WithCancel(context.Background())
+	defer cancelWaiters()
+	from := requester{conn: &connState{}}
+	header := BasicAuthorization("alice", RandomPassword())
+	leaderDone := make(chan error, 1)
+	go func() { _, err := a.verifyFrom(leaderCtx, header, from); leaderDone <- err }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		a.mu.Lock()
+		n := len(a.inflight)
+		a.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("leader did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	waiters := cap(authenticationWaiters)
+	done := make(chan error, waiters)
+	for range waiters {
+		go func() { _, err := a.verifyFrom(waiterCtx, header, from); done <- err }()
+	}
+	for len(authenticationWaiters) != waiters {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d/%d waiters admitted", len(authenticationWaiters), waiters)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := a.verifyFrom(context.Background(), header, from); !errors.Is(err, errAuthBusy) {
+		t.Fatalf("excess shared waiter was not refused: %v", err)
+	}
+	if len(authenticationPending) != 1 || from.conn.pending.Load() != 1 {
+		t.Fatal("shared waiters charged costly verification or connection places")
+	}
+	cancelWaiters()
+	for range waiters {
+		if err := <-done; !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancelled waiter: %v", err)
+		}
+	}
+	if len(authenticationWaiters) != 0 {
+		t.Fatal("cancelled shared waiters leaked places")
+	}
+	cancelLeader()
+	if err := <-leaderDone; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled leader: %v", err)
+	}
+	if len(authenticationPending) != 0 || from.conn.pending.Load() != 0 {
+		t.Fatal("cancelled leader leaked verification places")
 	}
 }
 

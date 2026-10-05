@@ -372,11 +372,7 @@ func TestConnectUDPRejectsWrongScheme(t *testing.T) {
 		}
 	}
 	h := dialRawH3(t, port)
-	_, _, rsp := h.request(fields)
-	t.Logf("HTTP/3 :scheme=http on HTTPS-configured relay: %s", rsp.status)
-	if rsp.status != "400" {
-		t.Fatalf("wrong scheme accepted: %s", rsp.status)
-	}
+	expectMalformedH3(t, h, fields, false)
 	r := dialRawH2(t, port)
 	defer r.conn.Close()
 	r.headers(1, fields)

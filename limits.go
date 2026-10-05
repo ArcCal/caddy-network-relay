@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/KimMachineGun/automemlimit/memlimit"
 )
 
 // memoryPerTunnel is planned per tunnel when sizing the default
@@ -23,8 +25,28 @@ func defaultMaxTunnels(memory uint64) int {
 	return int(min(max(memory/4/memoryPerTunnel, 512), 20000))
 }
 
-// totalMemory is this machine's memory from /proc/meminfo, or 0.
+// totalMemory is the memory available to this process: the lesser of
+// /proc/meminfo and the cgroup hard limit, or 0 when neither is known.
 func totalMemory() uint64 {
+	return effectiveMemory(hostMemory(), memlimit.FromCgroup)
+}
+
+func effectiveMemory(host uint64, cgroupMemory memlimit.Provider) uint64 {
+	// FromCgroup accounts for parent limits and the v1 unlimited sentinel.
+	// Unsupported platforms, unlimited cgroups and unreadable limits retain
+	// the host-memory fallback rather than interpreting an error as zero.
+	limit, err := cgroupMemory()
+	if err != nil || limit == 0 {
+		return host
+	}
+	if host == 0 {
+		return limit
+	}
+	return min(host, limit)
+}
+
+// hostMemory is this machine's memory from /proc/meminfo, or 0.
+func hostMemory() uint64 {
 	f, err := os.Open("/proc/meminfo")
 	if err != nil {
 		return 0

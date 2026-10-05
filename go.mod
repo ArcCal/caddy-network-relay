@@ -9,6 +9,7 @@ replace github.com/quic-go/quic-go => ./third_party/quic-go
 replace golang.org/x/net => ./third_party/x-net
 
 require (
+	github.com/KimMachineGun/automemlimit v1.0.0
 	github.com/caddyserver/caddy/v2 v2.11.6
 	github.com/quic-go/masque-go v0.6.0
 	github.com/quic-go/qpack v0.6.0
@@ -36,7 +37,6 @@ require (
 	github.com/AndreasBriese/bbloom v0.0.0-20190825152654-46b345b51c96 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/DeRuina/timberjack v1.4.8 // indirect
-	github.com/KimMachineGun/automemlimit v1.0.0 // indirect
 	github.com/Masterminds/goutils v1.1.1 // indirect
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect
 	github.com/Masterminds/sprig/v3 v3.3.0 // indirect
