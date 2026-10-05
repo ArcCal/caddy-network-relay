@@ -394,6 +394,14 @@ func TestHTTP3DatagramsOnOtherRequests(t *testing.T) {
 		if code := streamCode(err); code != h3DatagramError {
 			t.Fatalf("got %v (code %#x)", err, code)
 		}
+		select {
+		case <-str.Context().Done():
+		case <-time.After(2 * time.Second):
+			t.Fatal("datagram protocol error did not stop the request direction")
+		}
+		if _, err := str.Write([]byte("after reset")); streamCode(err) != h3DatagramError {
+			t.Fatalf("request direction reset: %v, want H3_DATAGRAM_ERROR", err)
+		}
 	})
 	t.Run("TCP tunnel after the client's FIN", func(t *testing.T) {
 		h := dialRawH3(t, port)

@@ -188,8 +188,12 @@ func (c *h3Client) closeWrite() bool {
 }
 
 func (c *h3Client) abort(why abortReason) {
-	c.str.CancelRead(why.h3Code())
-	c.str.CancelWrite(why.h3Code())
+	code := why.h3Code()
+	if c.body != nil && c.body.guard != nil && c.body.guard.failed.Load() {
+		code = h3DatagramError
+	}
+	c.str.CancelWrite(code)
+	c.str.CancelRead(code)
 }
 
 func (c *h3Client) interrupt(why abortReason) { c.abort(why) }

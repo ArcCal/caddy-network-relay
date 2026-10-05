@@ -46,6 +46,7 @@ Other requests are passed unchanged to the handlers after it in the site, with e
 - **HTTP/2, HTTP/1.1**: DATAGRAM Capsules.
 - Capsule parsing is streaming: Capsules of unknown types or other Context IDs are skipped according to their declared length and are not subject to the UDP size limit; for context 0 the limit is checked as early as possible from the declared length; format errors such as a disconnect in the middle of a Capsule or a missing Context ID → `H3_MESSAGE_ERROR` (for HTTP/2 see §5).
 - Packets from the destination that are too large to fit in one QUIC DATAGRAM are dropped rather than sent over the reliable stream instead (RFC 9297 §3.5, RFC 9298 §6.1: with QUIC inside QUIC, the two layers of congestion control interfere with each other, and DPLPMTUD breaks). A packet over the path MTU (EMSGSIZE) or a full send buffer drops only that packet.
+- RFC 9298 §6.1 recommends sending ICMP Packet Too Big to the target when a reply cannot fit a native QUIC DATAGRAM. The supported unprivileged deployment deliberately omits this recommendation: connected UDP reads provide only payloads, without the original IP packet needed for the ICMP quotation (RFC 4443 §2.4(c)), and the service has no `CAP_NET_RAW`. This is a reviewed SHOULD exception under RFC 2119 §3. Targets relying only on ICMP feedback receive packet loss and may continue sending replies that cannot be delivered.
 - When the operating system reports the socket unusable, the tunnel is closed (on HTTP/3 with `H3_CONNECT_ERROR`): RFC 9298 §3.1 requires this, and its example is exactly ICMP Destination Unreachable, which Linux reports on a connected UDP socket as ECONNREFUSED, EHOSTUNREACH or ENETUNREACH.
 - Packets sent to the destination have ECN Not-ECT (the socket default), and the ECN of packets from the destination is not forwarded (RFC 9298 §6.2); the outer QUIC connection keeps its congestion control.
 - When there have been no packets in either direction for `udp_idle_timeout`, the tunnel is closed normally (RFC 4787 requires NAT mappings to last at least 2 minutes; the default is 5 minutes). When the device ends the request stream, the tunnel is closed normally.
@@ -94,6 +95,16 @@ CONNECT-UDP over HTTP/2 needs the server to send `SETTINGS_ENABLE_CONNECT_PROTOC
   local replacements. See `third_party/README.md`.
 
 With extended CONNECT on, browsers may also use WebSocket over HTTP/2 with this server (which is why Go turns it off by default). Caddy's `reverse_proxy` supports it; purely static websites are not affected.
+
+HTTP/2 request DATA and QUIC stream receive buffers share a process-wide cap of
+a quarter of available host/cgroup memory (256 MiB when unknown). This budget
+survives reloads and accounts for full retained buffer capacity, independently
+of protocol flow-control credit. QUIC also reserves estimated frame bookkeeping
+so small fragments count. Orderly FIN leaves unread data charged and readable;
+consumption, reset, cancellation and shutdown release it. Exhaustion resets the
+affected HTTP/2 stream with `ENHANCE_YOUR_CALM` or closes the QUIC connection with
+`INTERNAL_ERROR`. This bounds queued stream data; socket buffers, packet queues,
+active copy buffers and other allocations still require ordinary resource sizing.
 
 ### 3.5 Getting around timeouts Caddy designed for websites
 

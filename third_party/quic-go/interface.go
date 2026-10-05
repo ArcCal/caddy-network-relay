@@ -98,8 +98,19 @@ type ConnectionIDGenerator interface {
 	ConnectionIDLen() int
 }
 
+// ReceiveBufferBudget limits retained stream receive buffers across connections.
+// Its methods must be thread-safe and nonblocking. A nil budget is unlimited.
+type ReceiveBufferBudget interface {
+	TryAcquire(bytes int64) bool
+	Release(bytes int64)
+}
+
 // Config contains all configuration data needed for a QUIC server or client.
 type Config struct {
+	// ReceiveBufferBudget accounts for stream buffer capacity and estimated
+	// per-frame bookkeeping until data is consumed or discarded. Exhaustion
+	// closes the connection with INTERNAL_ERROR, independently of flow control.
+	ReceiveBufferBudget ReceiveBufferBudget
 	// GetConfigForClient is called for incoming connections.
 	// If the error is not nil, the connection attempt is refused.
 	GetConfigForClient func(info *ClientInfo) (*Config, error)

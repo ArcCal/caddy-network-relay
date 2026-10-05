@@ -231,9 +231,11 @@ fi
 # A first install that stops before the service starts leaves nothing
 # behind, so the next run is a first install again.
 started=0
+generated_profiles=()
 undo_fresh() {
     if (($? != 0 && !UPGRADE && !started)); then
         rm -f "$CADDYFILE"
+        for f in "${generated_profiles[@]}"; do rm -f "$f"; done
     fi
 }
 trap undo_fresh EXIT
@@ -290,7 +292,10 @@ want=7500000
     echo '# UDP buffers for HTTP/3 (quic-go); written by caddy-network-relay install.sh'
     for key in net.core.rmem_max net.core.wmem_max; do
         current=$(sysctl -n "$key" 2>/dev/null || echo 0)
-        ((current >= want)) || echo "$key = $want"
+        # Persist raised values even when a previous install already applied
+        # them at runtime; otherwise an upgrade erases them for the next boot.
+        ((current >= want)) || current=$want
+        echo "$key = $current"
     done
 } >"$SYSCTL"
 sysctl -p "$SYSCTL" >/dev/null 2>&1 || say "(This machine does not allow changing the UDP buffer limits; keeping the system defaults.)"
@@ -323,6 +328,9 @@ rollback() {
             rm -f "$f" || restore_failed=1
         fi
     done
+    if ((!UPGRADE)); then
+        for f in "${generated_profiles[@]}"; do rm -f "$f" || restore_failed=1; done
+    fi
     systemctl daemon-reload || restore_failed=1
     if ((was_active)); then
         systemctl restart caddy || restore_failed=1
@@ -342,6 +350,36 @@ rollback() {
     fi
     die 'Install failed and was rolled back. Caddy was not running before the install and remains stopped.'
 }
+
+# Complete the credential-bearing profile before replacing or starting the
+# service. Losing the only password here would otherwise leave a running
+# first installation that neither a device nor a retry can authenticate to.
+lists=("$SRC/deploy/domains/google-ai-social.txt")
+profile=$SECRETS/$DOMAIN-$RELAY_USER.mobileconfig
+global=$SECRETS/$DOMAIN-$RELAY_USER-global.mobileconfig
+if [[ -n $password ]]; then
+    say "==> Generating profiles"
+    if ((!UPGRADE)) || [[ ! -e $profile ]]; then
+        printf '%s\n' "$password" | "$CACHE/caddy.new" network-relay profile --host "$DOMAIN" --user "$RELAY_USER" --password-stdin \
+            --domains-file "${lists[0]}" -o "$profile"
+        generated_profiles+=("$profile")
+    fi
+    if ((!UPGRADE)) || [[ ! -e $global ]]; then
+        gfw=()
+        ((GFWLIST)) && gfw=(--gfwlist)
+        if printf '%s\n' "$password" | "$CACHE/caddy.new" network-relay profile --host "$DOMAIN" --user "$RELAY_USER" --password-stdin \
+            --domains-file "${lists[0]}" --domains-file "$SRC/deploy/domains/global-services.txt" "${gfw[@]}" \
+            --ui-toggle-enabled false --name "$DOMAIN (global services)" -o "$global"; then
+            generated_profiles+=("$global")
+        else
+            # A fresh account has new credentials; a leftover profile for
+            # that filename must not be offered with the previous password.
+            if ((!UPGRADE)); then rm -f "$global"; fi
+            say "(The global profile was not generated, most likely because downloading the gfwlist failed. The primary profile contains the credentials; keep it until installed.)"
+            say "(To retry, run caddy network-relay profile with the account password. Re-running the installer cannot regenerate a missing profile without that password.)"
+        fi
+    fi
+fi
 
 say "==> Installing and starting the service"
 started=1
@@ -380,24 +418,6 @@ else
     say "      $manual_check"
 fi
 
-lists=("$SRC/deploy/domains/google-ai-social.txt")
-profile=$SECRETS/$DOMAIN-$RELAY_USER.mobileconfig
-global=$SECRETS/$DOMAIN-$RELAY_USER-global.mobileconfig
-if [[ -n $password ]]; then
-    say "==> Generating profiles"
-    if [[ ! -e $profile ]]; then
-        printf '%s\n' "$password" | "$BIN" network-relay profile --host "$DOMAIN" --user "$RELAY_USER" --password-stdin \
-            --domains-file "${lists[0]}" -o "$profile"
-    fi
-    if [[ ! -e $global ]]; then
-        gfw=()
-        ((GFWLIST)) && gfw=(--gfwlist)
-        printf '%s\n' "$password" | "$BIN" network-relay profile --host "$DOMAIN" --user "$RELAY_USER" --password-stdin \
-            --domains-file "${lists[0]}" --domains-file "$SRC/deploy/domains/global-services.txt" "${gfw[@]}" \
-            --ui-toggle-enabled false --name "$DOMAIN (global services)" -o "$global" \
-            || say "(The global profile was not generated, most likely because downloading the gfwlist failed. You can run this again with --no-gfwlist.)"
-    fi
-fi
 unset password
 
 host_ip=$(tailscale ip -4 2>/dev/null | head -1 || true)
@@ -408,12 +428,14 @@ Done. Caddy with network_relay is running and starts at boot.
   Configuration: $CADDYFILE      Log: journalctl -u caddy -n 100 --no-pager
 MSG
 if [[ -e $profile || -e $global ]]; then
+    say '  Profiles (they contain the password, which is stored nowhere else on this server; only root can read them):'
+    [[ ! -e $profile ]] || say "    $profile           Google/AI/X and more go through the relay"
+    [[ ! -e $global ]] || say "    $global    the listed services + gfwlist go through the relay; cannot be turned off in Settings"
+    download_profile=$profile
+    [[ ! -e $global ]] || download_profile=$global
     cat <<MSG
-  Profiles (they contain the password, which is stored nowhere else on this server; only root can read them):
-    $profile           Google/AI/X and more go through the relay
-    $global    the listed services + gfwlist go through the relay; cannot be turned off in Settings
   To download to a Mac (run this in the Mac's Terminal):
-    scp root@$host_ip:$global ~/Downloads/
+    scp root@$host_ip:$download_profile ~/Downloads/
   Before installing on a device, remove any old relay profile from it. Once the devices have it, delete
   the profiles here and on the Mac: rm $SECRETS/*.mobileconfig (for another device, create a user as in docs/deploy.md).
 MSG

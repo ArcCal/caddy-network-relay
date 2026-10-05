@@ -5,6 +5,7 @@ import (
 	"sync"
 
 	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
 	list "github.com/quic-go/quic-go/internal/utils/linkedlist"
 )
 
@@ -26,9 +27,10 @@ type frameSorterEntry struct {
 }
 
 type frameSorter struct {
-	queue   map[protocol.ByteCount]frameSorterEntry
-	readPos protocol.ByteCount
-	gaps    *list.List[byteInterval]
+	queue               map[protocol.ByteCount]frameSorterEntry
+	readPos             protocol.ByteCount
+	gaps                *list.List[byteInterval]
+	receiveBufferBudget ReceiveBufferBudget
 }
 
 var errDuplicateStreamData = errors.New("duplicate stream data")
@@ -43,17 +45,24 @@ func newFrameSorter() *frameSorter {
 }
 
 func (s *frameSorter) Push(data []byte, offset protocol.ByteCount, doneCb func()) error {
+	if doneCb != nil {
+		doneCb = sync.OnceFunc(doneCb)
+	}
 	err := s.push(data, offset, doneCb)
-	if err == errDuplicateStreamData {
+	if err != nil {
 		if doneCb != nil {
 			doneCb()
 		}
+	}
+	if err == errDuplicateStreamData {
 		return nil
 	}
 	return err
 }
 
 func (s *frameSorter) push(data []byte, offset protocol.ByteCount, doneCb func()) error {
+	// Slicing a pooled frame does not free its original backing array.
+	retainedCapacity := cap(data)
 	if len(data) == 0 {
 		return errDuplicateStreamData
 	}
@@ -163,6 +172,7 @@ func (s *frameSorter) push(data []byte, offset protocol.ByteCount, doneCb func()
 		newData := make([]byte, len(data))
 		copy(newData, data)
 		data = newData
+		retainedCapacity = cap(newData)
 		if doneCb != nil {
 			doneCb()
 			doneCb = nil
@@ -173,8 +183,42 @@ func (s *frameSorter) push(data []byte, offset protocol.ByteCount, doneCb func()
 		return errors.New("too many gaps in received data")
 	}
 
+	if budget := s.receiveBufferBudget; budget != nil {
+		// Also reserve conservative space for the frame, map entry and gaps.
+		// Otherwise many tiny, disjoint frames escape a payload-only limit.
+		charge := int64(retainedCapacity) + 256
+		if !budget.TryAcquire(charge) {
+			return &qerr.TransportError{ErrorCode: qerr.InternalError, ErrorMessage: "receive buffer budget exhausted"}
+		}
+		originalDone := doneCb
+		doneCb = sync.OnceFunc(func() {
+			if originalDone != nil {
+				originalDone()
+			}
+			budget.Release(charge)
+		})
+	}
+	if s.queue == nil {
+		s.queue = make(map[protocol.ByteCount]frameSorterEntry)
+	}
 	s.queue[start] = frameSorterEntry{Data: data, DoneCb: doneCb}
 	return nil
+}
+
+// Discard releases queued data. Data previously returned by Pop remains owned
+// by its reader until the reader invokes its returned callback.
+func (s *frameSorter) Discard() {
+	for offset, entry := range s.queue {
+		delete(s.queue, offset)
+		if entry.DoneCb != nil {
+			entry.DoneCb()
+		}
+	}
+	s.queue = nil
+	for gap := s.gaps.Front(); gap != nil; gap = s.gaps.Front() {
+		s.gaps.Remove(gap)
+	}
+	s.gaps.PushFront(byteInterval{Start: s.readPos, End: protocol.MaxByteCount})
 }
 
 func (s *frameSorter) findStartGap(offset protocol.ByteCount) (*list.Element[byteInterval], bool) {

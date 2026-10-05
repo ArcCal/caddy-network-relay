@@ -106,6 +106,7 @@ func populateConfig(config *Config) *Config {
 	}
 
 	return &Config{
+		ReceiveBufferBudget:              config.ReceiveBufferBudget,
 		GetConfigForClient:               config.GetConfigForClient,
 		Versions:                         versions,
 		HandshakeIdleTimeout:             handshakeIdleTimeout,

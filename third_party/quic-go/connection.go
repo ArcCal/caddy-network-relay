@@ -546,6 +546,7 @@ func (c *Conn) preSetup() {
 		c.perspective,
 	)
 	c.framer = newFramer(c.connFlowController)
+	c.streamsMap.receiveBufferBudget = c.config.ReceiveBufferBudget
 	c.receivedPackets.Init(8)
 	c.notifyReceivedPacket = make(chan struct{}, 1)
 	c.closeChan = make(chan struct{}, 1)
@@ -1826,6 +1827,7 @@ func (c *Conn) handleFrames(
 			}
 			// an error occurred handling a previous frame, don't handle the current frame
 			if skipHandling {
+				streamFrame.PutBack()
 				continue
 			}
 			wire.LogFrame(c.logger, streamFrame, false)
