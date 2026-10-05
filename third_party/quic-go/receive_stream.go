@@ -161,6 +161,7 @@ func (s *ReceiveStream) readImpl(p []byte) (hasStreamWindowUpdate bool, hasConnW
 		return false, false, 0, io.EOF
 	}
 	if s.cancelledLocally || s.isRemoteCancellationEffective() {
+		s.discardReceiveBuffers()
 		s.errorRead = true
 		return false, false, 0, s.cancelErr
 	}
@@ -184,6 +185,7 @@ func (s *ReceiveStream) readImpl(p []byte) (hasStreamWindowUpdate bool, hasConnW
 				return hasStreamWindowUpdate, hasConnWindowUpdate, bytesRead, s.closeForShutdownErr
 			}
 			if s.cancelledLocally || s.isRemoteCancellationEffective() {
+				s.discardReceiveBuffers()
 				s.errorRead = true
 				return hasStreamWindowUpdate, hasConnWindowUpdate, bytesRead, s.cancelErr
 			}
@@ -243,15 +245,24 @@ func (s *ReceiveStream) readImpl(p []byte) (hasStreamWindowUpdate bool, hasConnW
 
 		if s.isRemoteCancellationEffective() {
 			s.flowController.Abandon()
+			s.discardReceiveBuffers()
 		}
 
 		if s.readPosInFrame >= len(s.currentFrame) && s.currentFrameIsLast {
 			s.currentFrame = nil
 			if s.currentFrameDone != nil {
 				s.currentFrameDone()
+				s.currentFrameDone = nil
 			}
 			s.errorRead = true
 			return hasStreamWindowUpdate, hasConnWindowUpdate, bytesRead, io.EOF
+		}
+		if s.currentFrame != nil && s.readPosInFrame >= len(s.currentFrame) {
+			s.currentFrame = nil
+			if s.currentFrameDone != nil {
+				s.currentFrameDone()
+				s.currentFrameDone = nil
+			}
 		}
 	}
 	if s.isRemoteCancellationEffective() {
@@ -393,6 +404,20 @@ func (s *ReceiveStream) dequeueNextFrame() {
 	s.readPosInFrame = 0
 }
 
+// Called with mutex held, after buffered data can no longer be read.
+func (s *ReceiveStream) discardReceiveBuffers() {
+	if s.currentFrame != nil {
+		// Discarding an unread FIN frame is cancellation, not observed EOF.
+		s.currentFrameIsLast = false
+	}
+	s.currentFrame = nil
+	if s.currentFrameDone != nil {
+		s.currentFrameDone()
+		s.currentFrameDone = nil
+	}
+	s.frameQueue.Discard()
+}
+
 // CancelRead aborts receiving on this stream.
 // It instructs the peer to stop transmitting stream data.
 // [ReceiveStream.Read] will unblock immediately, and future calls to it will fail.
@@ -413,13 +438,14 @@ func (s *ReceiveStream) CancelRead(errorCode StreamErrorCode) {
 }
 
 func (s *ReceiveStream) cancelReadImpl(errorCode qerr.StreamErrorCode) (queuedNewControlFrame bool) {
-	if s.cancelledLocally { // duplicate call to CancelRead
+	if s.cancelledLocally || s.errorRead { // duplicate cancellation or observed EOF
 		return false
 	}
 	if s.closeForShutdownErr != nil {
 		return false
 	}
 	s.cancelledLocally = true
+	s.discardReceiveBuffers()
 	if s.errorRead || s.cancelledRemotely {
 		return false
 	}
@@ -448,16 +474,19 @@ func (s *ReceiveStream) handleStreamFrame(frame *wire.StreamFrame, now monotime.
 
 func (s *ReceiveStream) handleStreamFrameImpl(frame *wire.StreamFrame, now monotime.Time) error {
 	if s.closeForShutdownErr != nil {
+		frame.PutBack()
 		return nil
 	}
 	maxOffset := frame.Offset + frame.DataLen()
 	if err := s.flowController.UpdateHighestReceived(maxOffset, frame.Fin, now); err != nil {
+		frame.PutBack()
 		return err
 	}
 	if frame.Fin {
 		s.finalOffset = maxOffset
 	}
-	if s.cancelledLocally {
+	if s.cancelledLocally || s.isRemoteCancellationEffective() {
+		frame.PutBack()
 		return nil
 	}
 	if err := s.frameQueue.Push(frame.Data, frame.Offset, frame.PutBack); err != nil {
@@ -499,6 +528,7 @@ func (s *ReceiveStream) handleResetStreamFrameImpl(frame *wire.ResetStreamFrame,
 	if s.readPos >= s.reliableSize {
 		// calling Abandon multiple times is a no-op
 		s.flowController.Abandon()
+		s.discardReceiveBuffers()
 	}
 	// ignore duplicate RESET_STREAM frames for this stream (after checking their final offset)
 	if s.cancelledRemotely {
@@ -565,6 +595,7 @@ func (s *ReceiveStream) closeForShutdown(err error) {
 	s.mutex.Lock()
 	s.closeForShutdownErr = err
 	s.receiveFinalSizeCallback = nil
+	s.discardReceiveBuffers()
 	s.mutex.Unlock()
 	s.signalRead()
 }

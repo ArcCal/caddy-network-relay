@@ -485,7 +485,7 @@ func (h *Handler) serveTCP(ctx context.Context, w http.ResponseWriter, r *http.R
 	if err != nil {
 		return h.refuse(w, r, dialRefusal(err))
 	}
-	cc, err := establish(w, r, "HTTP/1.1 200 OK\r\n\r\n")
+	cc, err := establish(ctx, w, r, "HTTP/1.1 200 OK\r\n\r\n")
 	established()
 	if err != nil {
 		conn.Close()
@@ -510,7 +510,7 @@ func (h *Handler) serveUDP(ctx context.Context, w http.ResponseWriter, r *http.R
 	}
 	datagrams := r.ProtoMajor == 3 && datagramsNegotiated(ctx, baseWriter(w))
 	w.Header().Set("Capsule-Protocol", "?1")
-	cc, err := establish(w, r,
+	cc, err := establish(ctx, w, r,
 		"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\nCapsule-Protocol: ?1\r\n\r\n")
 	established()
 	if err != nil {
@@ -556,7 +556,10 @@ func datagramsNegotiated(ctx context.Context, w http.ResponseWriter) bool {
 // establish sends the success response and takes over the stream or
 // connection. h1Response is the raw response for HTTP/1.1, where the
 // connection is hijacked.
-func establish(w http.ResponseWriter, r *http.Request, h1Response string) (clientConn, error) {
+func establish(ctx context.Context, w http.ResponseWriter, r *http.Request, h1Response string) (clientConn, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// Website middleware can populate these fields before the relay runs.
 	// Tunnel bytes carry no HTTP content (RFC 9110 §9.3.6, RFC 9297 §3.2).
 	w.Header().Del("Content-Length")
@@ -570,32 +573,77 @@ func establish(w http.ResponseWriter, r *http.Request, h1Response string) (clien
 			return nil, err
 		}
 		_ = conn.SetDeadline(time.Time{})
-		if _, err := conn.Write([]byte(h1Response)); err != nil {
+		cc := &h1Client{conn: conn, r: brw.Reader}
+		if err := pendingClientIO(ctx, cc, func() error {
+			_, err := conn.Write([]byte(h1Response))
+			return err
+		}); err != nil {
 			conn.Close()
 			return nil, err
 		}
-		return &h1Client{conn: conn, r: brw.Reader}, nil
+		return cc, nil
 	case 2:
-		w.WriteHeader(http.StatusOK)
-		if err := http.NewResponseController(w).Flush(); err != nil {
+		rc := http.NewResponseController(base)
+		cc := &h2Client{body: rawBody(r.Body), w: base, rc: rc, done: r.Context().Done()}
+		if err := pendingClientIO(ctx, cc, func() error {
+			w.WriteHeader(http.StatusOK)
+			return http.NewResponseController(w).Flush()
+		}); err != nil {
 			return nil, err
 		}
-		rc := http.NewResponseController(base)
 		clearDeadlines(rc)
-		return &h2Client{body: rawBody(r.Body), w: base, rc: rc, done: r.Context().Done()}, nil
+		return cc, nil
 	case 3:
 		streamer, ok := base.(http3.HTTPStreamer)
 		if !ok {
 			return nil, errHijackFailed
 		}
-		w.WriteHeader(http.StatusOK)
-		str := streamer.HTTPStream()
-		_ = str.SetDeadline(time.Time{})
+		str := requestStream(base)
+		if str == nil {
+			return nil, errHijackFailed
+		}
 		conn, _ := r.Context().Value(quicConnKey{}).(*quic.Conn)
 		guard, _ := r.Context().Value(datagramGuardKey{}).(*datagramGuard)
-		return &h3Client{str: str, body: newH3Body(str, conn, guard)}, nil
+		cc := &h3Client{str: str, body: newH3Body(str, conn, guard)}
+		if err := pendingClientIO(ctx, cc, func() error {
+			w.WriteHeader(http.StatusOK)
+			_ = streamer.HTTPStream()
+			return nil
+		}); err != nil {
+			return nil, err
+		}
+		_ = str.SetDeadline(time.Time{})
+		return cc, nil
 	}
 	return nil, errHijackFailed
+}
+
+// Success headers can block on client flow control before the tunnel pump
+// starts. Interrupt only transport-owned I/O from the cancellation callback,
+// and join that callback before the handler can return or reuse its writer.
+func pendingClientIO(ctx context.Context, cc clientConn, write func() error) (err error) {
+	if err := ctx.Err(); err != nil {
+		interruptClient(cc, abortCancelled)
+		return err
+	}
+	interrupted := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() {
+		defer close(interrupted)
+		interruptClient(cc, abortCancelled)
+	})
+	defer func() {
+		stopped := stop()
+		if !stopped {
+			<-interrupted
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if stopped {
+				interruptClient(cc, abortCancelled)
+			}
+			err = ctxErr
+		}
+	}()
+	return write()
 }
 
 func (h *Handler) logEnd(log *zap.Logger, kind string, start time.Time, up, down int64,

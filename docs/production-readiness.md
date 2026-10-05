@@ -26,6 +26,12 @@ network have been certified. No production service has been deployed.
   expected user workload.
 - Admission limits bound counts, not an exact RSS budget. Apply cgroup/systemd
   resource budgets after staging tests.
+- Queued HTTP/2 and QUIC stream data also share a separate process-wide receive
+  buffer cap: a quarter of available memory, or 256 MiB when unknown. It persists
+  across reloads, charges unread FIN data until drained or discarded, and has no
+  minimum that overrides a small cgroup limit. Exhaustion resets the affected
+  HTTP/2 stream or closes the QUIC connection. The cap does not include all
+  process or kernel memory.
 - TCP establishment has at most eight pending address attempts per tunnel.
   Starts are normally 250ms apart, with a 100ms minimum after failure. When
   more addresses are waiting, the oldest attempt is canceled and joined before

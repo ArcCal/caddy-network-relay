@@ -137,7 +137,8 @@ func identityCommand() *cobra.Command {
 		Long: `Creates an ECDSA key and a self-signed client certificate for a user, in a
 password-protected PKCS#12 file for "caddy network-relay profile --identity".
 The device then authenticates in the TLS handshake instead of (or as well as)
-with a password, and the key cannot be copied off the device.
+with a password. The generated profile marks the key non-extractable on
+macOS 10.15+; protect the PKCS#12 file and delete it after installation.
 
 Prints the Caddyfile line that pins the certificate by its SHA-256
 fingerprint, and the PKCS#12 password (shown only once). The relay site also
@@ -280,9 +281,9 @@ Without any --match-* option, all traffic goes through the relay (except
 			selective := len(p.MatchDomains) > 0 || len(p.MatchFQDNs) > 0 ||
 				len(domainFiles) > 0 || gfwlist || gfwFile != ""
 			for _, f := range domainFiles {
-				b, err := os.ReadFile(f)
+				b, err := loadProfileList(f)
 				if err != nil {
-					return err
+					return fmt.Errorf("domains file %s: %w", f, err)
 				}
 				p.MatchDomains = append(p.MatchDomains, parseDomainList(string(b))...)
 			}
@@ -386,9 +387,33 @@ func containsString(list []string, s string) bool {
 	return false
 }
 
+const maxProfileListSize = 16 << 20
+
+// readProfileList rejects incomplete and oversized input, rather than
+// accepting a prefix and silently dropping the remaining routing rules.
+func readProfileList(r io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(r, maxProfileListSize+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > maxProfileListSize {
+		return nil, fmt.Errorf("profile list exceeds the %d MiB limit", maxProfileListSize>>20)
+	}
+	return raw, nil
+}
+
+func loadProfileList(file string) ([]byte, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return readProfileList(f)
+}
+
 func loadGFWList(file string) ([]byte, error) {
 	if file != "" {
-		return os.ReadFile(file)
+		return loadProfileList(file)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
@@ -404,7 +429,7 @@ func loadGFWList(file string) ([]byte, error) {
 	if rsp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s: %s", GFWListURL, rsp.Status)
 	}
-	return io.ReadAll(io.LimitReader(rsp.Body, 16<<20))
+	return readProfileList(rsp.Body)
 }
 
 // writePrivateFile replaces path atomically with a file only the owner can

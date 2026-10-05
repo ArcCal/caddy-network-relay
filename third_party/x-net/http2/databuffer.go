@@ -67,13 +67,15 @@ func putDataBufferChunk(p []byte) {
 // request body size on any single stream.
 type dataBuffer struct {
 	chunks   [][]byte
-	r        int   // next byte to read is chunks[0][r]
-	w        int   // next byte to write is chunks[len(chunks)-1][w]
-	size     int   // total buffered bytes
-	expected int64 // we expect at least this many bytes in future Write calls (ignored if <= 0)
+	r        int                 // next byte to read is chunks[0][r]
+	w        int                 // next byte to write is chunks[len(chunks)-1][w]
+	size     int                 // total buffered bytes
+	expected int64               // we expect at least this many bytes in future Write calls (ignored if <= 0)
+	budget   ReceiveBufferBudget // optional capacity budget, held until chunks are discarded
 }
 
 var errReadEmpty = errors.New("read from empty dataBuffer")
+var errReceiveBufferBudget = errors.New("http2: receive buffer budget exhausted")
 
 // Read copies bytes from the buffer into p.
 // It is an error to read when no data is available.
@@ -91,13 +93,18 @@ func (b *dataBuffer) Read(p []byte) (int, error) {
 		b.size -= n
 		// If the first chunk has been consumed, advance to the next chunk.
 		if b.r == len(b.chunks[0]) {
-			putDataBufferChunk(b.chunks[0])
+			b.putChunk(b.chunks[0])
 			end := len(b.chunks) - 1
 			copy(b.chunks[:end], b.chunks[1:])
 			b.chunks[end] = nil
 			b.chunks = b.chunks[:end]
 			b.r = 0
 		}
+	}
+	// A final partially filled chunk also belongs to the budget. Do not retain
+	// its charge after the handler has consumed its last byte.
+	if b.size == 0 && b.budget != nil {
+		b.discard()
 	}
 	return ntotal, nil
 }
@@ -122,7 +129,10 @@ func (b *dataBuffer) Write(p []byte) (int, error) {
 		// enough to fully copy p plus any additional bytes we expect to
 		// receive. However, this may allocate less than len(p).
 		want := max(int64(len(p)), b.expected)
-		chunk := b.lastChunkOrAlloc(want)
+		chunk, err := b.lastChunkOrAlloc(want)
+		if err != nil {
+			return ntotal - len(p), err
+		}
 		n := copy(chunk[b.w:], p)
 		p = p[n:]
 		b.w += n
@@ -132,15 +142,44 @@ func (b *dataBuffer) Write(p []byte) (int, error) {
 	return ntotal, nil
 }
 
-func (b *dataBuffer) lastChunkOrAlloc(want int64) []byte {
+func (b *dataBuffer) lastChunkOrAlloc(want int64) ([]byte, error) {
 	if len(b.chunks) != 0 {
 		last := b.chunks[len(b.chunks)-1]
 		if b.w < len(last) {
-			return last
+			return last, nil
 		}
+	}
+	if b.budget != nil && !b.budget.TryAcquire(dataBufferChunkSize(want)) {
+		return nil, errReceiveBufferBudget
 	}
 	chunk := getDataBufferChunk(want)
 	b.chunks = append(b.chunks, chunk)
 	b.w = 0
-	return chunk
+	return chunk, nil
+}
+
+func dataBufferChunkSize(want int64) int64 {
+	for size := int64(1 << 10); size < 16<<10; size *= 2 {
+		if want <= size {
+			return size
+		}
+	}
+	return 16 << 10
+}
+
+func (b *dataBuffer) putChunk(chunk []byte) {
+	putDataBufferChunk(chunk)
+	if b.budget != nil {
+		b.budget.Release(int64(len(chunk)))
+	}
+}
+
+// discard releases every chunk, including an empty partially filled tail.
+// The pipe serializes this with Read and Write.
+func (b *dataBuffer) discard() {
+	for _, chunk := range b.chunks {
+		b.putChunk(chunk)
+	}
+	b.chunks = nil
+	b.r, b.w, b.size = 0, 0, 0
 }

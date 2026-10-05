@@ -183,7 +183,7 @@ caddy network-relay profile --host relay.example.com --user ipad --domains-file 
 
 ### Using a client certificate instead of a password
 
-A device can authenticate with a certificate in the TLS handshake instead of a password in every request; the key stays in the device's keychain and cannot be copied off it the way a password in a profile can. Create it (prints the Caddyfile line and the certificate's password, shown only this once):
+A device can authenticate with a certificate in the TLS handshake instead of a password in every request. Generated profiles set `KeyIsExtractable` to false for macOS 10.15+; the PKCS#12 file still contains the private key, so protect it and delete it after installation. Create it (prints the Caddyfile line and the certificate's password, shown only this once):
 
 ```bash
 caddy network-relay identity --name ipad -o /etc/caddy/relay/ipad.p12
@@ -360,7 +360,7 @@ The `network_relay` directive (`"handler": "network_relay"` in JSON):
 | `blocked_ports [<port>...]` | `25` | Ports devices may not reach (TCP and UDP). 25 is the port for sending mail; it is blocked so that the relay cannot be used to send spam |
 | `connect_timeout <duration>` | `10s` | Timeout for connecting to a TCP destination, 1s–2m |
 | `udp_idle_timeout <duration>` | `5m` | How long a UDP flow may go without packets in either direction before it is closed, 2m–1h |
-| `max_tunnels <count>` | a quarter of the server's memory at 256 KiB per tunnel, 512–20000 (4096 when memory is unknown) | Limit on the TCP connections and UDP flows forwarded at the same time, across all users; beyond it the answer is 503 |
+| `max_tunnels <count>` | a quarter of the server's memory at an estimated 256 KiB per tunnel, 512–20000 (4096 when memory is unknown) | Limit on the TCP connections and UDP flows forwarded at the same time, across all users; beyond it the answer is 503. Queued HTTP/2 and HTTP/3 receive buffers share a separate process-wide cap of a quarter of available memory (256 MiB when unknown), including across reloads |
 | `relay_id <id>` | none | Unique security-domain ID. Matching IDs, unchanged destination policy and unchanged credentials allow tunnels to survive reload. Without an ID, reload revokes all old tunnels. Do not share IDs across tenants |
 | `max_tunnels_per_user <count>` | `512` | Per-user concurrent tunnel budget, shared across reloads of the same relay ID; a device relaying all its traffic can have hundreds |
 | `max_bytes_per_second_per_user <bytes>` | `0` (unlimited) | Aggregate TCP/UDP payload budget across upload, download and all tunnels of one user; TCP waits with cancellation, UDP drops excess packets. Burst: 128 KiB |

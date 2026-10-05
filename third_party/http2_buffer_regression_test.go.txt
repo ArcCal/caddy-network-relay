@@ -1,0 +1,138 @@
+//go:build !(go1.27 && !http2legacy)
+
+// Copied into the upstream internal test package by test_upstream.py.
+package http2
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"io"
+	"net/http"
+	"sync"
+	"testing"
+)
+
+type relayChunkBudget struct {
+	mu          sync.Mutex
+	limit, used int64
+}
+
+func (b *relayChunkBudget) TryAcquire(n int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n > b.limit-b.used {
+		return false
+	}
+	b.used += n
+	return true
+}
+
+func (b *relayChunkBudget) Release(n int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.used -= n
+	if b.used < 0 {
+		panic("receive buffer capacity released twice")
+	}
+}
+
+func (b *relayChunkBudget) bytes() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.used
+}
+
+func TestRelayReceiveBudgetChargesChunkCapacity(t *testing.T) {
+	for _, size := range []int{1, 1024, 1025, 2048, 2049, 4096, 4097, 8192, 8193, 16384} {
+		budget := &relayChunkBudget{limit: 16384}
+		b := &dataBuffer{budget: budget}
+		payload := bytes.Repeat([]byte{'x'}, size)
+		if n, err := b.Write(payload); n != size || err != nil {
+			t.Fatalf("write %d bytes = %d, %v", size, n, err)
+		}
+		want := dataBufferChunkSize(int64(size))
+		if got := budget.bytes(); got != want {
+			t.Fatalf("%d-byte payload charged %d bytes, want chunk capacity %d", size, got, want)
+		}
+		got := make([]byte, size)
+		if n, err := b.Read(got); n != size || err != nil || !bytes.Equal(got, payload) {
+			t.Fatalf("read %d-byte payload = %d, %v", size, n, err)
+		}
+		if got := budget.bytes(); got != 0 {
+			t.Fatalf("consumed final partial chunk retains %d bytes", got)
+		}
+		b.discard()
+	}
+}
+
+func TestRelayReceiveBudgetPartialWriteAndDiscard(t *testing.T) {
+	budget := &relayChunkBudget{limit: 16 << 10}
+	b := &dataBuffer{budget: budget}
+	if n, err := b.Write(make([]byte, 20<<10)); n != 16<<10 || !errors.Is(err, errReceiveBufferBudget) {
+		t.Fatalf("partial allocation failure = %d, %v; want 16384 and budget error", n, err)
+	}
+	if b.Len() != 16<<10 || budget.bytes() != 16<<10 {
+		t.Fatal("partial write lost buffered bytes or its capacity charge")
+	}
+	b.discard()
+	b.discard()
+	if budget.bytes() != 0 {
+		t.Fatal("discard retained capacity")
+	}
+	if n, err := b.Write([]byte{'y'}); n != 1 || err != nil {
+		t.Fatalf("released capacity was unavailable: %d, %v", n, err)
+	}
+	b.discard()
+}
+
+func TestRelayReceiveBudgetPipeLifetime(t *testing.T) {
+	for _, breakPipe := range []bool{false, true} {
+		budget := &relayChunkBudget{limit: 1024}
+		p := &pipe{b: &dataBuffer{budget: budget}}
+		if _, err := p.Write([]byte("hello")); err != nil {
+			t.Fatal(err)
+		}
+		if breakPipe {
+			p.BreakWithError(errClosedBody)
+			p.BreakWithError(errClosedBody)
+			if p.Len() != 5 || budget.bytes() != 0 {
+				t.Fatal("break must retain unread flow bytes while releasing capacity")
+			}
+		} else {
+			p.CloseWithError(io.EOF)
+			if budget.bytes() != 1024 {
+				t.Fatal("EOF released bytes that the handler still owns")
+			}
+			got, err := io.ReadAll(p)
+			if string(got) != "hello" || err != nil || budget.bytes() != 0 {
+				t.Fatalf("EOF drain = %q, %v, capacity %d", got, err, budget.bytes())
+			}
+		}
+	}
+}
+
+func TestRelayHandlerPanicResetCompletionAfterPeerClose(t *testing.T) {
+	for _, peerClosed := range []bool{false, true} {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		sc := &serverConn{
+			hs: &http.Server{}, srv: &Server{}, serveG: newGoroutineLock(),
+			streams: make(map[uint32]*stream), curClientStreams: 1,
+			writeSched: NewRoundRobinWriteScheduler(),
+		}
+		st := &stream{id: 1, sc: sc, state: stateOpen, ctx: ctx, cancelCtx: cancel, cw: make(closeWaiter)}
+		sc.streams[1] = st
+		sc.writeSched.OpenStream(1, OpenStreamOptions{})
+		// A panic reset has entered an asynchronous network write. Peer RST
+		// can close the stream before that write's completion arrives.
+		sc.writingFrame, sc.writingFrameAsync = true, true
+		if peerClosed {
+			sc.closeStream(st, streamError(1, ErrCodeCancel))
+		}
+		sc.wroteFrame(frameWriteResult{wr: FrameWriteRequest{write: handlerPanicRST{1}, stream: st}})
+		if st.state != stateClosed || len(sc.streams) != 0 || sc.curClientStreams != 0 {
+			t.Fatal("panic reset completion did not release exactly one stream")
+		}
+	}
+}

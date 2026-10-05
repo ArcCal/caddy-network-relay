@@ -74,6 +74,13 @@ func TestProfileWithIdentity(t *testing.T) {
 	if !strings.Contains(x, "<data>"+base64.StdEncoding.EncodeToString(id.P12)+"</data>") {
 		t.Error("PKCS#12 data missing")
 	}
+	// Apple defaults to an extractable PKCS#12 private key on macOS.
+	// Keep the protection on the identity payload, not the relay payload.
+	identity := strings.Split(x, "<string>com.apple.relay.managed</string>")[0]
+	if !strings.Contains(identity, "<key>KeyIsExtractable</key>\n      <false/>") ||
+		strings.Count(x, "<key>KeyIsExtractable</key>") != 1 {
+		t.Error("identity private key is not marked non-extractable")
+	}
 	if strings.Contains(x, "AdditionalHTTPHeaderFields") || strings.Contains(x, "<key>Password</key>") {
 		t.Error("credentials that were not given")
 	}

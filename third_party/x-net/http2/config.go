@@ -38,6 +38,7 @@ type http2Config struct {
 	WriteByteTimeout             time.Duration
 	PermitProhibitedCipherSuites bool
 	CountError                   func(errType string)
+	ReceiveBufferBudget          ReceiveBufferBudget
 }
 
 // configFromServer merges configuration settings from
@@ -55,6 +56,7 @@ func configFromServer(h1 *http.Server, h2 *Server) http2Config {
 		WriteByteTimeout:             h2.WriteByteTimeout,
 		PermitProhibitedCipherSuites: h2.PermitProhibitedCipherSuites,
 		CountError:                   h2.CountError,
+		ReceiveBufferBudget:          h2.ReceiveBufferBudget,
 	}
 	fillNetHTTPConfig(&conf, h1.HTTP2)
 	setConfigDefaults(&conf, true)
@@ -102,10 +104,14 @@ var (
 	DefaultServerMaxConcurrentStreams         uint32 = defaultMaxStreams
 	DefaultServerMaxUploadBufferPerConnection int32  = 1 << 20
 	DefaultServerMaxUploadBufferPerStream     int32  = 1 << 20
+	DefaultServerReceiveBufferBudget          ReceiveBufferBudget
 )
 
 func setConfigDefaults(conf *http2Config, server bool) {
 	if server {
+		if conf.ReceiveBufferBudget == nil {
+			conf.ReceiveBufferBudget = DefaultServerReceiveBufferBudget
+		}
 		setDefault(&conf.MaxConcurrentStreams, 1, math.MaxUint32, DefaultServerMaxConcurrentStreams)
 	} else {
 		setDefault(&conf.MaxConcurrentStreams, 1, math.MaxUint32, defaultMaxStreams)
