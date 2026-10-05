@@ -159,9 +159,16 @@ func withoutProtocol(list []string, p string) []string {
 }
 
 // Start starts serving HTTP/3.
-func (a *App) Start() error {
+func (a *App) Start() (err error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	defer func() {
+		if err != nil {
+			// A later address can fail after earlier endpoints started. Undo
+			// every acquisition of this generation on every failure path.
+			a.stopLocked(false)
+		}
+	}()
 	for _, s := range a.servers {
 		if len(s.h3Listen) == 0 {
 			continue
@@ -201,7 +208,6 @@ func (a *App) Start() error {
 				if err != nil {
 					// The previous configuration keeps running (and its
 					// tunnels stay open); only undo what this one started.
-					a.stopLocked(false)
 					return fmt.Errorf("HTTP/3 for server %s: %v", s.srv.Name(), err)
 				}
 				s.endpoints = append(s.endpoints, ep)
@@ -239,6 +245,7 @@ func (a *App) Stop() error {
 
 func (a *App) stopLocked(exiting bool) {
 	for _, s := range a.servers {
+		s.ports.Store(nil)
 		for _, ep := range s.endpoints {
 			ep.release(s.h3)
 		}
@@ -277,6 +284,8 @@ type endpointUser struct {
 	tls    *tls.Config
 }
 
+type endpointUserKey struct{}
+
 // current returns the newest configuration's server and TLS config; false
 // once the last one was released, which can happen while a connection is
 // being accepted or a handshake is under way.
@@ -290,6 +299,7 @@ func (ep *endpoint) current() (endpointUser, bool) {
 }
 
 var errEndpointClosed = errors.New("HTTP/3 is no longer served on this address")
+var errH3ConnectionLimit = errors.New("HTTP/3 connection limit reached")
 
 var endpoints = struct {
 	sync.Mutex
@@ -307,6 +317,15 @@ const (
 )
 
 var h3Connections = newConnectionLimit(h3MaxConnections, h3ConnectionsPerClient)
+
+// Unfinished handshakes have a separate process-wide bound. This permit is
+// released when Accept returns the completed handshake, rather than held
+// for the established connection's lifetime. Per-client admission below
+// waits for address validation, so spoofed Initials cannot consume a
+// particular client's share.
+var h3Handshakes = make(chan struct{}, 1024)
+
+type handshakeReleaseKey struct{}
 
 type connectionLimit struct {
 	mu           sync.Mutex
@@ -426,16 +445,33 @@ func acquireEndpoint(network, hostport string, u endpointUser, logger *zap.Logge
 		return nil, fmt.Errorf("%v (is something else, such as Caddy's own HTTP/3, using this UDP port?)", err)
 	}
 	ep := &endpoint{key: key, conn: conn, users: []endpointUser{u}, logger: logger, closed: make(chan struct{})}
-	ep.tr = &quic.Transport{Conn: conn, VerifySourceAddress: handshakeNeedsRetry}
+	ep.tr = &quic.Transport{
+		Conn: conn, ConnContext: ep.connectionContext, VerifySourceAddress: handshakeNeedsRetry,
+	}
 	ep.ln, err = ep.tr.Listen(&tls.Config{
+		GetEncryptedClientHelloKeys: func(hello *tls.ClientHelloInfo) ([]tls.EncryptedClientHelloKey, error) {
+			u, ok := hello.Context().Value(endpointUserKey{}).(endpointUser)
+			if !ok {
+				return nil, errEndpointClosed
+			}
+			// ECH is decrypted before GetConfigForClient selects a TLS
+			// policy, so the endpoint must forward this root callback too.
+			if get := u.tls.GetEncryptedClientHelloKeys; get != nil {
+				return get(hello)
+			}
+			return append([]tls.EncryptedClientHelloKey{}, u.tls.EncryptedClientHelloKeys...), nil
+		},
 		GetConfigForClient: func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
-			u, ok := ep.current()
+			u, ok := hello.Context().Value(endpointUserKey{}).(endpointUser)
 			if !ok {
 				return nil, errEndpointClosed
 			}
 			c := u.tls
 			if c.GetConfigForClient != nil {
-				return c.GetConfigForClient(hello)
+				selected, err := c.GetConfigForClient(hello)
+				if selected != nil || err != nil {
+					return selected, err
+				}
 			}
 			return c, nil
 		},
@@ -449,13 +485,36 @@ func acquireEndpoint(network, hostport string, u endpointUser, logger *zap.Logge
 	return ep, nil
 }
 
+// Bind the TLS policy and HTTP handler to one generation before the
+// handshake. Looking up the newest user again after TLS could route a
+// connection authenticated by an older policy to a stricter new server.
+// Bound unfinished TLS handshakes separately from established connections.
+func (ep *endpoint) connectionContext(ctx context.Context, _ *quic.ClientInfo) (context.Context, error) {
+	u, ok := ep.current()
+	if !ok {
+		return nil, errEndpointClosed
+	}
+	select {
+	case h3Handshakes <- struct{}{}:
+	default:
+		return nil, errH3ConnectionLimit
+	}
+	release := sync.OnceFunc(func() { <-h3Handshakes })
+	context.AfterFunc(ctx, release)
+	ctx = context.WithValue(ctx, handshakeReleaseKey{}, release)
+	return context.WithValue(ctx, endpointUserKey{}, u), nil
+}
+
 func (ep *endpoint) accept() {
 	for {
 		conn, err := ep.ln.Accept(context.Background())
 		if err != nil {
 			return
 		}
-		u, ok := ep.current()
+		if release, ok := conn.Context().Value(handshakeReleaseKey{}).(func()); ok {
+			release()
+		}
+		u, ok := conn.Context().Value(endpointUserKey{}).(endpointUser)
 		if !ok {
 			_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
 			return
@@ -466,11 +525,13 @@ func (ep *endpoint) accept() {
 			_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeExcessiveLoad), "connection limit")
 			continue
 		}
+		context.AfterFunc(conn.Context(), release)
 		go func() {
 			defer release()
-			if err := s.ServeQUICConn(conn); err == http.ErrServerClosed {
-				_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
-			}
+			// ServeQUICConn does not take ownership of externally supplied
+			// connections, including failures while setting up HTTP/3.
+			defer conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
+			_ = s.ServeQUICConn(conn)
 		}()
 	}
 }

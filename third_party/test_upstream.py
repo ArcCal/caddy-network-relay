@@ -49,6 +49,9 @@ def main():
                 p.chmod(p.stat().st_mode | (0o700 if p.is_dir() else 0o200))
             shutil.copytree(local, target, dirs_exist_ok=True)
             packages = ["./http2"]
+            if local.name == "x-net":
+                shutil.copyfile(root / "http2_regression_test.go.txt",
+                                target / "http2/relay_patch_test.go")
             if local.name == "quic-go":
                 # Our intentional API change preserves extended CONNECT's
                 # scheme in URL.Scheme. Keep every other upstream assertion.

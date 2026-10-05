@@ -244,7 +244,18 @@ Without any --match-* option, all traffic goes through the relay (except
 			if identityFile != "" && ddm {
 				return errors.New("a DDM declaration refers to the certificate by --identity-asset instead of --identity")
 			}
-			hasIdentity := identityFile != "" || p.IdentityAsset != ""
+			if p.IdentityCertificateUUID != "" {
+				if ddm {
+					return errors.New("a DDM declaration refers to the certificate by --identity-asset instead of --identity-certificate-uuid")
+				}
+				if identityFile != "" {
+					return errors.New("give either --identity or --identity-certificate-uuid")
+				}
+				if !isUUID(p.IdentityCertificateUUID) {
+					return errors.New("the identity certificate UUID must be a UUID")
+				}
+			}
+			hasIdentity := identityFile != "" || p.IdentityAsset != "" || p.IdentityCertificateUUID != ""
 			if passwordStdin || p.Password == "" && !hasIdentity {
 				if p.Password, err = readPassword("Password for " + p.User + ": "); err != nil {
 					return err
@@ -347,6 +358,7 @@ Without any --match-* option, all traffic goes through the relay (except
 	f.Var(optionalBool{&p.UIToggleEnabled}, "ui-toggle-enabled", "allow turning the relay off in Settings (iOS/macOS 26+; default true)")
 	f.Var(optionalBool{&p.AllowDNSFailover}, "allow-dns-failover", "allow falling back to the system DNS (iOS/macOS 26+; default false)")
 	f.StringVar(&p.RelayUUID, "relay-uuid", "", "relay UUID for managed apps (user enrollment)")
+	f.StringVar(&p.IdentityCertificateUUID, "identity-certificate-uuid", "", "UUID of an installed identity certificate payload for TLS client authentication")
 	f.StringVar(&p.Name, "name", "", "name shown in Settings (default: the host)")
 	f.StringVar(&p.UDPTemplate, "udp-template", "", "the udp_template of the server, if changed")
 	f.BoolVar(&p.NoHTTP3, "no-http3", false, "only use HTTP/2 (for networks that block UDP)")

@@ -1663,7 +1663,7 @@
         {
           "path": "http2/server.go",
           "upstream_sha256": "cf07329cd7d5d95909a5404f3b29f10f4252189012b98ad4c8fdbfca384cb9d1",
-          "local_sha256": "5649bf2857b5eb1c0b65ecd20734ae94e07d83fb927363a520364499fc1e554a",
+          "local_sha256": "e690f00842d29b9fb1aa59e6b97266907e6bbc7363e3d10b4f1e7f09657de78d",
           "modified": true
         },
         {

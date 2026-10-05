@@ -91,6 +91,8 @@ func (c *h1Client) abort(abortReason) {
 	c.conn.Close()
 }
 
+func (c *h1Client) interrupt(why abortReason) { c.abort(why) }
+
 func (c *h1Client) close() { c.conn.Close() }
 
 func (c *h1Client) gone() <-chan struct{} { return nil }
@@ -147,6 +149,26 @@ func (c *h2Client) abort(why abortReason) {
 	panic(http.ErrAbortHandler)
 }
 
+// interrupt is safe while the copy worker is writing. ResetStream also
+// changes the response writer's handler-owned state, so it is deferred
+// until the worker has returned.
+func (c *h2Client) interrupt(why abortReason) {
+	_ = c.body.Close()
+	if w, ok := c.w.(interface{ InterruptStream(uint32) error }); ok {
+		code := uint32(8) // CANCEL
+		if why == abortMalformed {
+			code = 1 // PROTOCOL_ERROR
+		} else if why == abortFailed {
+			code = 10 // CONNECT_ERROR
+		}
+		_ = w.InterruptStream(code)
+		return
+	}
+	// Standard-library HTTP/2 does not expose reset codes. A write
+	// deadline still releases a blocked writer before its handler exits.
+	_ = c.rc.SetWriteDeadline(time.Now().Add(-time.Second))
+}
+
 func (c *h2Client) close() {}
 
 func (c *h2Client) gone() <-chan struct{} { return c.done }
@@ -168,6 +190,19 @@ func (c *h3Client) closeWrite() bool {
 func (c *h3Client) abort(why abortReason) {
 	c.str.CancelRead(why.h3Code())
 	c.str.CancelWrite(why.h3Code())
+}
+
+func (c *h3Client) interrupt(why abortReason) { c.abort(why) }
+
+// Stop both I/O directions before waiting for copy workers. All production
+// client implementations provide interrupt; test clients with no blocking
+// I/O can simply close.
+func interruptClient(c clientConn, why abortReason) {
+	if c, ok := c.(interface{ interrupt(abortReason) }); ok {
+		c.interrupt(why)
+		return
+	}
+	c.close()
 }
 
 // gone: quic-go cancels the stream context when the write side ends: after
