@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -12,6 +13,11 @@ import (
 // attemptDelay is how long a TCP connection attempt runs alone before the
 // next address is tried as well (Happy Eyeballs, RFC 8305 §5).
 const attemptDelay = 250 * time.Millisecond
+
+const (
+	minimumAttemptDelay    = 100 * time.Millisecond
+	maxParallelTCPAttempts = 8
+)
 
 // interleave alternates address families, starting with the family of the
 // first address (RFC 8305 §4).
@@ -61,34 +67,93 @@ func isTimeout(err error) bool {
 	return errors.As(err, &ne) && ne.Timeout()
 }
 
-// dialTCP connects to the first address that answers, starting a new
-// attempt every attemptDelay, or at once when one fails (RFC 8305).
+// dialTCP connects to the first address that answers, normally staggering
+// attempts by attemptDelay. Failure acceleration still waits at least 100ms,
+// exceeding RFC 8305's mandatory 10ms minimum and meeting its recommended
+// minimum. At most eight sockets are pending per tunnel: when another address
+// is due, retire and join the oldest attempt before starting its replacement.
+// This bound is a local resource policy, not an RFC requirement. With many
+// pending addresses it can retire an attempt after two seconds; when no more
+// addresses are waiting, attempts retain the full connection deadline.
 func dialTCP(ctx context.Context, addrs []netip.AddrPort, timeout time.Duration) (*net.TCPConn, error) {
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	type result struct {
-		conn *net.TCPConn
-		err  error
+	conn, err := dialTCPWith(ctx, addrs, timeout, func(ctx context.Context, addr netip.AddrPort) (*net.TCPConn, error) {
+		var d net.Dialer
+		c, err := d.DialContext(ctx, "tcp", addr.String())
+		if err != nil {
+			return nil, err
+		}
+		return c.(*net.TCPConn), nil
+	})
+	if err == nil {
+		tuneTCP(conn)
 	}
-	results := make(chan result)
+	return conn, err
+}
+
+// dialTCPWith accepts a dial function locally so scheduling, bounded pending
+// sockets and cancellation cleanup can be tested without an external network.
+func dialTCPWith(ctx context.Context, addrs []netip.AddrPort, timeout time.Duration,
+	dial func(context.Context, netip.AddrPort) (*net.TCPConn, error)) (*net.TCPConn, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	type attempt struct {
+		cancel context.CancelFunc
+		done   chan struct{}
+	}
+	type result struct {
+		attempt *attempt
+		conn    *net.TCPConn
+		err     error
+	}
+	results := make(chan result, maxParallelTCPAttempts)
+	var workers sync.WaitGroup
+	var active []*attempt
+	defer func() {
+		cancel()
+		for _, a := range active {
+			a.cancel()
+		}
+		workers.Wait()
+		// A losing connection can complete as cancellation starts. Close
+		// every result not handed to the caller before releasing admission.
+		for {
+			select {
+			case r := <-results:
+				if r.conn != nil {
+					r.conn.Close()
+				}
+			default:
+				return
+			}
+		}
+	}()
 	pending := interleave(addrs)
-	running := 0
+	var lastStart, nextLaunch time.Time
 	start := func() {
 		addr := pending[0]
 		pending = pending[1:]
-		running++
+		actx, acancel := context.WithCancel(ctx)
+		a := &attempt{cancel: acancel, done: make(chan struct{})}
+		active = append(active, a)
+		lastStart = time.Now()
+		nextLaunch = lastStart.Add(attemptDelay)
+		workers.Add(1)
 		go func() {
-			var d net.Dialer
-			c, err := d.DialContext(ctx, "tcp", addr.String())
-			var tc *net.TCPConn
-			if err == nil {
-				tc = c.(*net.TCPConn)
+			defer workers.Done()
+			defer close(a.done)
+			defer acancel()
+			conn, err := dial(actx, addr)
+			if actx.Err() != nil {
+				if conn != nil {
+					conn.Close()
+					conn = nil
+				}
+				err = actx.Err()
 			}
 			select {
-			case results <- result{tc, err}:
+			case results <- result{a, conn, err}:
 			case <-ctx.Done():
-				if tc != nil {
-					tc.Close()
+				if conn != nil {
+					conn.Close()
 				}
 			}
 		}()
@@ -96,39 +161,85 @@ func dialTCP(ctx context.Context, addrs []netip.AddrPort, timeout time.Duration)
 	var lastErr error
 	timer := time.NewTimer(attemptDelay)
 	defer timer.Stop()
+	accept := func(r result) (*net.TCPConn, bool) {
+		for i, a := range active {
+			if a != r.attempt {
+				continue
+			}
+			active = append(active[:i], active[i+1:]...)
+			if r.err == nil {
+				return r.conn, true
+			}
+			lastErr = r.err
+			if accelerated := lastStart.Add(minimumAttemptDelay); accelerated.Before(nextLaunch) {
+				nextLaunch = accelerated
+			}
+			return nil, false
+		}
+		// This attempt was retired to admit a later address.
+		if r.conn != nil {
+			r.conn.Close()
+		}
+		return nil, false
+	}
 	for {
-		if running == 0 {
-			if len(pending) == 0 {
-				if lastErr == nil {
-					return nil, refuseNoAddresses
-				}
+		if err := ctx.Err(); err != nil {
+			if lastErr != nil && !errors.Is(err, context.DeadlineExceeded) {
 				return nil, dialRefusal(lastErr)
 			}
+			return nil, dialRefusal(err)
+		}
+		// Prefer a completed attempt over launching or retiring another.
+		select {
+		case r := <-results:
+			if conn, ok := accept(r); ok {
+				return conn, nil
+			}
+			continue
+		default:
+		}
+		if len(active) == 0 && len(pending) == 0 {
+			if lastErr == nil {
+				return nil, refuseNoAddresses
+			}
+			return nil, dialRefusal(lastErr)
+		}
+		if len(pending) > 0 && (lastStart.IsZero() || !time.Now().Before(nextLaunch)) {
+			if len(active) == maxParallelTCPAttempts {
+				oldest := active[0]
+				oldest.cancel()
+				<-oldest.done
+				active = active[1:]
+				// A TCP success can have entered the buffered results just
+				// before retirement canceled it. Close retired results before
+				// opening a replacement socket; other successes still win.
+			drainRetired:
+				for {
+					select {
+					case r := <-results:
+						if conn, ok := accept(r); ok {
+							return conn, nil
+						}
+					default:
+						break drainRetired
+					}
+				}
+			}
 			start()
-			timer.Reset(attemptDelay)
+			continue
+		}
+		var tick <-chan time.Time
+		if len(pending) > 0 {
+			timer.Reset(time.Until(nextLaunch))
+			tick = timer.C
 		}
 		select {
 		case r := <-results:
-			running--
-			if r.err == nil {
-				tuneTCP(r.conn)
-				return r.conn, nil
+			if conn, ok := accept(r); ok {
+				return conn, nil
 			}
-			lastErr = r.err
-			if len(pending) > 0 {
-				start()
-				timer.Reset(attemptDelay)
-			}
-		case <-timer.C:
-			if len(pending) > 0 {
-				start()
-				timer.Reset(attemptDelay)
-			}
+		case <-tick:
 		case <-ctx.Done():
-			if lastErr != nil && !errors.Is(ctx.Err(), context.DeadlineExceeded) {
-				return nil, dialRefusal(lastErr)
-			}
-			return nil, dialRefusal(ctx.Err())
 		}
 	}
 }

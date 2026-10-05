@@ -218,6 +218,7 @@ Without any --match-* option, all traffic goes through the relay (except
 	f.Var(optionalBool{&p.UIToggleEnabled}, "ui-toggle-enabled", "allow turning the relay off in Settings (iOS/macOS 26+; default true)")
 	f.Var(optionalBool{&p.AllowDNSFailover}, "allow-dns-failover", "allow falling back to the system DNS (iOS/macOS 26+; default false)")
 	f.StringVar(&p.RelayUUID, "relay-uuid", "", "relay UUID for managed apps (user enrollment)")
+	f.StringVar(&p.IdentityCertificateUUID, "identity-certificate-uuid", "", "UUID of an installed identity certificate payload for TLS client authentication")
 	f.StringVar(&p.Name, "name", "", "name shown in Settings (default: the host)")
 	f.StringVar(&p.UDPTemplate, "udp-template", "", "the udp_template of the server, if changed")
 	f.BoolVar(&p.NoHTTP3, "no-http3", false, "only use HTTP/2 (for networks that block UDP)")

@@ -87,6 +87,12 @@ type Handler struct {
 	server   *relayServer
 	logger   *zap.Logger
 	traffic  map[string]*trafficBudget
+	// Client authentication changes revoke retained tunnels without tying
+	// their lifetime to ordinary server certificate renewal.
+	tlsClientAuth []byte
+	// Opaque verifier trust cannot be compared after module provisioning.
+	// Its tunnels are consequently nontransferable across generations.
+	tlsCustomVerifiers bool
 }
 
 // CaddyModule returns the Caddy module information.
@@ -154,6 +160,13 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 	// HTTP/3 server does not support HTTP Datagrams (RFC 9297), which
 	// CONNECT-UDP needs.
 	if srv, ok := ctx.Value(caddyhttp.ServerCtxKey).(*caddyhttp.Server); ok {
+		if err := validateRelayTLS(srv); err != nil {
+			return err
+		}
+		if h.tlsClientAuth, err = relayTLSClientAuth(srv); err != nil {
+			return err
+		}
+		h.tlsCustomVerifiers = relayTLSHasCustomVerifiers(srv)
 		appIface, err := ctx.App("network_relay")
 		if err != nil {
 			return err
@@ -208,6 +221,7 @@ const (
 	// no tunnel here, and the website must not see it either, since any
 	// 2xx answer would mean "tunnel open".
 	udpUnknownPath
+	unsupportedProtocol
 )
 
 // classify tells relay requests from website requests (RFC 9114 §4.4,
@@ -227,7 +241,7 @@ func (h *Handler) classify(r *http.Request) (requestKind, target, bool) {
 		t, ok := parseAuthority(r.Host)
 		return tcpRequest, t, ok
 	case r.Method == http.MethodConnect && protocol == connectUDP && r.ProtoMajor >= 2,
-		r.ProtoMajor == 1 && headerHasToken(r.Header, "Upgrade", connectUDP):
+		r.ProtoMajor == 1 && r.ProtoMinor >= 1 && headerHasToken(r.Header, "Upgrade", connectUDP):
 		pathAndQuery := r.URL.EscapedPath()
 		if r.URL.RawQuery != "" {
 			pathAndQuery += "?" + r.URL.RawQuery
@@ -241,6 +255,11 @@ func (h *Handler) classify(r *http.Request) (requestKind, target, bool) {
 		}
 		t, ok := newTarget(host, port)
 		return udpRequest, t, ok
+	case r.Method == http.MethodConnect && protocol != "" && protocol != "websocket":
+		// A static site's 2xx would falsely accept an unknown tunnel
+		// protocol. Caddy's reverse_proxy can handle the known WebSocket
+		// extension; other extensions require an implementation here.
+		return unsupportedProtocol, target{}, false
 	}
 	return notRelay, target{}, false
 }
@@ -273,6 +292,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if kind == notRelay {
 		return next.ServeHTTP(w, r)
 	}
+	// Only a successful CONNECT-UDP response may advertise the Capsule
+	// Protocol; discard any value set earlier by website middleware.
+	w.Header().Del("Capsule-Protocol")
 	creds := credentials(r)
 	acct, err := h.auth.verify(r.Context(), creds)
 	if h.LogRequests {
@@ -304,19 +326,24 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if kind == udpUnknownPath {
 		return caddyhttp.Error(http.StatusNotFound, nil)
 	}
+	if kind == unsupportedProtocol {
+		w.WriteHeader(http.StatusNotImplemented)
+		return nil
+	}
 	if kind == udpRequest && malformedUpgrade(r) {
-		return h.refuse(w, r, refuseRequest)
+		return h.refuseMalformed(w, r, refuseRequest)
 	}
 	if kind == udpRequest && r.ProtoMajor >= 2 && r.URL.Scheme != "https" {
-		return h.refuse(w, r, refuseRequest)
+		return h.refuseMalformed(w, r, refuseRequest)
 	}
 	if !validTarget {
-		return h.refuse(w, r, refuseBadTarget)
+		return h.refuseMalformed(w, r, refuseBadTarget)
 	}
 	if kind == udpRequest && (r.ContentLength > 0 || len(r.TransferEncoding) > 0 ||
-		r.Header.Get("Content-Length") != "" || r.Header.Get("Content-Type") != "") {
+		len(r.Header.Values("Content-Length")) > 0 || len(r.Header.Values("Content-Type")) > 0 ||
+		len(r.Header.Values("Transfer-Encoding")) > 0) {
 		// RFC 9297 §3.2-3.3: capsule protocol requests have no content.
-		return h.refuse(w, r, refuseRequest)
+		return h.refuseMalformed(w, r, refuseRequest)
 	}
 	if openTunnels.Add(1) > int64(h.MaxTunnels) {
 		openTunnels.Add(-1)
@@ -366,6 +393,34 @@ func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, why *refusal) e
 	}
 	w.Header().Set("Proxy-Status", why.proxyStatus())
 	w.WriteHeader(why.status)
+	return nil
+}
+
+// refuseMalformed may send an error response before reporting the mandatory
+// stream error (RFC 9113 §8.1.1, RFC 9114 §4.1.2). HTTP/3 aborts both directions
+// because CancelRead cannot report the error after the request's FIN has been
+// consumed. Its optional response may be discarded by the write reset.
+// HTTP/1.1 closes after sending its error response.
+func (h *Handler) refuseMalformed(w http.ResponseWriter, r *http.Request, why *refusal) error {
+	if r.ProtoMajor == 1 {
+		w.Header().Set("Connection", "close")
+	}
+	_ = h.refuse(w, r, why)
+	base := baseWriter(w)
+	switch r.ProtoMajor {
+	case 2:
+		_ = http.NewResponseController(w).Flush()
+		if resetter, ok := base.(interface{ ResetStream(uint32) error }); ok {
+			_ = resetter.ResetStream(1) // PROTOCOL_ERROR
+		} else {
+			panic(http.ErrAbortHandler)
+		}
+	case 3:
+		if str := requestStream(base); str != nil {
+			str.CancelRead(h3MessageError)
+			str.CancelWrite(h3MessageError)
+		}
+	}
 	return nil
 }
 
@@ -447,6 +502,11 @@ func datagramsNegotiated(ctx context.Context, w http.ResponseWriter) bool {
 // connection. h1Response is the raw response for HTTP/1.1, where the
 // connection is hijacked.
 func establish(w http.ResponseWriter, r *http.Request, h1Response string) (clientConn, error) {
+	// Website middleware can populate these fields before the relay runs.
+	// Tunnel bytes carry no HTTP content (RFC 9110 §9.3.6, RFC 9297 §3.2).
+	w.Header().Del("Content-Length")
+	w.Header().Del("Content-Type")
+	w.Header().Del("Transfer-Encoding")
 	base := baseWriter(w)
 	switch r.ProtoMajor {
 	case 1:

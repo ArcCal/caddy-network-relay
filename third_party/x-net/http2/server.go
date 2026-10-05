@@ -519,6 +519,7 @@ func (sc *serverConn) curOpenStreams() uint32 {
 type stream struct {
 	connectRequest bool
 	halfClose      atomic.Bool
+	resetRequested atomic.Bool // handler interruption already owns stream termination
 	// immutable:
 	sc        *serverConn
 	id        uint32
@@ -528,17 +529,18 @@ type stream struct {
 	cancelCtx func()
 
 	// owned by serverConn's serve loop:
-	bodyBytes        int64   // body bytes seen so far
-	declBodyBytes    int64   // or -1 if undeclared
-	flow             outflow // limits writing from Handler to client
-	inflow           inflow  // what the client is allowed to POST/etc to us
-	state            streamState
-	resetQueued      bool        // RST_STREAM queued for write; set by sc.resetStream
-	gotTrailerHeader bool        // HEADER frame for trailers was seen
-	wroteHeaders     bool        // whether we wrote headers (not status 100)
-	readDeadline     *time.Timer // nil if unused
-	writeDeadline    *time.Timer // nil if unused
-	closeErr         error       // set before cw is closed
+	bodyBytes         int64   // body bytes seen so far
+	bodyBytesCredited int64   // DATA payload bytes returned to connection flow control
+	declBodyBytes     int64   // or -1 if undeclared
+	flow              outflow // limits writing from Handler to client
+	inflow            inflow  // what the client is allowed to POST/etc to us
+	state             streamState
+	resetQueued       bool        // RST_STREAM queued for write; set by sc.resetStream
+	gotTrailerHeader  bool        // HEADER frame for trailers was seen
+	wroteHeaders      bool        // whether we wrote headers (not status 100)
+	readDeadline      *time.Timer // nil if unused
+	writeDeadline     *time.Timer // nil if unused
+	closeErr          error       // set before cw is closed
 
 	trailer    http.Header // accumulated trailers
 	reqTrailer http.Header // handler's Request.Trailer
@@ -1587,9 +1589,11 @@ func (sc *serverConn) closeStream(st *stream, err error) {
 		}
 	}
 	if p := st.body; p != nil {
-		// Return any buffered unread bytes worth of conn-level flow control.
-		// See golang.org/issue/16481
-		sc.sendWindowUpdate(nil, p.Len())
+		// Reads may still be in progress after a CONNECT directional FIN.
+		// Include pending body-read notifications in this refund, then ignore
+		// those notifications once closed so each DATA byte is credited once.
+		sc.sendWindowUpdate(nil, int(st.bodyBytes-st.bodyBytesCredited))
+		st.bodyBytesCredited = st.bodyBytes
 
 		p.CloseWithError(err)
 	}
@@ -1776,6 +1780,7 @@ func (sc *serverConn) processData(f *DataFrame) error {
 				// Return the connection-level flow control for the discarded data,
 				// but not the stream-level flow control.
 				sc.sendWindowUpdate(nil, int(f.Length)-wrote)
+				st.bodyBytesCredited += int64(len(data) - wrote)
 				return nil
 			}
 			if wrote != len(data) {
@@ -2308,8 +2313,20 @@ func (sc *serverConn) handlerDone() {
 
 // Run on its own goroutine.
 func (sc *serverConn) runHandler(rw *responseWriter, req *http.Request, handler func(http.ResponseWriter, *http.Request)) {
-	defer sc.sendServeMsg(handlerDoneMsg)
+	st := rw.rws.stream
 	didPanic := true
+	defer func() {
+		if !didPanic && st.halfClose.Load() && !st.resetRequested.Load() {
+			sc.sendServeMsg(func(sc *serverConn) {
+				// Returning from ServeHTTP also ends the receiving direction.
+				// A handler that used CloseWrite may return before client FIN.
+				if st.state == stateHalfClosedLocal && !st.resetQueued && !st.resetRequested.Load() {
+					sc.resetStream(streamError(st.id, ErrCodeNo))
+				}
+			})
+		}
+		sc.sendServeMsg(handlerDoneMsg)
+	}()
 	defer func() {
 		rw.rws.stream.cancelCtx()
 		if req.MultipartForm != nil {
@@ -2409,6 +2426,10 @@ func (sc *serverConn) noteBodyReadFromHandler(st *stream, n int, err error) {
 
 func (sc *serverConn) noteBodyRead(st *stream, n int) {
 	sc.serveG.check()
+	if st.state == stateClosed {
+		return // closeStream already returned all outstanding DATA credits
+	}
+	st.bodyBytesCredited += int64(n)
 	sc.sendWindowUpdate(nil, n) // conn-level
 	if st.state != stateHalfClosedRemote && st.state != stateClosed {
 		// Don't send this WINDOW_UPDATE if the stream is closed
@@ -2978,6 +2999,19 @@ func (w *responseWriter) CloseWrite() error {
 func (w *responseWriter) ResetStream(code uint32) error {
 	rws := w.rws
 	rws.writeClosed = true
+	rws.stream.resetRequested.Store(true)
+	return rws.conn.writeFrameFromHandler(FrameWriteRequest{
+		write:  StreamError{StreamID: rws.stream.id, Code: ErrCode(code)},
+		stream: rws.stream,
+	})
+}
+
+// InterruptStream resets the stream without changing response-writer state.
+// It may run concurrently with response writes to unblock them. The handler
+// must wait for all such calls and writes to finish before returning.
+func (w *responseWriter) InterruptStream(code uint32) error {
+	rws := w.rws
+	rws.stream.resetRequested.Store(true)
 	return rws.conn.writeFrameFromHandler(FrameWriteRequest{
 		write:  StreamError{StreamID: rws.stream.id, Code: ErrCode(code)},
 		stream: rws.stream,

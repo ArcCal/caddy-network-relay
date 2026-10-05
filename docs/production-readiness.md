@@ -12,6 +12,10 @@ network have been certified. No production service has been deployed.
   unrelated tenants. Changing destination policy revokes existing tunnels.
 - Fresh installs generate `relay_id <domain>`. Upgrades preserve the existing
   Caddyfile; add the ID deliberately before relying on retained tunnels.
+- Changing TLS client authentication or its effective CA roots revokes old
+  tunnels. Custom certificate verifiers, including file-backed leaf pinning,
+  revoke tunnels on every reload because their effective trust data is opaque.
+  This also prevents an old handler from establishing a late tunnel after reload.
 - The default process tunnel ceiling is 1024, with 128 tunnels per user. The
   process count is checked against each handler's configured ceiling; use the
   same ceiling across handlers. Size limits against memory, CPU, descriptors,
@@ -19,6 +23,13 @@ network have been certified. No production service has been deployed.
 - Two 64KiB buffers per TCP tunnel consume about 128MiB at the default ceiling,
   before QUIC/TLS/socket/runtime overhead. Admission limits bound counts, not
   an exact RSS budget. Apply cgroup/systemd resource budgets after staging tests.
+- TCP establishment has at most eight pending address attempts per tunnel.
+  Starts are normally 250ms apart, with a 100ms minimum after failure. When
+  more addresses are waiting, the oldest attempt is canceled and joined before
+  replacement; it may be retired after two seconds. This is a local socket
+  budget, not a cap specified by RFC 8305. With no waiting addresses, attempts
+  retain the configured connection deadline. All losing sockets and workers
+  are cleaned up before tunnel admission is released.
 - Authentication computations are process-wide, limited to min(4,GOMAXPROCS).
   All uncached waiters, including duplicate headers, have a shared finite budget.
   Supported Argon2 parameters are at most 64MiB, ten iterations and four lanes;
@@ -93,6 +104,37 @@ moves while the jobs run. These checks do not replace staging validation.
   passed 20 consecutive Go 1.26 and ten Go 1.27 race-enabled runs. The
   corrected Go 1.26 complete suite subsequently passed (266.277 s); the
   Go 1.27 complete suite passed in 306.541 s.
+
+## Verification after the interoperability review (2026-10-05)
+
+- The final Go 1.26.8 complete race suite passed: 102 top-level tests and
+  147 subtests, in 306.827 seconds. The Go 1.27.0 complete `http2legacy`
+  suite passed the same cases; its additional default-mode HTTP/2 checks
+  passed 33 top-level tests and 62 subtests. No race was reported.
+- Final Linux/Darwin amd64/arm64 binaries compiled. The separately running
+  final Linux binary passed authenticated TCP/UDP checks over H1/H2/H3 with
+  IPv4, IPv6 and DNS-name targets, plus two H3 tunnels carrying 64MiB in
+  each direction and clean SIGTERM shutdown. The external-server test was
+  skipped in the main suites and passed separately with the race detector.
+- Valid and invalid TLS server/client certificates, client-CA identity changes,
+  file-backed leaf verifier rotation, ECH, and malformed H3 HEADERS with FIN
+  have real TLS/QUIC regressions. TCP dialing has bounded pending sockets,
+  RFC 8305 pacing, later-address fallback and joined cancellation regressions.
+- The unchanged 1,000-account/H3-connection capacity test passed without race
+  instrumentation in 15.11 seconds, including reload, data integrity and quota
+  cleanup. Combined client/server heap growth was 262.3MiB and FD growth 5,000.
+  Two race-instrumented 1,000-client runs exceeded the existing two-minute
+  admission deadline, including an isolated run; that capacity under race
+  instrumentation is not verified. The full race suite's 128-client case passed.
+- `go vet`, ShellCheck, all 16 installer tests, patched upstream QUIC/H3/H2
+  race tests and a 60-second capsule fuzz run passed. The hosted Go vulnerability
+  database was accessible: no reachable findings, and no advisory records for
+  the pinned transport versions. The module-level OpenPGP deprecation advisory
+  remains outside the imported dependency graph.
+
+These checks do not verify actual Apple clients, native Darwin socket behavior,
+public-PKI deployment, NAT64, mobile handoff or production capacity. No service
+was deployed by this review.
 
 ## Required staging checks before rollout
 

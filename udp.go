@@ -151,6 +151,12 @@ func (u *udpTunnel) touch() { u.last.Store(time.Now().UnixNano()) }
 // path (the socket never fragments) or a full send buffer drops it; any
 // other error means the socket is unusable, which closes the tunnel.
 func (u *udpTunnel) toTarget(p []byte) {
+	// Capsules validate their declared length before buffering. Native HTTP
+	// Datagrams have the same bound, independently of transport packet limits.
+	if len(p) > maxUDPPayload {
+		u.finish(abortMalformed, true)
+		return
+	}
 	if !u.budget.allowUDP(len(p)) {
 		u.dropped.Add(1)
 		return
@@ -181,10 +187,13 @@ func isPerDatagramError(err error) bool {
 func (u *udpTunnel) run(ctx context.Context) (up, down int64, why abortReason, aborted bool) {
 	u.done = make(chan struct{})
 	u.touch()
+	var workers sync.WaitGroup
+	workers.Add(2)
 
 	// Client to target: capsules on the stream (always allowed, RFC 9297
 	// §3.5), plus HTTP/3 datagrams when negotiated.
 	go func() {
+		defer workers.Done()
 		err := readCapsules(u.cc, u.toTarget)
 		switch {
 		case err == nil:
@@ -198,7 +207,9 @@ func (u *udpTunnel) run(ctx context.Context) (up, down int64, why abortReason, a
 	dctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	if u.h3 != nil {
+		workers.Add(1)
 		go func() {
+			defer workers.Done()
 			for {
 				d, err := u.h3.ReceiveDatagram(dctx)
 				if err != nil {
@@ -219,6 +230,7 @@ func (u *udpTunnel) run(ctx context.Context) (up, down int64, why abortReason, a
 
 	// Target to client.
 	go func() {
+		defer workers.Done()
 		buf := make([]byte, maxUDPPayload+16)
 		var capsule []byte
 		for {
@@ -235,6 +247,9 @@ func (u *udpTunnel) run(ctx context.Context) (up, down int64, why abortReason, a
 				return
 			}
 			u.touch()
+			if n > maxUDPPayload {
+				continue // never send an oversized context-zero datagram
+			}
 			payload := buf[1 : 1+n]
 			if !u.budget.allowUDP(n) {
 				u.dropped.Add(1)
@@ -271,6 +286,13 @@ func (u *udpTunnel) run(ctx context.Context) (up, down int64, why abortReason, a
 		select {
 		case <-u.done:
 			u.sock.Close()
+			cancel()
+			if u.aborted {
+				interruptClient(u.cc, u.why)
+				workers.Wait()
+			} else {
+				finishUDPWorkers(u.cc, &workers)
+			}
 			return u.up.Load(), u.down.Load(), u.why, u.aborted
 		case <-ctx.Done():
 			u.finish(abortCancelled, true)
@@ -282,4 +304,46 @@ func (u *udpTunnel) run(ctx context.Context) (up, down int64, why abortReason, a
 			}
 		}
 	}
+}
+
+// finishUDPWorkers preserves FIN when the final Capsule can be delivered.
+// A peer withholding flow-control credit must not retain a writer, its tunnel
+// quota or a pooled HTTP/2 response writer after the handler returns. After a
+// short grace period, discard pending packets with a no-error stream reset.
+func finishUDPWorkers(cc clientConn, workers *sync.WaitGroup) {
+	past := time.Now().Add(-time.Second)
+	switch c := cc.(type) {
+	case *h1Client:
+		_ = c.conn.SetReadDeadline(past)
+	case *h2Client:
+		_ = c.body.Close()
+	case *h3Client:
+		c.str.CancelRead(quic.StreamErrorCode(http3.ErrCodeNoError))
+	default:
+		cc.close()
+	}
+	done := make(chan struct{})
+	go func() { workers.Wait(); close(done) }()
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return
+	case <-timer.C:
+	}
+	switch c := cc.(type) {
+	case *h1Client:
+		_ = c.conn.SetWriteDeadline(past)
+	case *h2Client:
+		if w, ok := c.w.(interface{ InterruptStream(uint32) error }); ok {
+			_ = w.InterruptStream(0) // NO_ERROR
+		} else {
+			_ = c.rc.SetWriteDeadline(past)
+		}
+	case *h3Client:
+		c.str.CancelWrite(quic.StreamErrorCode(http3.ErrCodeNoError))
+	default:
+		cc.close()
+	}
+	<-done
 }

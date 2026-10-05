@@ -1,7 +1,9 @@
 package networkrelay
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"errors"
 	"reflect"
 	"sync"
@@ -36,7 +38,10 @@ var openTunnels atomic.Int64
 func registerHandler(h *Handler) {
 	registry.Lock()
 	for old := range registry.handlers {
-		if sameRelay(old, h) {
+		// TLS policies finish provisioning after HTTP handlers. Sharing a
+		// traffic budget needs the declared policy identity; tunnel transfer
+		// below additionally checks the effective, provisioned trust roots.
+		if sameRelayConfig(old, h) {
 			for name := range h.traffic {
 				if old.auth.has(account{name: name, hash: h.auth.users[name].PasswordHash}) && old.traffic[name] != nil {
 					h.traffic[name] = old.traffic[name]
@@ -98,7 +103,34 @@ func addTunnel(t *liveTunnel) bool {
 // newly forbidden by the next configuration. An explicit ID is needed: a
 // password hash is not a tenant identifier.
 func sameRelay(a, b *Handler) bool {
+	if !sameRelayConfig(a, b) {
+		return false
+	}
+	if a.tlsCustomVerifiers || b.tlsCustomVerifiers {
+		return false
+	}
+	left, right := relayTLSConfig(a), relayTLSConfig(b)
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.ClientAuth == right.ClientAuth && left.ClientCAs.Equal(right.ClientCAs)
+}
+
+func relayTLSConfig(h *Handler) *tls.Config {
+	if h.server == nil || h.server.srv == nil {
+		return nil
+	}
+	for _, p := range h.server.srv.TLSConnPolicies {
+		if !p.Drop {
+			return p.TLSConfig
+		}
+	}
+	return nil
+}
+
+func sameRelayConfig(a, b *Handler) bool {
 	return a != nil && b != nil && a.RelayID != "" && a.RelayID == b.RelayID &&
+		bytes.Equal(a.tlsClientAuth, b.tlsClientAuth) &&
 		a.UDPTemplate == b.UDPTemplate &&
 		a.MaxBytesPerSecondPerUser == b.MaxBytesPerSecondPerUser &&
 		a.MaxUDPPacketsPerSecondPerUser == b.MaxUDPPacketsPerSecondPerUser &&
