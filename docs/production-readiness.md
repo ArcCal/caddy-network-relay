@@ -109,6 +109,25 @@ moves while the jobs run. These checks do not replace staging validation.
   corrected Go 1.26 complete suite subsequently passed (266.277 s); the
   Go 1.27 complete suite passed in 306.541 s.
 
+## Verification of the 2026-10-05 changes
+
+Admission limits, certificate users, profiles with identities, DDM
+declarations and the installer without a stored password were checked in a
+Linux build container (Go 1.26.8) without IPv6 sockets:
+
+- The complete race-enabled suite passed (`RELAY_STRESS_MB=4`, 248 s),
+  including certificate login over HTTP/3, HTTP/2 and HTTP/1.1, per-client
+  HTTP/3 connection and header limits, Retry under a handshake flood, and the
+  128-device capacity test dialing from distinct loopback addresses.
+- Patched upstream QUIC, HTTP/3 and HTTP/2 suites passed; quic-go's IPv6 and
+  dual-stack socket tests were skipped because the container has no IPv6.
+- The 17 installer tests and shellcheck passed. OpenSSL decoded the generated
+  PKCS#12 files (3DES/SHA-1, client-auth EKU). The real binary validated a
+  Caddyfile with `client_auth` and `strict_sni_host insecure_off`, and refused
+  one without the latter.
+- govulncheck could not reach vuln.go.dev from the container; CI runs it.
+- Nothing was tried on Apple devices or an MDM server.
+
 ## Required staging checks before rollout
 
 1. Test real iPhone/iPad/Mac supported OS versions: profile installation, routing
