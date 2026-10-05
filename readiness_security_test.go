@@ -57,7 +57,7 @@ func TestRelaySecurityDomains(t *testing.T) {
 			defer unregisterHandler(other)
 			ctx, cancel := context.WithCancelCause(context.Background())
 			defer cancel(nil)
-			lt := &liveTunnel{acct: account{name: "alice", hash: testHash}, owner: first, cancel: cancel}
+			lt := &liveTunnel{acct: a.accountOf("alice"), owner: first, cancel: cancel}
 			if !addTunnel(lt) {
 				t.Fatal("initial add")
 			}

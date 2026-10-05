@@ -15,7 +15,7 @@
 relay.example.com, :443 {
 	network_relay {
 		# One line per device: user <name> <hash from `caddy network-relay passwd`>
-		user iphone $argon2id$v=19$m=19456,t=2,p=1$REPLACE$REPLACE
+		user iphone $pbkdf2-sha256$i=1000,l=32$REPLACE$REPLACE
 	}
 
 	# Everything else, including requests without the right password, is

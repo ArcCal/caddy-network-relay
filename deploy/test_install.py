@@ -7,6 +7,7 @@ source, except that `validate` and `network-relay check` (which need a
 running system) are simulated. Run: python3 deploy/test_install.py
 """
 
+import base64
 import os
 from pathlib import Path
 import plistlib
@@ -71,7 +72,7 @@ FAKE_CADDY = r'''#!/bin/sh
 # The real binary, except for the parts that need a running system.
 case "$1 $2" in
   "validate --config") echo "validate" >> "$LOG"; [ -n "$FAKE_INVALID" ] && exit 1; exit 0 ;;
-  "network-relay check") cat > /dev/null; echo "check $*" >> "$LOG"; [ -n "$FAKE_CHECK_FAILS" ] && { echo "FAIL HTTP/3"; exit 1; }; echo "all checks passed"; exit 0 ;;
+  "network-relay check") cat > "$STATE/check-stdin"; echo "check $*" >> "$LOG"; [ -n "$FAKE_CHECK_FAILS" ] && { echo "FAIL HTTP/3"; exit 1; }; echo "all checks passed"; exit 0 ;;
 esac
 # A module list longer than a pipe buffer, with network_relay first (or,
 # with "missing", not at all).
@@ -168,19 +169,27 @@ class InstallTest(unittest.TestCase):
         self.assertIn('# domain: relay.example.com', caddyfile)
         self.assertIn('relay.example.com, :443 {', caddyfile)
         self.assertIn('email me@example.org', caddyfile)
-        self.assertRegex(caddyfile, r'user iphone \$argon2id\$v=19\$m=19456,t=2,p=1\$\S+\$\S+')
+        # A generated password gets the fast hash.
+        self.assertRegex(caddyfile, r'user iphone \$pbkdf2-sha256\$i=1000,l=32\$\S+\$\S+')
         # The generated Caddyfile is valid for the real adapter.
         a = subprocess.run([str(REAL_CADDY), 'adapt', '--config', str(self.path('/etc/caddy/Caddyfile'))],
                            capture_output=True, text=True)
         self.assertEqual(a.returncode, 0, a.stderr)
         self.assertIn('"handler":"network_relay"', a.stdout)
 
-        password_file = self.path('/etc/caddy/relay/iphone.password')
-        password = password_file.read_text().strip()
-        self.assertEqual(len(password), 24)
-        self.assertEqual(stat.S_IMODE(password_file.stat().st_mode), 0o600)
+        # The password is in the profiles and nowhere else on the server.
+        profile = plistlib.loads(self.path('/etc/caddy/relay/relay.example.com-iphone.mobileconfig').read_bytes())
+        basic = profile['PayloadContent'][0]['Relays'][0]['AdditionalHTTPHeaderFields']['Authorization']
+        user, password = base64.b64decode(basic.split()[1]).decode().split(':', 1)
+        self.assertEqual((user, len(password)), ('iphone', 24))
+        self.assertEqual(sorted(p.name for p in self.path('/etc/caddy/relay').iterdir()),
+                         ['relay.example.com-iphone-global.mobileconfig', 'relay.example.com-iphone.mobileconfig'])
+        for f in self.files():
+            if not f.endswith('.mobileconfig'):
+                self.assertNotIn(password.encode(), self.path(f).read_bytes(), f)
         self.assertEqual(stat.S_IMODE(self.path('/etc/caddy/relay').stat().st_mode), 0o700)
         self.assertNotIn(password, r.stdout + r.stderr, 'the password is never printed')
+        self.assertEqual((self.state / 'check-stdin').read_text(), password + '\n', 'the self-check gets it on stdin')
 
         for name, toggle in [('relay.example.com-iphone.mobileconfig', None),
                              ('relay.example.com-iphone-global.mobileconfig', False)]:
@@ -190,7 +199,7 @@ class InstallTest(unittest.TestCase):
             relay = payload['Relays'][0]
             self.assertEqual(relay['HTTP3RelayURL'],
                              'https://relay.example.com/.well-known/masque/udp/{target_host}/{target_port}/')
-            self.assertIn(password.encode(), __import__('base64').b64decode(
+            self.assertIn(password.encode(), base64.b64decode(
                 relay['AdditionalHTTPHeaderFields']['Authorization'].split()[1]))
             self.assertEqual(payload.get('UIToggleEnabled'), toggle)
             self.assertEqual(payload['ExcludedDomains'], ['relay.example.com'])
@@ -219,15 +228,17 @@ class InstallTest(unittest.TestCase):
     def test_upgrade_keeps_everything(self):
         self.fresh()
         caddyfile = self.path('/etc/caddy/Caddyfile').read_text()
-        password = self.path('/etc/caddy/relay/iphone.password').read_text()
         profile = self.path('/etc/caddy/relay/relay.example.com-iphone-global.mobileconfig').read_bytes()
         self.log.write_text('')
         self.path('/usr/local/bin/caddy').write_text('old binary')
         # An upgrade needs no DNS: here the domain no longer resolves.
-        self.install(FAKE_DNS='', FAKE_SS='tcp LISTEN 0 4096 *:443 *:* users:(("caddy",pid=1,fd=3))')
+        r = self.install(FAKE_DNS='', FAKE_SS='tcp LISTEN 0 4096 *:443 *:* users:(("caddy",pid=1,fd=3))')
         self.assertEqual(self.path('/etc/caddy/Caddyfile').read_text(), caddyfile)
-        self.assertEqual(self.path('/etc/caddy/relay/iphone.password').read_text(), password)
         self.assertEqual(self.path('/etc/caddy/relay/relay.example.com-iphone-global.mobileconfig').read_bytes(), profile)
+        # Without the password, the self-check is left to the operator.
+        self.assertNotIn('network-relay check', self.calls())
+        self.assertIn('does not keep the password', r.stdout)
+        self.assertIn('network-relay check --server relay.example.com --address 127.0.0.1 --user iphone', r.stdout)
         self.assertNotEqual(self.path('/usr/local/bin/caddy').read_text(), 'old binary')
         self.assertNotIn('adduser', self.calls())
         # Same domain and user may be given again; different ones are refused.
@@ -353,6 +364,17 @@ class InstallTest(unittest.TestCase):
             r = self.fresh(ok=False)
         self.assertIn('Another caddy-network-relay installer is running', r.stderr)
         self.assertEqual(self.files(), [])
+
+    def test_upgrade_uses_and_flags_a_password_file_from_earlier_versions(self):
+        self.fresh()
+        legacy = self.path('/etc/caddy/relay/iphone.password')
+        legacy.write_text('old-password-from-file\n')
+        self.log.write_text('')
+        r = self.install(FAKE_SS='tcp LISTEN 0 4096 *:443 *:* users:(("caddy",pid=1,fd=3))')
+        self.assertIn('check network-relay check --server relay.example.com', self.calls())
+        self.assertEqual((self.state / 'check-stdin').read_text(), 'old-password-from-file\n')
+        self.assertIn('rm ' + str(legacy), r.stdout)
+        self.assertTrue(legacy.exists(), 'the operator decides when to delete it')
 
     def test_failed_migration_restores_the_rust_service(self):
         (self.state / 'active-network-relay').touch()
