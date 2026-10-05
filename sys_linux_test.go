@@ -1,6 +1,7 @@
 package networkrelay
 
 import (
+	"errors"
 	"net"
 	"testing"
 
@@ -22,6 +23,9 @@ func TestUDPSocketsForbidFragmentation(t *testing.T) {
 				t.Fatal(err)
 			}
 			sock, err := net.ListenUDP(tc.network, addr)
+			if err != nil && tc.ipv6 && (errors.Is(err, unix.EAFNOSUPPORT) || errors.Is(err, unix.EADDRNOTAVAIL)) {
+				t.Skipf("no IPv6 loopback on this host: %v", err)
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -7,6 +7,7 @@ package networkrelay
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"net"
@@ -274,7 +275,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return next.ServeHTTP(w, r)
 	}
 	creds := credentials(r)
-	acct, err := h.auth.verify(r.Context(), creds)
+	var acct account
+	var err error
+	if certAcct, ok := h.clientCertificate(r); ok {
+		acct = certAcct
+	} else {
+		acct, err = h.auth.verifyFrom(r.Context(), creds, clientOf(r))
+	}
 	if h.LogRequests {
 		h.logRequest(r, kind, err == nil)
 	}
@@ -340,6 +347,11 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	unfollow := context.AfterFunc(r.Context(), func() { cancel(context.Canceled) })
 	defer unfollow()
 
+	if !acct.expires.IsZero() {
+		expiry := time.AfterFunc(time.Until(acct.expires), func() { cancel(errExpired) })
+		defer expiry.Stop()
+	}
+
 	lt := &liveTunnel{acct: acct, owner: h, cancel: cancel}
 	if !addTunnel(lt) {
 		return h.refuse(w, r, &refusal{http.StatusForbidden, "http_request_denied", errRevoked.Error()})
@@ -357,6 +369,17 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return h.serveTCP(ctx, w, r, addrs, log, start, unfollow, h.traffic[acct.name])
 	}
 	return h.serveUDP(ctx, w, r, addrs, log, start, unfollow, h.traffic[acct.name])
+}
+
+// clientCertificate returns the account of the client certificate the
+// request's TLS connection presented, if a user has its fingerprint. Caddy
+// requests certificates only when the TLS connection policy says so
+// (client_auth); Go's TLS has checked that the client holds the key.
+func (h *Handler) clientCertificate(r *http.Request) (account, bool) {
+	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+		return account{}, false
+	}
+	return h.auth.verifyCertificate(sha256.Sum256(r.TLS.PeerCertificates[0].Raw))
 }
 
 func (h *Handler) refuse(w http.ResponseWriter, r *http.Request, why *refusal) error {

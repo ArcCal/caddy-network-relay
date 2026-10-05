@@ -29,9 +29,10 @@ var (
 type quicConnKey struct{}
 
 // withQUICConn is the http3.Server's ConnContext: handlers find the QUIC
-// connection of a request, to close it on connection errors.
+// connection of a request, to close it on connection errors, and the
+// connection's state for the limits on new credentials.
 func withQUICConn(ctx context.Context, c *quic.Conn) context.Context {
-	return context.WithValue(ctx, quicConnKey{}, c)
+	return withConnState(context.WithValue(ctx, quicConnKey{}, c))
 }
 
 // h3Body reads what the client sends on an HTTP/3 CONNECT stream once the

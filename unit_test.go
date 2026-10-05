@@ -295,7 +295,7 @@ func TestPasswordHashes(t *testing.T) {
 }
 
 func TestAuthenticator(t *testing.T) {
-	a, err := newAuthenticator([]User{{"alice", testHash}})
+	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,21 +328,18 @@ func TestAuthenticator(t *testing.T) {
 		a.remember(id, account{}, false)
 		a.mu.Unlock()
 	}
-	a.mu.Lock()
-	oks := 0
-	for _, e := range a.cache {
-		if e.ok {
-			oks++
+	for _, h := range []string{good, "basic " + strings.TrimPrefix(good, "Basic ")} {
+		if _, ok := a.cached(headerID(h)); !ok { // "Basic" and "basic" are different headers
+			t.Errorf("success for %q evicted", h)
 		}
 	}
-	a.mu.Unlock()
-	if oks != 2 { // "Basic" and "basic" are different headers
-		t.Errorf("success entries: %d", oks)
+	if len(a.failed) > maxCacheItems {
+		t.Errorf("failure cache unbounded: %d", len(a.failed))
 	}
-	if _, err := newAuthenticator([]User{{"a", testHash}, {"a", testHash}}); err == nil {
+	if _, err := newAuthenticator([]User{{Name: "a", PasswordHash: testHash}, {Name: "a", PasswordHash: testHash}}); err == nil {
 		t.Error("duplicate user accepted")
 	}
-	if _, err := newAuthenticator([]User{{".x", testHash}}); err == nil {
+	if _, err := newAuthenticator([]User{{Name: ".x", PasswordHash: testHash}}); err == nil {
 		t.Error("bad user name accepted")
 	}
 }
@@ -483,7 +480,7 @@ func TestDomainLists(t *testing.T) {
 // Verifications waiting for a slot are bounded, stop when their request
 // goes away, and never run for a request that is gone.
 func TestAuthenticatorQueue(t *testing.T) {
-	a, err := newAuthenticator([]User{{"alice", testHash}})
+	a, err := newAuthenticator([]User{{Name: "alice", PasswordHash: testHash}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -538,9 +535,9 @@ func TestAuthenticatorQueue(t *testing.T) {
 
 	// A request with the same header as one that goes away verifies for
 	// itself instead of failing.
-	a.mu.Lock()
-	clear(a.cache)
-	a.mu.Unlock()
+	verified.Lock()
+	delete(verified.m, headerID(good))
+	verified.Unlock()
 	ctxA, cancelA := context.WithCancel(context.Background())
 	first := make(chan error, 1)
 	go func() { _, err := a.verify(ctxA, good); first <- err }()
@@ -562,10 +559,8 @@ func TestAuthenticatorQueue(t *testing.T) {
 	// Nothing from the cancelled requests was cached as a failure.
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, e := range a.cache {
-		if !e.ok {
-			t.Error("a cancelled verification was cached")
-		}
+	if len(a.failed) != 0 {
+		t.Errorf("%d cancelled verifications were cached as failures", len(a.failed))
 	}
 }
 
