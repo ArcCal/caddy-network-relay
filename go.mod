@@ -11,6 +11,7 @@ replace golang.org/x/net => ./third_party/x-net
 require (
 	github.com/caddyserver/caddy/v2 v2.11.6
 	github.com/quic-go/masque-go v0.6.0
+	github.com/quic-go/qpack v0.6.0
 	github.com/quic-go/quic-go v0.63.0
 	github.com/spf13/cobra v1.10.2
 	github.com/yosida95/uritemplate/v3 v3.0.2
@@ -20,6 +21,7 @@ require (
 	golang.org/x/sys v0.48.0
 	golang.org/x/term v0.46.0
 	golang.org/x/time v0.16.0
+	software.sslmate.com/src/go-pkcs12 v0.7.3
 )
 
 require (
@@ -107,7 +109,6 @@ require (
 	github.com/prometheus/common v0.71.0 // indirect
 	github.com/prometheus/otlptranslator v1.0.0 // indirect
 	github.com/prometheus/procfs v0.22.0 // indirect
-	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/rs/xid v1.6.0 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect

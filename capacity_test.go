@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"runtime"
 	"sort"
@@ -30,8 +31,17 @@ func TestDeploymentCapacity(t *testing.T) {
 		users[i] = map[string]string{"name": fmt.Sprintf("device-%04d", i), "password_hash": testHash}
 	}
 	cfg := map[string]any{"users": users, "max_tunnels": n, "max_tunnels_per_user": 2}
-	// Every device here dials from 127.0.0.1; on a network each has its own address.
-	h3ClientLimit(t, n)
+	// Each device dials from its own address, as on a network: limits per
+	// client address apply to each separately.
+	sockets := make([]net.PacketConn, n)
+	for i := range sockets {
+		pc, err := net.ListenPacket("udp", fmt.Sprintf("127.0.%d.%d:0", i/200, 2+i%200))
+		if err != nil {
+			t.Skipf("needs addresses in 127.0.0.0/8 on the loopback interface: %v", err)
+		}
+		sockets[i] = pc
+		t.Cleanup(func() { pc.Close() })
+	}
 	port, reload := startRelay(t, cfg, nil)
 	target := echoTCP(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -64,6 +74,7 @@ func TestDeploymentCapacity(t *testing.T) {
 				start := time.Now()
 				c := client(port)
 				c.Authorization = BasicAuthorization(users[i]["name"], testPassword)
+				c.PacketConn = sockets[i]
 				h, err := c.dialH3(ctx)
 				if err != nil {
 					errs <- err

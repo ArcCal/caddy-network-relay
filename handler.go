@@ -161,6 +161,16 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		if err != nil {
 			return err
 		}
+		// A CONNECT names its destination as the Host, which never matches
+		// the TLS server name. Caddy enforces that they match when a site
+		// on the server has TLS client_auth (as certificate users need),
+		// unless told otherwise; then every TCP tunnel would fail with 421.
+		if srv.StrictSNIHost != nil && *srv.StrictSNIHost {
+			return errors.New("strict_sni_host is on for this server, which refuses every CONNECT " +
+				"(Caddy turns it on when a site uses client_auth, as certificate users need); " +
+				"add the global option servers { strict_sni_host insecure_off }, and do not rely on " +
+				"client_auth for access control in other sites of this server")
+		}
 		app := appIface.(*App)
 		if err := app.claimRelayID(h.RelayID); err != nil {
 			return err
