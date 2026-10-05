@@ -124,6 +124,7 @@ func (b *h3Body) truncated(err error) (int, error) {
 // dropped silently.
 type datagramGuard struct {
 	closed atomic.Bool
+	failed atomic.Bool
 }
 
 type datagramGuardKey struct{}
@@ -163,8 +164,12 @@ func (g *datagramGuard) watch(ctx context.Context, str *http3.Stream) {
 		if g.closed.Load() {
 			continue
 		}
-		str.CancelRead(h3DatagramError)
+		// Publish the protocol error before either cancellation wakes the
+		// tunnel pump or establishment watcher. Their generic cleanup must
+		// preserve this code on both stream directions.
+		g.failed.Store(true)
 		str.CancelWrite(h3DatagramError)
+		str.CancelRead(h3DatagramError)
 		return
 	}
 }

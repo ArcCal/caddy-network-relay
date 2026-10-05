@@ -36,6 +36,7 @@ type streamsMap struct {
 	incomingUniStreams    *incomingStreamsMap[*ReceiveStream]
 	reset                 bool
 	supportsResetStreamAt bool
+	receiveBufferBudget   ReceiveBufferBudget
 }
 
 func newStreamsMap(
@@ -64,7 +65,9 @@ func (m *streamsMap) initMaps() {
 	m.outgoingBidiStreams = newOutgoingStreamsMap(
 		protocol.StreamTypeBidi,
 		func(id protocol.StreamID) *Stream {
-			return newStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt)
+			stream := newStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt)
+			stream.receiveStr.frameQueue.receiveBufferBudget = m.receiveBufferBudget
+			return stream
 		},
 		m.queueControlFrame,
 		m.perspective,
@@ -72,7 +75,9 @@ func (m *streamsMap) initMaps() {
 	m.incomingBidiStreams = newIncomingStreamsMap(
 		protocol.StreamTypeBidi,
 		func(id protocol.StreamID) *Stream {
-			return newStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt)
+			stream := newStream(m.ctx, id, m.sender, m.newFlowController(id), m.supportsResetStreamAt)
+			stream.receiveStr.frameQueue.receiveBufferBudget = m.receiveBufferBudget
+			return stream
 		},
 		m.maxIncomingBidiStreams,
 		m.queueControlFrame,
@@ -89,7 +94,9 @@ func (m *streamsMap) initMaps() {
 	m.incomingUniStreams = newIncomingStreamsMap(
 		protocol.StreamTypeUni,
 		func(id protocol.StreamID) *ReceiveStream {
-			return newReceiveStream(id, m.sender, m.newFlowController(id))
+			stream := newReceiveStream(id, m.sender, m.newFlowController(id))
+			stream.frameQueue.receiveBufferBudget = m.receiveBufferBudget
+			return stream
 		},
 		m.maxIncomingUniStreams,
 		m.queueControlFrame,
@@ -308,9 +315,11 @@ func (m *streamsMap) HandleResetStreamFrame(f *wire.ResetStreamFrame, rcvTime mo
 func (m *streamsMap) HandleStreamFrame(f *wire.StreamFrame, rcvTime monotime.Time) error {
 	str, err := m.getReceiveStream(f.StreamID)
 	if err != nil {
+		f.PutBack()
 		return err
 	}
 	if str == nil { // stream already deleted
+		f.PutBack()
 		return nil
 	}
 	return str.handleStreamFrame(f, rcvTime)

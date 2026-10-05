@@ -2,6 +2,7 @@ package networkrelay
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 
@@ -42,6 +43,34 @@ func validateRelayTLS(srv *caddyhttp.Server) error {
 		return fmt.Errorf("network_relay requires the same TLS client authentication configuration on every accepted TLS policy; separate sites with different client authentication onto different listeners")
 	}
 	return nil
+}
+
+// CA providers are provisioned after relay handlers. Identical declarations
+// can fetch different effective roots (for example, a remote bundle rotating
+// between two reads), so check the completed policies before serving them.
+func validateEffectiveRelayTLS(srv *caddyhttp.Server) error {
+	var first *tls.Config
+	for _, p := range srv.TLSConnPolicies {
+		if p.Drop {
+			continue
+		}
+		if p.TLSConfig == nil {
+			return fmt.Errorf("network_relay TLS policy is not fully provisioned")
+		}
+		if first == nil {
+			first = p.TLSConfig
+		} else if !sameEffectiveTLSClientAuth(first, p.TLSConfig) {
+			return fmt.Errorf("network_relay requires the same effective TLS client authentication and CA roots on every accepted TLS policy")
+		}
+	}
+	return nil
+}
+
+func sameEffectiveTLSClientAuth(a, b *tls.Config) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.ClientAuth == b.ClientAuth && a.ClientCAs.Equal(b.ClientCAs)
 }
 
 // Provision has already verified that every accepted policy is uniform.

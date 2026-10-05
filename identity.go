@@ -22,8 +22,9 @@ import (
 //
 // The relay needs no CA: the configuration pins each user's certificate by
 // its SHA-256 fingerprint, and the TLS handshake proves that the device
-// holds the key. Once installed, the key lives in the device's keychain and
-// cannot be copied off it the way a password in a profile can.
+// holds the key. The generated profile asks macOS 10.15+ to import the key
+// as non-extractable. The PKCS#12 file still contains the private key and
+// must be kept private and deleted after installation.
 type Identity struct {
 	// P12 holds the key and the certificate, encrypted with Password.
 	P12      []byte

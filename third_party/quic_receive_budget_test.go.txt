@@ -1,0 +1,256 @@
+package quic
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"sync"
+	"testing"
+
+	"github.com/quic-go/quic-go/internal/monotime"
+	"github.com/quic-go/quic-go/internal/protocol"
+	"github.com/quic-go/quic-go/internal/qerr"
+	"github.com/quic-go/quic-go/internal/wire"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/mock/gomock"
+)
+
+// The zero value is unlimited, including for the Config reflection fixture.
+type relayQUICReceiveBudget struct {
+	mu        sync.Mutex
+	max, used int64
+}
+
+func (b *relayQUICReceiveBudget) TryAcquire(n int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.max > 0 && n > b.max-b.used {
+		return false
+	}
+	b.used += n
+	return true
+}
+func (b *relayQUICReceiveBudget) Release(n int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.used -= n
+	if b.used < 0 {
+		panic("receive budget released twice")
+	}
+}
+func (b *relayQUICReceiveBudget) bytes() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.used
+}
+
+func relayBudgetReceiveStream(t *testing.T, budget *relayQUICReceiveBudget) *ReceiveStream {
+	t.Helper()
+	sender := NewMockStreamSender(gomock.NewController(t))
+	sender.EXPECT().onStreamCompleted(gomock.Any()).AnyTimes()
+	sender.EXPECT().onHasStreamControlFrame(gomock.Any(), gomock.Any()).AnyTimes()
+	sender.EXPECT().onHasConnectionData().AnyTimes()
+	str := newReceiveStream(42, sender, newTestStreamFlowController(42))
+	str.frameQueue.receiveBufferBudget = budget
+	return str
+}
+
+func TestRelayQUICReceiveBudgetPooledCapacityAndTrim(t *testing.T) {
+	for _, length := range []int{8, protocol.MinStreamFrameBufferSize + 16} {
+		t.Run(fmt.Sprint(length), func(t *testing.T) {
+			budget := &relayQUICReceiveBudget{}
+			s := newFrameSorter()
+			s.receiveBufferBudget = budget
+			require.NoError(t, s.Push([]byte("abc"), 0, nil))
+			frame := wire.GetStreamFrame()
+			frame.Data = frame.Data[:length]
+			capacity := cap(frame.Data)
+			returned := 0
+			require.NoError(t, s.Push(frame.Data, 1, func() { returned++; frame.PutBack() }))
+			_, first, done := s.Pop()
+			require.Equal(t, []byte("abc"), first)
+			done()
+			_, data, done := s.Pop()
+			require.Len(t, data, length-2)
+			if len(data) < protocol.MinStreamFrameBufferSize {
+				require.Equal(t, 1, returned, "trimmed small frame must release pooled backing immediately")
+				require.Equal(t, int64(cap(data)+256), budget.bytes())
+			} else {
+				require.Zero(t, returned)
+				require.Equal(t, int64(capacity+256), budget.bytes(), "leading trim retains entire pooled backing")
+			}
+			s.Discard() // popped bytes remain owned by the reader
+			require.Positive(t, budget.bytes())
+			done()
+			done()
+			require.Equal(t, 1, returned)
+			require.Zero(t, budget.bytes())
+		})
+	}
+}
+
+func TestRelayQUICReceiveBudgetRejectedCopiedTrimReturnsPoolOnce(t *testing.T) {
+	budget := &relayQUICReceiveBudget{max: 500}
+	s := newFrameSorter()
+	s.receiveBufferBudget = budget
+	require.NoError(t, s.Push([]byte("abc"), 0, nil))
+	frame := wire.GetStreamFrame()
+	frame.Data = frame.Data[:8]
+	returned := 0
+	require.Error(t, s.Push(frame.Data, 1, func() { returned++; frame.PutBack() }))
+	require.Equal(t, 1, returned, "small trim and rejection must not both return the same pooled frame")
+	require.Equal(t, int64(259), budget.bytes())
+	s.Discard()
+	require.Zero(t, budget.bytes())
+}
+
+func TestRelayQUICReceiveBudgetConsumedFrameReleasedWithoutAnotherRead(t *testing.T) {
+	budget := &relayQUICReceiveBudget{}
+	str := relayBudgetReceiveStream(t, budget)
+	require.NoError(t, str.handleStreamFrame(&wire.StreamFrame{Data: []byte("abcdef")}, monotime.Now()))
+	n, err := str.Read(make([]byte, 6))
+	require.NoError(t, err)
+	require.Equal(t, 6, n)
+	require.Zero(t, budget.bytes(), "consuming the frame must release its backing without waiting for the next Read")
+	str.CancelRead(1337)
+	require.Zero(t, budget.bytes())
+}
+
+func TestRelayQUICReceiveBudgetSharedExhaustionAndCleanup(t *testing.T) {
+	budget := &relayQUICReceiveBudget{max: 600}
+	first, second := newFrameSorter(), newFrameSorter()
+	first.receiveBufferBudget, second.receiveBufferBudget = budget, budget
+	firstFreed, rejectedFreed := 0, 0
+	require.NoError(t, first.Push(make([]byte, 64, 256), 0, func() { firstFreed++ }))
+	err := second.Push(make([]byte, 64, 256), 0, func() { rejectedFreed++ })
+	var transportErr *qerr.TransportError
+	require.ErrorAs(t, err, &transportErr)
+	require.Equal(t, qerr.InternalError, transportErr.ErrorCode)
+	require.Equal(t, 1, rejectedFreed)
+	require.Equal(t, int64(512), budget.bytes())
+	first.Discard()
+	first.Discard()
+	second.Discard()
+	require.Equal(t, 1, firstFreed)
+	require.Zero(t, budget.bytes())
+}
+
+func TestRelayQUICReceiveBudgetDiscardDropsMetadata(t *testing.T) {
+	budget := &relayQUICReceiveBudget{}
+	s := newFrameSorter()
+	s.receiveBufferBudget = budget
+	for i := 0; i < 200; i++ {
+		require.NoError(t, s.Push([]byte{1}, protocol.ByteCount(2*i+1), nil))
+	}
+	require.Greater(t, s.gaps.Len(), 100)
+	s.Discard()
+	require.Zero(t, budget.bytes())
+	require.Nil(t, s.queue, "discarded sorter must release old map allocation")
+	require.Equal(t, 1, s.gaps.Len(), "discarded gap nodes must not remain reachable")
+}
+
+func TestRelayQUICReceiveBudgetFINRemainsReadableUntilDrained(t *testing.T) {
+	budget := &relayQUICReceiveBudget{}
+	str := relayBudgetReceiveStream(t, budget)
+	require.NoError(t, str.handleStreamFrame(&wire.StreamFrame{Data: []byte("abcdef"), Fin: true}, monotime.Now()))
+	charged := budget.bytes()
+	require.Positive(t, charged)
+	data := make([]byte, 2)
+	n, err := str.Read(data)
+	require.NoError(t, err)
+	require.Equal(t, 2, n)
+	require.Equal(t, "ab", string(data))
+	require.Equal(t, charged, budget.bytes(), "partially read FIN must retain unread bytes")
+	data = make([]byte, 4)
+	n, err = str.Read(data)
+	require.ErrorIs(t, err, io.EOF)
+	require.Equal(t, 4, n)
+	require.Equal(t, "cdef", string(data))
+	require.Zero(t, budget.bytes())
+	str.CancelRead(1337) // an already-observed FIN remains EOF
+	n, err = str.Read(make([]byte, 1))
+	require.Zero(t, n)
+	require.ErrorIs(t, err, io.EOF)
+}
+
+func TestRelayQUICReceiveBudgetCancellationReleasesPartialAndQueuedData(t *testing.T) {
+	for _, kind := range []string{"local", "remote", "shutdown"} {
+		t.Run(kind, func(t *testing.T) {
+			budget := &relayQUICReceiveBudget{}
+			str := relayBudgetReceiveStream(t, budget)
+			require.NoError(t, str.handleStreamFrame(&wire.StreamFrame{Data: []byte("abcdef")}, monotime.Now()))
+			require.NoError(t, str.handleStreamFrame(&wire.StreamFrame{Offset: 8, Data: []byte("gh")}, monotime.Now()))
+			n, err := str.Read(make([]byte, 2))
+			require.NoError(t, err)
+			require.Equal(t, 2, n)
+			require.Positive(t, budget.bytes())
+			var expected error
+			switch kind {
+			case "local":
+				str.CancelRead(1337)
+				expected = &StreamError{StreamID: 42, ErrorCode: 1337}
+			case "remote":
+				require.NoError(t, str.handleResetStreamFrame(&wire.ResetStreamFrame{StreamID: 42, FinalSize: 10, ErrorCode: 1337}, monotime.Now()))
+				expected = &StreamError{StreamID: 42, ErrorCode: 1337, Remote: true}
+			case "shutdown":
+				expected = errors.New("connection stopped")
+				str.closeForShutdown(expected)
+			}
+			require.Zero(t, budget.bytes())
+			n, err = str.Read(make([]byte, 1))
+			require.Zero(t, n)
+			require.ErrorIs(t, err, expected)
+			str.CancelRead(1337)
+			str.closeForShutdown(expected)
+			require.Zero(t, budget.bytes())
+		})
+	}
+}
+
+func TestRelayQUICReceiveBudgetResetPartiallyReadFINPreservesError(t *testing.T) {
+	for _, reliable := range []protocol.ByteCount{0, 4} {
+		t.Run(string(rune(reliable+'0')), func(t *testing.T) {
+			budget := &relayQUICReceiveBudget{}
+			str := relayBudgetReceiveStream(t, budget)
+			require.NoError(t, str.handleStreamFrame(&wire.StreamFrame{Data: []byte("abcdef"), Fin: true}, monotime.Now()))
+			n, err := str.Read(make([]byte, 2))
+			require.NoError(t, err)
+			require.Equal(t, 2, n)
+			require.NoError(t, str.handleResetStreamFrame(&wire.ResetStreamFrame{StreamID: 42, FinalSize: 6, ReliableSize: reliable, ErrorCode: 1337}, monotime.Now()))
+			remaining := max(0, int(reliable)-2)
+			if remaining > 0 {
+				require.Positive(t, budget.bytes())
+			} else {
+				require.Zero(t, budget.bytes())
+			}
+			n, err = str.Read(make([]byte, max(1, remaining)))
+			require.Equal(t, remaining, n)
+			require.ErrorIs(t, err, &StreamError{StreamID: 42, ErrorCode: 1337, Remote: true})
+			require.Zero(t, budget.bytes())
+			n, err = str.Read(make([]byte, 1))
+			require.Zero(t, n)
+			require.ErrorIs(t, err, &StreamError{StreamID: 42, ErrorCode: 1337, Remote: true})
+		})
+	}
+}
+
+func TestRelayQUICReceiveBudgetAttachedToEveryReceivingStreamKind(t *testing.T) {
+	budget := &relayQUICReceiveBudget{}
+	sender := NewMockStreamSender(gomock.NewController(t))
+	m := newStreamsMap(context.Background(), sender, func(wire.Frame) {}, newTestStreamFlowController, 10, 10, protocol.PerspectiveServer)
+	m.receiveBufferBudget = budget
+	m.HandleTransportParameters(&wire.TransportParameters{MaxBidiStreamNum: 10, MaxUniStreamNum: 10})
+	outgoing, err := m.OpenStream()
+	require.NoError(t, err)
+	require.Same(t, budget, outgoing.receiveStr.frameQueue.receiveBufferBudget)
+	require.NoError(t, m.HandleStreamFrame(&wire.StreamFrame{StreamID: 0}, monotime.Now()))
+	incoming, err := m.AcceptStream(context.Background())
+	require.NoError(t, err)
+	require.Same(t, budget, incoming.receiveStr.frameQueue.receiveBufferBudget)
+	require.NoError(t, m.HandleStreamFrame(&wire.StreamFrame{StreamID: 2}, monotime.Now()))
+	uni, err := m.AcceptUniStream(context.Background())
+	require.NoError(t, err)
+	require.Same(t, budget, uni.frameQueue.receiveBufferBudget)
+	require.Same(t, budget, populateConfig(&Config{ReceiveBufferBudget: budget}).ReceiveBufferBudget)
+}

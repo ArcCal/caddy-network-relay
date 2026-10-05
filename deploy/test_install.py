@@ -64,7 +64,14 @@ esac''',
     'adduser': 'touch "$STATE/user-caddy"; echo "adduser $*" >> "$LOG"',
     'runuser': 'shift 3; exec "$@"',  # runuser -u caddy -- cmd...
     'chown': 'exit 0',
-    'sysctl': '[ "$1" = -n ] && echo 212992; exit 0',
+    'sysctl': r'''
+if [ "$1" = -n ]; then
+  case "$2" in
+    net.core.rmem_max) echo "${FAKE_SYSCTL_RMEM:-212992}" ;;
+    net.core.wmem_max) echo "${FAKE_SYSCTL_WMEM:-212992}" ;;
+  esac
+fi
+exit 0''',
     'tailscale': 'echo 100.64.0.7',
 }
 
@@ -73,6 +80,11 @@ FAKE_CADDY = r'''#!/bin/sh
 case "$1 $2" in
   "validate --config") echo "validate" >> "$LOG"; [ -n "$FAKE_INVALID" ] && exit 1; exit 0 ;;
   "network-relay check") cat > "$STATE/check-stdin"; echo "check $*" >> "$LOG"; [ -n "$FAKE_CHECK_FAILS" ] && { echo "FAIL HTTP/3"; exit 1; }; echo "all checks passed"; exit 0 ;;
+  "network-relay profile")
+    if [ "$FAKE_PROFILE_FAILS" = all ] || { [ "$FAKE_PROFILE_FAILS" = global ] && case "$*" in *global*) true ;; *) false ;; esac; }; then
+      echo "profile generation failed" >&2
+      exit 1
+    fi ;;
 esac
 # A module list longer than a pipe buffer, with network_relay first (or,
 # with "missing", not at all).
@@ -248,6 +260,43 @@ class InstallTest(unittest.TestCase):
         r = self.install('--user', 'ipad', ok=False)
         self.assertIn('User iphone already exists', r.stderr)
 
+    def test_upgrade_persists_runtime_udp_buffer_limits(self):
+        self.fresh()
+        self.install(FAKE_SYSCTL_RMEM='7500000', FAKE_SYSCTL_WMEM='12000000')
+        persistent = self.path('/etc/sysctl.d/60-caddy-network-relay.conf').read_text()
+        self.assertIn('net.core.rmem_max = 7500000', persistent)
+        self.assertIn('net.core.wmem_max = 12000000', persistent)
+
+    def test_failed_primary_profile_leaves_a_clean_retry(self):
+        r = self.fresh(ok=False, FAKE_PROFILE_FAILS='all')
+        self.assertIn('profile generation failed', r.stderr)
+        self.assertFalse(self.path('/etc/caddy/Caddyfile').exists())
+        self.assertFalse(self.path('/usr/local/bin/caddy').exists())
+        self.assertFalse((self.state / 'active-caddy').exists())
+        self.assertNotIn('systemctl restart caddy', self.calls())
+        self.assertEqual(list(self.path('/etc/caddy/relay').glob('*.mobileconfig')), [])
+        # Retry must generate a new account and credentials, not detect an
+        # upgrade with an irrecoverable password and no device profile.
+        self.fresh()
+        self.assertTrue(self.path('/etc/caddy/relay/relay.example.com-iphone.mobileconfig').exists())
+
+    def test_failed_global_profile_keeps_primary_credentials(self):
+        stale = self.path('/etc/caddy/relay/relay.example.com-iphone-global.mobileconfig')
+        stale.parent.mkdir(parents=True)
+        stale.write_text('stale credentials')
+        r = self.fresh(FAKE_PROFILE_FAILS='global')
+        self.assertIn('primary profile contains the credentials', r.stdout)
+        self.assertTrue((self.state / 'active-caddy').exists())
+        self.assertFalse(stale.exists(), 'do not offer a leftover profile for different credentials')
+        primary_path = self.path('/etc/caddy/relay/relay.example.com-iphone.mobileconfig')
+        self.assertIn('scp root@100.64.0.7:' + str(primary_path), r.stdout)
+        self.assertNotIn('scp root@100.64.0.7:' + str(stale), r.stdout)
+        self.assertIn('Re-running the installer cannot regenerate', r.stdout)
+        primary = plistlib.loads(primary_path.read_bytes())
+        basic = primary['PayloadContent'][0]['Relays'][0]['AdditionalHTTPHeaderFields']['Authorization']
+        self.assertEqual(base64.b64decode(basic.split()[1]).decode().split(':', 1)[1] + '\n',
+                         (self.state / 'check-stdin').read_text())
+
     def test_refusals_change_nothing(self):
         cases = [
             ({}, ['--domain', 'relay.example.com'], {'FAKE_DNS': '198.51.100.1'}, 'does not point to this machine'),
@@ -317,6 +366,8 @@ class InstallTest(unittest.TestCase):
                 self.assertIn('Install failed and was rolled back', r.stderr)
                 self.assertFalse(self.path('/etc/caddy/Caddyfile').exists())
                 self.assertFalse(self.path('/usr/local/bin/caddy').exists())
+                self.assertEqual(list(self.path('/etc/caddy/relay').glob('*.mobileconfig')), [],
+                                 'remove profiles for the rolled-back account before retry')
                 self.assertIn('systemctl stop caddy', self.calls())
                 self.assertIn('systemctl disable caddy', self.calls())
                 # A later run is a fresh install again.

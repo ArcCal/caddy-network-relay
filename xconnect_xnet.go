@@ -28,6 +28,7 @@ func init() {
 	http2.DefaultServerMaxConcurrentStreams = 1024
 	http2.DefaultServerMaxUploadBufferPerStream = 4 << 20
 	http2.DefaultServerMaxUploadBufferPerConnection = 16 << 20
+	http2.DefaultServerReceiveBufferBudget = receiveBuffers
 }
 
 func http2ExtendedConnect() bool { return http2.ExtendedConnectProtocol() }

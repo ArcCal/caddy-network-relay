@@ -1,7 +1,6 @@
 package networkrelay
 
 import (
-	"bufio"
 	"encoding/base64"
 	"net/netip"
 	"regexp"
@@ -41,9 +40,11 @@ func cleanHost(host string) string {
 func parseDomainList(text string) []string {
 	var out []string
 	seen := map[string]bool{}
-	sc := bufio.NewScanner(strings.NewReader(text))
-	for sc.Scan() {
-		line, _, _ := strings.Cut(sc.Text(), "#")
+	// The caller has already read the complete, bounded input. Splitting
+	// directly avoids Scanner's token limit silently discarding later routes
+	// after a long comment or an unsupported rule.
+	for raw := range strings.SplitSeq(text, "\n") {
+		line, _, _ := strings.Cut(raw, "#")
 		if h := cleanHost(line); h != "" && !seen[h] {
 			seen[h] = true
 			out = append(out, h)
@@ -85,10 +86,8 @@ var (
 func extractGFWList(text string) (hosts []string, stats map[string]int) {
 	stats = map[string]int{}
 	set := map[string]bool{}
-	sc := bufio.NewScanner(strings.NewReader(text))
-	sc.Buffer(make([]byte, 64*1024), 1<<20)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
+	for raw := range strings.SplitSeq(text, "\n") {
+		line := strings.TrimSpace(raw)
 		switch {
 		case line == "" || line[0] == '!' || line[0] == '[':
 			continue

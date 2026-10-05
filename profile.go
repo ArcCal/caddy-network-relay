@@ -252,6 +252,8 @@ func (p *Profile) Generate() (string, error) {
       <string>%s identity</string>
       <key>PayloadCertificateFileName</key>
       <string>%s.p12</string>
+      <key>KeyIsExtractable</key>
+      <false/>
 `, xmlEscape(id), certUUID, xmlEscape(name), xmlEscape(p.User))
 		if p.Identity.Password != "" {
 			w("      <key>Password</key>\n      <string>%s</string>\n", xmlEscape(p.Identity.Password))
