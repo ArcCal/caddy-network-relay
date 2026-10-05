@@ -275,8 +275,8 @@ func newH3Datagrams(str *h3Stream) *h3Datagrams {
 				continue
 			}
 			if len(b)-n > maxUDPPayload {
-				str.CancelRead(quic.StreamErrorCode(http3.ErrCodeMessageError))
 				str.CancelWrite(quic.StreamErrorCode(http3.ErrCodeMessageError))
+				str.CancelRead(quic.StreamErrorCode(http3.ErrCodeMessageError))
 				nativeDone <- errMalformed
 				return
 			}
@@ -295,8 +295,8 @@ func newH3Datagrams(str *h3Stream) *h3Datagrams {
 			if errors.Is(err, errMalformed) {
 				code = quic.StreamErrorCode(http3.ErrCodeMessageError)
 			}
-			str.CancelRead(code)
 			str.CancelWrite(code)
+			str.CancelRead(code)
 		}
 		// Normal FIN lets quic-go drain native datagrams already queued
 		// before reporting EOF. Publish completion only after both readers
