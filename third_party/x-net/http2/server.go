@@ -2917,12 +2917,12 @@ func (w *responseWriter) WriteString(s string) (n int, err error) {
 
 // either dataB or dataS is non-zero.
 func (w *responseWriter) write(lenData int, dataB []byte, dataS string) (n int, err error) {
-	if w.rws.writeClosed {
-		return 0, io.ErrClosedPipe
-	}
 	rws := w.rws
 	if rws == nil {
 		panic("Write called after Handler finished")
+	}
+	if rws.writeClosed {
+		return 0, io.ErrClosedPipe
 	}
 	if !rws.wroteHeader {
 		w.WriteHeader(200)

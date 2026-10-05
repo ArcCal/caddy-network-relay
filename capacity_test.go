@@ -30,6 +30,8 @@ func TestDeploymentCapacity(t *testing.T) {
 		users[i] = map[string]string{"name": fmt.Sprintf("device-%04d", i), "password_hash": testHash}
 	}
 	cfg := map[string]any{"users": users, "max_tunnels": n, "max_tunnels_per_user": 2}
+	// Every device here dials from 127.0.0.1; on a network each has its own address.
+	h3ClientLimit(t, n)
 	port, reload := startRelay(t, cfg, nil)
 	target := echoTCP(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -139,9 +141,9 @@ func TestDeploymentCapacity(t *testing.T) {
 		conns[i].Close()
 	}
 	deadline := time.Now().Add(10 * time.Second)
-	for openTunnels.Load() != 0 || len(h3Connections) != 0 {
+	for openTunnels.Load() != 0 || h3Connections.open() != 0 {
 		if time.Now().After(deadline) {
-			t.Fatalf("resources leaked: tunnels=%d H3=%d", openTunnels.Load(), len(h3Connections))
+			t.Fatalf("resources leaked: tunnels=%d H3=%d", openTunnels.Load(), h3Connections.open())
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

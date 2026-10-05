@@ -471,3 +471,39 @@ func TestH3IncompleteHeadersTimeout(t *testing.T) {
 		t.Fatal(rsp.status)
 	}
 }
+
+// One connection that starts requests without finishing their headers gets a
+// bounded share of the process-wide header slots, and loses the connection
+// when it asks for more; other clients are still served meanwhile.
+func TestH3IncompleteHeadersPerConnection(t *testing.T) {
+	port, _ := startRelay(t, nil, nil)
+	slow := dialRawH3(t, port)
+	frame := h3Frame(1, qpackHeaders([][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}}))
+	stall := func() {
+		str, err := slow.conn.OpenStreamSync(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = str.Write(frame[:2]); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 16 {
+		stall()
+	}
+	time.Sleep(200 * time.Millisecond)
+	if slow.conn.Context().Err() != nil {
+		t.Fatal("a connection within its share was closed")
+	}
+	other := dialRawH3(t, port)
+	if _, _, rsp := other.request([][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}}); rsp.status != "200" {
+		t.Fatal(rsp.status)
+	}
+	stall()
+	if code := slow.connError(); code != quic.ApplicationErrorCode(0x107) {
+		t.Fatalf("close code %x, want H3_EXCESSIVE_LOAD", code)
+	}
+	if _, _, rsp := other.request([][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}}); rsp.status != "200" {
+		t.Fatal(rsp.status)
+	}
+}

@@ -75,6 +75,12 @@ func newResponseWriter(str *Stream, conn *rawConn, isHead bool, logger *slog.Log
 	}
 }
 
+// RequestStream returns the request's stream without sending the response
+// header (unlike HTTPStream), so a handler can watch it before answering.
+func (w *responseWriter) RequestStream() *Stream {
+	return w.str
+}
+
 func (w *responseWriter) Header() http.Header {
 	return w.header
 }

@@ -6,9 +6,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
-	"reflect"
 	"sync/atomic"
-	"unsafe"
 
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -172,18 +170,11 @@ func (g *datagramGuard) watch(ctx context.Context, str *http3.Stream) {
 }
 
 // requestStream returns the HTTP/3 stream of a request without taking it
-// over: quic-go only exposes it through HTTPStreamer, which also sends the
-// response header. The field is checked by type, and a test pins it, so a
-// quic-go update that renames it fails the tests instead of silently
-// turning the guard off.
+// over: quic-go's HTTPStreamer also sends the response header. RequestStream
+// is in the patched quic-go in third_party.
 func requestStream(w http.ResponseWriter) *http3.Stream {
-	v := reflect.ValueOf(w)
-	if v.Kind() != reflect.Pointer || v.IsNil() || v.Elem().Kind() != reflect.Struct {
-		return nil
+	if rs, ok := w.(interface{ RequestStream() *http3.Stream }); ok {
+		return rs.RequestStream()
 	}
-	f := v.Elem().FieldByName("str")
-	if !f.IsValid() || f.Type() != reflect.TypeFor[*http3.Stream]() {
-		return nil
-	}
-	return *(**http3.Stream)(unsafe.Pointer(f.UnsafeAddr()))
+	return nil
 }
