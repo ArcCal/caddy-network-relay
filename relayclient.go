@@ -155,30 +155,57 @@ func (c *relayClient) dialH3(ctx context.Context) (*h3Conn, error) {
 
 func (h *h3Conn) Close() error { return h.conn.CloseWithError(0, "") }
 
-func (c *relayClient) h3Request(ctx context.Context, h *h3Conn, req *http.Request) (*http3.RequestStream, error) {
+func (c *relayClient) h3Request(ctx context.Context, h *h3Conn, req *http.Request) (*h3Stream, error) {
 	str, err := h.cc.OpenRequestStream(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if err := str.SendRequestHeader(req); err != nil {
+	// OpenRequestStream's context only bounds allocation. Keep the request
+	// context attached to this stream for headers and subsequent tunnel I/O,
+	// without canceling other requests on the shared QUIC connection.
+	s := &h3Stream{RequestStream: str}
+	s.stopContext = context.AfterFunc(ctx, func() {
+		str.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+		str.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+	})
+	failed := func(err error) (*h3Stream, error) {
+		s.stopContext()
+		str.CancelRead(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+		str.CancelWrite(quic.StreamErrorCode(http3.ErrCodeRequestCanceled))
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		} else if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) && isTimeout(err) {
+			// The QUIC deadline timer may fire before the context's timer.
+			err = context.DeadlineExceeded
+		}
 		return nil, err
+	}
+	if deadline, ok := ctx.Deadline(); ok {
+		if err := str.SetDeadline(deadline); err != nil {
+			return failed(err)
+		}
+	}
+	if err := str.SendRequestHeader(req); err != nil {
+		return failed(err)
 	}
 	rsp, err := str.ReadResponse()
 	if err != nil {
-		return nil, err
+		return failed(err)
 	}
 	if err := checkResponse(rsp, false); err != nil {
-		str.CancelRead(0)
-		str.Close()
-		return nil, err
+		return failed(err)
 	}
-	return str, nil
+	return s, nil
 }
 
-type h3Stream struct{ *http3.RequestStream }
+type h3Stream struct {
+	*http3.RequestStream
+	stopContext func() bool
+}
 
-func (s h3Stream) CloseWrite() error { return s.RequestStream.Close() }
-func (s h3Stream) Close() error {
+func (s *h3Stream) CloseWrite() error { return s.RequestStream.Close() }
+func (s *h3Stream) Close() error {
+	s.stopContext()
 	s.CancelRead(0)
 	s.RequestStream.Close()
 	return nil
@@ -192,7 +219,7 @@ func (c *relayClient) openTCPH3(ctx context.Context, h *h3Conn, target string) (
 	if err != nil {
 		return nil, err
 	}
-	return h3Stream{str}, nil
+	return str, nil
 }
 
 func (c *relayClient) openUDPH3(ctx context.Context, h *h3Conn, host, port string) (packetConn, error) {
@@ -214,24 +241,69 @@ func (c *relayClient) openUDPH3(ctx context.Context, h *h3Conn, host, port strin
 	if !c.NoDatagrams && h.cc.Settings().EnableDatagrams {
 		return newH3Datagrams(str), nil
 	}
-	return newCapsuleConn(h3Stream{str}), nil
+	return newCapsuleConn(str), nil
 }
 
-// h3Datagrams carries UDP payloads as HTTP Datagrams. It also reads the
-// request stream (capsules, or its end), so a tunnel the relay closes is
-// noticed.
+// h3Datagrams receives both QUIC HTTP Datagrams and DATAGRAM capsules.
+// RFC 9297 section 3.5 gives them the same semantics even when QUIC
+// Datagrams were negotiated. Both readers feed one bounded UDP queue.
 type h3Datagrams struct {
-	str  *http3.RequestStream
-	done chan struct{}
-	err  error
+	str     *h3Stream
+	packets chan []byte
+	done    chan struct{}
+	err     error
 }
 
-func newH3Datagrams(str *http3.RequestStream) *h3Datagrams {
-	d := &h3Datagrams{str: str, done: make(chan struct{})}
+func newH3Datagrams(str *h3Stream) *h3Datagrams {
+	d := &h3Datagrams{str: str, packets: make(chan []byte, 64), done: make(chan struct{})}
+	deliver := func(p []byte) {
+		select {
+		case d.packets <- append([]byte(nil), p...):
+		default: // a full UDP receive queue drops packets
+		}
+	}
+	nativeDone := make(chan error, 1)
 	go func() {
-		err := readCapsules(str, func([]byte) {})
+		for {
+			b, err := str.ReceiveDatagram(context.Background())
+			if err != nil {
+				nativeDone <- err
+				return
+			}
+			id, n, err := quicvarint.Parse(b)
+			if err != nil || id != 0 {
+				continue
+			}
+			if len(b)-n > maxUDPPayload {
+				str.CancelRead(quic.StreamErrorCode(http3.ErrCodeMessageError))
+				str.CancelWrite(quic.StreamErrorCode(http3.ErrCodeMessageError))
+				nativeDone <- errMalformed
+				return
+			}
+			deliver(b[n:])
+		}
+	}()
+	go func() {
+		defer str.stopContext()
+		err := readCapsules(str, deliver)
 		if err == nil {
 			err = io.EOF
+		} else {
+			// A parser failure or read deadline must also wake the native
+			// receiver, which is not itself a stream Read operation.
+			code := quic.StreamErrorCode(http3.ErrCodeRequestCanceled)
+			if errors.Is(err, errMalformed) {
+				code = quic.StreamErrorCode(http3.ErrCodeMessageError)
+			}
+			str.CancelRead(code)
+			str.CancelWrite(code)
+		}
+		// Normal FIN lets quic-go drain native datagrams already queued
+		// before reporting EOF. Publish completion only after both readers
+		// finish, leaving their bounded merged queue available to Receive.
+		nativeErr := <-nativeDone
+		if errors.Is(nativeErr, errMalformed) || errors.Is(err, io.EOF) && !errors.Is(nativeErr, io.EOF) {
+			err = nativeErr
 		}
 		d.err = err
 		close(d.done)
@@ -244,35 +316,25 @@ func (d *h3Datagrams) Send(p []byte) error {
 }
 
 func (d *h3Datagrams) Receive(ctx context.Context) ([]byte, error) {
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() {
+	select {
+	case p := <-d.packets:
+		return p, nil
+	case <-d.done:
 		select {
-		case <-d.done:
-			cancel()
-		case <-ctx.Done():
+		case p := <-d.packets:
+			return p, nil
+		default:
 		}
-	}()
-	for {
-		b, err := d.str.ReceiveDatagram(ctx)
-		if err != nil {
-			select {
-			case <-d.done:
-				return nil, d.err
-			default:
-				return nil, err
-			}
-		}
-		id, n, err := quicvarint.Parse(b)
-		if err == nil && id == 0 {
-			return b[n:], nil
-		}
+		return nil, d.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
 }
 
 func (d *h3Datagrams) Close() error {
-	d.str.CancelRead(0)
-	return d.str.Close()
+	err := d.str.Close()
+	<-d.done
+	return err
 }
 
 // ---- HTTP/2 ----

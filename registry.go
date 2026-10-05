@@ -110,23 +110,33 @@ func sameRelay(a, b *Handler) bool {
 	if a.tlsCustomVerifiers || b.tlsCustomVerifiers {
 		return false
 	}
-	left, right := relayTLSConfig(a), relayTLSConfig(b)
-	if left == nil || right == nil {
-		return left == right
+	left, right := relayTLSConfigs(a), relayTLSConfigs(b)
+	if len(left) == 0 || len(right) == 0 {
+		return len(left) == len(right)
 	}
-	return left.ClientAuth == right.ClientAuth && left.ClientCAs.Equal(right.ClientCAs)
+	// Policy order and count can change with ordinary server identities.
+	// Every accepted policy on both sides must still have the same trust.
+	for _, configs := range [][]*tls.Config{left[1:], right} {
+		for _, config := range configs {
+			if !sameEffectiveTLSClientAuth(left[0], config) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
-func relayTLSConfig(h *Handler) *tls.Config {
+func relayTLSConfigs(h *Handler) []*tls.Config {
 	if h.server == nil || h.server.srv == nil {
 		return nil
 	}
+	var configs []*tls.Config
 	for _, p := range h.server.srv.TLSConnPolicies {
 		if !p.Drop {
-			return p.TLSConfig
+			configs = append(configs, p.TLSConfig)
 		}
 	}
-	return nil
+	return configs
 }
 
 func sameRelayConfig(a, b *Handler) bool {

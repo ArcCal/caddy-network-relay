@@ -34,6 +34,14 @@ import (
 	"golang.org/x/net/http/httpguts"
 )
 
+// ReceiveBufferBudget accounts for the capacity of request DATA buffers.
+// Implementations must be safe for concurrent use and must not block. Charges
+// remain held while a closed stream's handler still owns unread DATA.
+type ReceiveBufferBudget interface {
+	TryAcquire(bytes int64) bool
+	Release(bytes int64)
+}
+
 var (
 	VerboseLogs    bool
 	logFrameWrites bool

@@ -11,8 +11,9 @@ import (
 )
 
 // memoryPerTunnel is planned per tunnel when sizing the default
-// max_tunnels: copy buffers, flow-control windows in use and kernel
-// socket buffers.
+// max_tunnels: copy buffers and typical socket overhead. Queued HTTP/2
+// and QUIC receive buffers have a separate process-wide limit; this is
+// a sizing heuristic, not an upper bound on memory per tunnel.
 const memoryPerTunnel = 256 << 10
 
 // defaultMaxTunnels is the max_tunnels default for a machine with memory

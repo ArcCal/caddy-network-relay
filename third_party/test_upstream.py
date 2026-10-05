@@ -52,7 +52,20 @@ def main():
             if local.name == "x-net":
                 shutil.copyfile(root / "http2_regression_test.go.txt",
                                 target / "http2/relay_patch_test.go")
+                shutil.copyfile(root / "http2_buffer_regression_test.go.txt",
+                                target / "http2/relay_buffer_patch_test.go")
             if local.name == "quic-go":
+                shutil.copyfile(root / "quic_receive_budget_test.go.txt",
+                                target / "relay_receive_budget_test.go")
+                config_test = target / "config_test.go"
+                config_source = config_test.read_text()
+                config_before = '\t\tcase "EnableStreamResetPartialDelivery":'
+                config_after = ('\t\tcase "ReceiveBufferBudget":\n'
+                                '\t\t\tf.Set(reflect.ValueOf(&relayQUICReceiveBudget{}))\n'
+                                + config_before)
+                if config_source.count(config_before) != 1:
+                    raise RuntimeError("upstream Config reflection fixture changed")
+                config_test.write_text(config_source.replace(config_before, config_after))
                 # Our intentional API change preserves extended CONNECT's
                 # scheme in URL.Scheme. Keep every other upstream assertion.
                 test = target / "http3/headers_test.go"

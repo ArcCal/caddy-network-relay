@@ -156,6 +156,12 @@ type Server struct {
 	// [http.HTTP2Config.MaxReceiveBufferPerStream] instead.
 	MaxUploadBufferPerStream int32
 
+	// ReceiveBufferBudget optionally bounds the capacity of buffered request
+	// DATA across servers and connections. A nil value uses
+	// DefaultServerReceiveBufferBudget. Allocation exhaustion resets the
+	// affected stream with ENHANCE_YOUR_CALM; flow-control windows are separate.
+	ReceiveBufferBudget ReceiveBufferBudget
+
 	// NewWriteScheduler constructs a write scheduler for a connection.
 	// If nil, a default scheduler is chosen.
 	//

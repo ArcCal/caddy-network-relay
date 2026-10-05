@@ -7,11 +7,262 @@ import (
 	"bytes"
 	"io"
 	"net/http"
+	"sync"
 	"testing"
 	"testing/synctest"
 
 	. "golang.org/x/net/http2"
 )
+
+type relaySharedReceiveBudget struct {
+	mu          sync.Mutex
+	limit, used int64
+}
+
+func (b *relaySharedReceiveBudget) TryAcquire(n int64) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n > b.limit-b.used {
+		return false
+	}
+	b.used += n
+	return true
+}
+
+func (b *relaySharedReceiveBudget) Release(n int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.used -= n
+	if b.used < 0 {
+		panic("receive capacity released twice")
+	}
+}
+
+func (b *relaySharedReceiveBudget) bytes() int64 {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.used
+}
+
+func TestRelayReceiveBudgetRetainedFINAcrossConnections(t *testing.T) {
+	synctestTest(t, func(t testing.TB) {
+		budget := &relaySharedReceiveBudget{limit: 4096}
+		read := make(chan struct{})
+		done := make(chan struct{})
+		configure := func(s *Server) { s.ReceiveBufferBudget = budget }
+		first := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+			defer close(done)
+			if err := w.(interface{ CloseWrite() error }).CloseWrite(); err != nil {
+				t.Error(err)
+				return
+			}
+			<-read
+			if n, err := io.Copy(io.Discard, r.Body); n != 4096 || err != nil {
+				t.Errorf("retained final DATA = %d, %v", n, err)
+			}
+		}, configure)
+		defer first.Close()
+		first.greet()
+		first.writeHeaders(HeadersFrameParam{StreamID: 1, EndHeaders: true,
+			BlockFragment: first.encodeHeaderRaw(":method", "CONNECT", ":authority", "target:443")})
+		synctest.Wait()
+		first.writeData(1, true, make([]byte, 4096))
+		synctest.Wait()
+		if first.streamExists(1) || budget.bytes() != 4096 {
+			t.Fatal("both FINs must release stream state but retain unread buffer charge")
+		}
+		first.wantConnFlowControlConsumed(0)
+		result := make(chan error, 2)
+		second := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+			_, err := io.Copy(io.Discard, r.Body)
+			result <- err
+		}, configure)
+		defer second.Close()
+		second.greet()
+		second.writeHeaders(HeadersFrameParam{StreamID: 1, EndHeaders: true,
+			BlockFragment: second.encodeHeaderRaw(":method", "CONNECT", ":authority", "target:443")})
+		synctest.Wait()
+		second.writeData(1, false, make([]byte, 1024))
+		synctest.Wait()
+		second.wantRSTStream(1, ErrCodeEnhanceYourCalm)
+		if err := <-result; err == nil {
+			t.Error("capacity failure did not interrupt the body reader")
+		}
+		if second.streamExists(1) || budget.bytes() != 4096 {
+			t.Fatal("failed allocation consumed capacity")
+		}
+		second.wantConnFlowControlConsumed(0)
+		close(read)
+		<-done
+		synctest.Wait()
+		if budget.bytes() != 0 {
+			t.Fatal("draining retained final DATA did not release capacity")
+		}
+		second.writeHeaders(HeadersFrameParam{StreamID: 3, EndHeaders: true,
+			BlockFragment: second.encodeHeaderRaw(":method", "CONNECT", ":authority", "target:443")})
+		second.writeData(3, true, make([]byte, 1024))
+		synctest.Wait()
+		if err := <-result; err != nil {
+			t.Errorf("connection unusable after capacity returned: %v", err)
+		}
+		if budget.bytes() != 0 {
+			t.Fatal("completed next request retained capacity")
+		}
+		second.wantConnFlowControlConsumed(0)
+	})
+}
+
+func TestRelayReceiveBudgetHandlerExitDiscards(t *testing.T) {
+	for _, panicHandler := range []bool{false, true} {
+		synctestTest(t, func(t testing.TB) {
+			budget := &relaySharedReceiveBudget{limit: 4096}
+			exit := make(chan struct{})
+			st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+				<-exit
+				if panicHandler {
+					panic(http.ErrAbortHandler)
+				}
+			}, func(s *Server) { s.ReceiveBufferBudget = budget })
+			defer st.Close()
+			st.greet()
+			st.writeHeaders(HeadersFrameParam{StreamID: 1, EndHeaders: true,
+				BlockFragment: st.encodeHeaderRaw(":method", "CONNECT", ":authority", "target:443")})
+			st.writeData(1, false, make([]byte, 4096))
+			synctest.Wait()
+			if budget.bytes() != 4096 {
+				t.Fatal("unread request DATA was not charged")
+			}
+			close(exit)
+			synctest.Wait()
+			if budget.bytes() != 0 {
+				t.Fatal("handler exit retained unread buffer capacity")
+			}
+			st.wantConnFlowControlConsumed(0)
+		})
+	}
+}
+
+func TestRelayReceiveBudgetHandlerExitBeforeBlockedFlush(t *testing.T) {
+	synctestTest(t, func(t testing.TB) {
+		budget := &relaySharedReceiveBudget{limit: 4096}
+		exit := make(chan struct{})
+		returned := make(chan struct{})
+		st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+			<-exit
+			_, _ = w.Write([]byte("done")) // buffered until handler completion
+			close(returned)
+		}, func(s *Server) { s.ReceiveBufferBudget = budget })
+		defer st.Close()
+		st.greet()
+		st.writeSettings(Setting{ID: SettingInitialWindowSize, Val: 0})
+		st.wantSettingsAck()
+		st.writeHeaders(HeadersFrameParam{StreamID: 1, EndHeaders: true,
+			BlockFragment: st.encodeHeaderRaw(":method", "CONNECT", ":authority", "target:443")})
+		st.writeData(1, false, make([]byte, 4096))
+		synctest.Wait()
+		if budget.bytes() != 4096 {
+			t.Fatal("unread request was not charged")
+		}
+		close(exit)
+		<-returned
+		synctest.Wait()
+		if !st.streamExists(1) {
+			t.Fatal("test did not keep response flush blocked")
+		}
+		if budget.bytes() != 0 {
+			t.Fatal("final response flow control retained returned handler's unread request")
+		}
+		st.writeRSTStream(1, ErrCodeCancel)
+		synctest.Wait()
+		st.wantConnFlowControlConsumed(0)
+	})
+}
+
+func TestRelayReceiveBudgetPartialFrameRefund(t *testing.T) {
+	synctestTest(t, func(t testing.TB) {
+		budget := &relaySharedReceiveBudget{limit: 1024}
+		st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+			<-r.Context().Done() // keep the first chunk unread until reset
+		}, func(s *Server) { s.ReceiveBufferBudget = budget })
+		defer st.Close()
+		st.greet()
+		st.writeHeaders(HeadersFrameParam{StreamID: 1, EndHeaders: true,
+			BlockFragment: st.encodeHeaderRaw(":method", "CONNECT", ":authority", "target:443")})
+		st.writeData(1, false, make([]byte, 1000))
+		synctest.Wait()
+		if budget.bytes() != 1024 {
+			t.Fatal("first partially filled chunk was not charged")
+		}
+		// This frame fills the last 24 bytes in the first chunk, then the
+		// next allocation fails. Its remaining payload and padding are
+		// discarded; previously buffered bytes are refunded by stream close.
+		st.writeDataPadded(1, false, make([]byte, 1000), make([]byte, 17))
+		synctest.Wait()
+		st.wantRSTStream(1, ErrCodeEnhanceYourCalm)
+		if budget.bytes() != 0 {
+			t.Fatal("allocation failure retained chunk capacity")
+		}
+		st.wantConnFlowControlConsumed(0)
+	})
+}
+
+func TestRelayReceiveBudgetResetWhileNetworkWriteBlocked(t *testing.T) {
+	synctestTest(t, func(t testing.TB) {
+		budget := &relaySharedReceiveBudget{limit: 1024}
+		write := make(chan struct{})
+		done := make(chan struct{})
+		st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+			defer close(done)
+			w.WriteHeader(http.StatusOK)
+			w.(http.Flusher).Flush()
+			<-write
+			if _, err := w.Write(make([]byte, 32<<10)); err == nil {
+				t.Error("budget exhaustion did not interrupt network-blocked response")
+			}
+		}, func(s *Server) { s.ReceiveBufferBudget = budget })
+		defer st.Close()
+		st.greet()
+		st.writeHeaders(HeadersFrameParam{StreamID: 1, EndHeaders: true,
+			BlockFragment: st.encodeHeaderRaw(":method", "CONNECT", ":authority", "target:443")})
+		st.wantFrameType(FrameHeaders)
+		st.writeData(1, false, make([]byte, 1000))
+		synctest.Wait()
+		conn := st.cc.(*synctestNetConn)
+		conn.SetReadBufferSize(0)
+		close(write)
+		synctest.Wait()
+		select {
+		case <-done:
+			t.Fatal("response did not block on the underlying socket")
+		default:
+		}
+		st.writeDataPadded(1, false, make([]byte, 1000), make([]byte, 17))
+		synctest.Wait()
+		select {
+		case <-done:
+		default:
+			t.Fatal("resource reset waited for the blocked socket writer")
+		}
+		if st.streamExists(1) || budget.bytes() != 0 {
+			t.Fatal("resource reset retained stream or buffer capacity")
+		}
+		st.wantConnFlowControlConsumed(0)
+		conn.SetReadBufferSize(64 << 10)
+		synctest.Wait()
+		for {
+			f := st.readFrame()
+			if f == nil {
+				t.Fatal("missing resource reset after network resumed")
+			}
+			if rst, ok := f.(*RSTStreamFrame); ok {
+				if rst.ErrCode != ErrCodeEnhanceYourCalm {
+					t.Fatalf("resource reset = %s, want ENHANCE_YOUR_CALM", rst.ErrCode)
+				}
+				break
+			}
+		}
+	})
+}
 
 func TestRelayDirectionalFINConnectionCredits(t *testing.T) {
 	for _, clientFirst := range []bool{false, true} {

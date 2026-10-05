@@ -31,7 +31,13 @@ Local changes:
   CONNECT FIN; release stream state after both directions finish and return
   connection flow-control credits exactly once, including pending body reads;
   close the receive direction if a handler returns after CloseWrite; reject
-  CONNECT trailers; preserve the original scheme.
+  CONNECT trailers; preserve the original scheme; tolerate a peer reset while
+  an asynchronous handler-panic reset is still being written.
+- x-net/http2: optional ReceiveBufferBudget and DefaultServerReceiveBufferBudget
+  account for full request DATA chunk capacity across connections, independently
+  of flow-control credits. Buffered DATA retained after orderly FIN stays charged
+  until consumed or discarded. Allocation exhaustion resets only the affected
+  stream with ENHANCE_YOUR_CALM and closes it locally even with socket backpressure.
 - x-net/http2: use the reviewed HTTP/2 implementation on Go 1.27 as well, instead
   of forwarding to the standard library which lacks these handler extensions.
 - x-net/http2: SetExtendedConnectProtocol/ExtendedConnectProtocol replace a
@@ -39,6 +45,12 @@ Local changes:
   DefaultServerMaxUploadBuffer{PerConnection,PerStream} set the server
   defaults that Caddy leaves unset; a Write after the handler finished panics
   with its intended message instead of a nil dereference.
+
+- quic-go: optional ReceiveBufferBudget accounts for retained stream buffer
+  capacity and estimated frame bookkeeping across connections. FIN data stays
+  charged until consumed; cancellation, effective reset and shutdown discard
+  unread frames and release their reservations. Exhaustion closes the affected
+  connection with INTERNAL_ERROR.
 
 The application exercises these changes through actual H2/H3 frames in
 `readiness_protocol_test.go`, in addition to existing interoperability, reload
@@ -49,11 +61,18 @@ Run `python3 third_party/test_upstream.py` from the repository root. It verifies
 the complete local file list and hashes, the original module checksum and source
 hashes, then runs the original QUIC, HTTP/3 and HTTP/2 tests with the patches.
 Two HTTP/3 assertions are updated to require the intentionally preserved scheme
-instead of an empty scheme; all other upstream assertions are retained.
+instead of an empty scheme; the Config reflection fixture initializes the new
+optional ReceiveBufferBudget field. All other upstream assertions are retained.
 The harness also copies `http2_regression_test.go.txt` into the upstream HTTP/2
 test package to verify flow-control credits for both FIN orders, cleanup after
 handler return, cancellation of a blocked response write under the race
 detector, and the reset code after a directional FIN.
+It also copies `http2_buffer_regression_test.go.txt` into the internal test
+package. The fixtures cover chunk capacity, partial allocation failures and
+padding credits, EOF and discard, retained FIN buffers across connections,
+handler cleanup before a blocked final response, and late panic-reset completion.
+The QUIC receive-budget fixture checks retained buffers, overlaps, FIN,
+cancellation, reset, shutdown and configuration propagation.
 
 Go ignores replace directives in dependencies. Builds must use this repository
 as the main module or repeat both replacements in the main module. An ordinary

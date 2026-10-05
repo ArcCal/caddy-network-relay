@@ -284,6 +284,7 @@ func (s *Server) serveConn(c net.Conn, opts *ServeConnOpts, newf func(*serverCon
 		maxFrameSize:                initialMaxFrameSize,
 		pingTimeout:                 conf.PingTimeout,
 		countErrorFunc:              conf.CountError,
+		receiveBufferBudget:         conf.ReceiveBufferBudget,
 		serveG:                      newGoroutineLock(),
 		pushEnabled:                 true,
 		sawClientPreface:            opts.SawClientPreface,
@@ -413,25 +414,26 @@ func (sc *serverConn) rejectConn(err ErrCode, debug string) {
 
 type serverConn struct {
 	// Immutable:
-	srv              *Server
-	hs               *http.Server
-	conn             net.Conn
-	bw               *bufferedWriter // writing to conn
-	handler          http.Handler
-	baseCtx          context.Context
-	framer           *Framer
-	doneServing      chan struct{}          // closed when serverConn.serve ends
-	readFrameCh      chan readFrameResult   // written by serverConn.readFrames
-	wantWriteFrameCh chan FrameWriteRequest // from handlers -> serve
-	wroteFrameCh     chan frameWriteResult  // from writeFrameAsync -> serve, tickles more frame writes
-	bodyReadCh       chan bodyReadMsg       // from handlers -> serve
-	serveMsgCh       chan interface{}       // misc messages & code to send to / run on the serve loop
-	flow             outflow                // conn-wide (not stream-specific) outbound flow control
-	inflow           inflow                 // conn-wide inbound flow control
-	tlsState         *tls.ConnectionState   // shared by all handlers, like net/http
-	remoteAddrStr    string
-	writeSched       WriteScheduler
-	countErrorFunc   func(errType string)
+	srv                 *Server
+	hs                  *http.Server
+	conn                net.Conn
+	bw                  *bufferedWriter // writing to conn
+	handler             http.Handler
+	baseCtx             context.Context
+	framer              *Framer
+	doneServing         chan struct{}          // closed when serverConn.serve ends
+	readFrameCh         chan readFrameResult   // written by serverConn.readFrames
+	wantWriteFrameCh    chan FrameWriteRequest // from handlers -> serve
+	wroteFrameCh        chan frameWriteResult  // from writeFrameAsync -> serve, tickles more frame writes
+	bodyReadCh          chan bodyReadMsg       // from handlers -> serve
+	serveMsgCh          chan interface{}       // misc messages & code to send to / run on the serve loop
+	flow                outflow                // conn-wide (not stream-specific) outbound flow control
+	inflow              inflow                 // conn-wide inbound flow control
+	tlsState            *tls.ConnectionState   // shared by all handlers, like net/http
+	remoteAddrStr       string
+	writeSched          WriteScheduler
+	countErrorFunc      func(errType string)
+	receiveBufferBudget ReceiveBufferBudget
 
 	// Everything following is owned by the serve loop; use serveG.check():
 	serveG                      goroutineLock // used to verify funcs are on serve()
@@ -1249,7 +1251,11 @@ func (sc *serverConn) wroteFrame(res frameWriteResult) {
 				sc.closeStream(st, v)
 			}
 		case handlerPanicRST:
-			sc.closeStream(wr.stream, errHandlerPanicked)
+			// A peer reset can close the stream while this reset is blocked
+			// in an asynchronous network write.
+			if sc.streams[wr.stream.id] == wr.stream {
+				sc.closeStream(wr.stream, errHandlerPanicked)
+			}
 		}
 	}
 
@@ -1595,7 +1601,11 @@ func (sc *serverConn) closeStream(st *stream, err error) {
 		sc.sendWindowUpdate(nil, int(st.bodyBytes-st.bodyBytesCredited))
 		st.bodyBytesCredited = st.bodyBytes
 
-		p.CloseWithError(err)
+		if sc.receiveBufferBudget != nil && err != errHandlerComplete {
+			p.BreakWithError(err)
+		} else {
+			p.CloseWithError(err)
+		}
 	}
 	if e, ok := err.(StreamError); ok {
 		if e.Cause != nil {
@@ -1781,6 +1791,17 @@ func (sc *serverConn) processData(f *DataFrame) error {
 				// but not the stream-level flow control.
 				sc.sendWindowUpdate(nil, int(f.Length)-wrote)
 				st.bodyBytesCredited += int64(len(data) - wrote)
+				if errors.Is(err, errReceiveBufferBudget) {
+					// Allocation accounting remains held independently of
+					// flow control until the actual buffers are discarded.
+					se := streamError(id, ErrCodeEnhanceYourCalm)
+					st.resetRequested.Store(true)
+					sc.countError("receive_buffer_exhausted", se)
+					sc.resetStream(se)
+					if st.state != stateClosed {
+						sc.closeStream(st, se)
+					}
+				}
 				return nil
 			}
 			if wrote != len(data) {
@@ -2200,7 +2221,7 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 			req.ContentLength = -1
 		}
 		req.Body.(*requestBody).pipe = &pipe{
-			b: &dataBuffer{expected: req.ContentLength},
+			b: &dataBuffer{expected: req.ContentLength, budget: sc.receiveBufferBudget},
 		}
 	}
 	return rw, req, nil
@@ -2328,6 +2349,11 @@ func (sc *serverConn) runHandler(rw *responseWriter, req *http.Request, handler 
 		sc.sendServeMsg(handlerDoneMsg)
 	}()
 	defer func() {
+		// The handler no longer owns unread DATA. Release its capacity before
+		// final response flushing, which may still wait for peer flow control.
+		if sc.receiveBufferBudget != nil && st.body != nil {
+			st.body.BreakWithError(errHandlerComplete)
+		}
 		rw.rws.stream.cancelCtx()
 		if req.MultipartForm != nil {
 			req.MultipartForm.RemoveAll()

@@ -170,6 +170,9 @@ func (a *App) Start() (err error) {
 		}
 	}()
 	for _, s := range a.servers {
+		if err := validateEffectiveRelayTLS(s.srv); err != nil {
+			return err
+		}
 		if len(s.h3Listen) == 0 {
 			continue
 		}
@@ -406,6 +409,7 @@ func handshakeNeedsRetry(net.Addr) bool {
 // No 0-RTT: a replayed CONNECT would open a second tunnel.
 func quicConfig() *quic.Config {
 	return &quic.Config{
+		ReceiveBufferBudget:            receiveBuffers,
 		EnableDatagrams:                true,
 		InitialPacketSize:              1200,
 		MaxIncomingStreams:             1024,

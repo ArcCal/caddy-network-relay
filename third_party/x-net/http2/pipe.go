@@ -70,7 +70,7 @@ func (p *pipe) Read(d []byte) (n int, err error) {
 				p.readFn()     // e.g. copy trailers
 				p.readFn = nil // not sticky like p.err
 			}
-			p.b = nil
+			p.discardBufferLocked()
 			return 0, p.err
 		}
 		p.c.Wait()
@@ -138,10 +138,19 @@ func (p *pipe) closeWithError(dst *error, err error, fn func()) {
 		if p.b != nil {
 			p.unread += p.b.Len()
 		}
-		p.b = nil
+		p.discardBufferLocked()
 	}
 	*dst = err
 	p.closeDoneLocked()
+}
+
+// discardBufferLocked releases optional capacity accounting along with the
+// buffer itself. The unread byte count is retained separately for flow control.
+func (p *pipe) discardBufferLocked() {
+	if b, ok := p.b.(interface{ discard() }); ok {
+		b.discard()
+	}
+	p.b = nil
 }
 
 // requires p.mu be held.
