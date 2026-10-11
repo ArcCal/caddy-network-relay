@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -117,6 +118,17 @@ func (c *RawServerConn) openControlStream(settings *settingsFrame) (*quic.SendSt
 	return c.rawConn.openControlStream(settings)
 }
 
+// headersFailureCode is the code for a request stream whose HEADERS frame could
+// not be read. Headers late: a request cancelled without any processing is
+// rejected, so the client may retry it (RFC 9114 section 4.1.1). A stream that
+// ended without a complete request is incomplete (section 8.1).
+func headersFailureCode(err error) quic.StreamErrorCode {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return quic.StreamErrorCode(ErrCodeRequestRejected)
+	}
+	return quic.StreamErrorCode(ErrCodeRequestIncomplete)
+}
+
 func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 	if c.readHeaderTimeout > 0 {
 		_ = str.SetReadDeadline(time.Now().Add(c.readHeaderTimeout))
@@ -161,8 +173,9 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 			conn.CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), "")
 			return
 		}
-		str.CancelRead(quic.StreamErrorCode(ErrCodeRequestIncomplete))
-		str.CancelWrite(quic.StreamErrorCode(ErrCodeRequestIncomplete))
+		code := headersFailureCode(err)
+		str.CancelRead(code)
+		str.CancelWrite(code)
 		return
 	}
 	hf, ok := frame.(*headersFrame)
@@ -181,8 +194,9 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 	headerBlock := make([]byte, hf.Length)
 	if _, err := io.ReadFull(str, headerBlock); err != nil {
 		maybeQlogInvalidHeadersFrame(qlogger, str.StreamID(), hf.Length)
-		str.CancelRead(quic.StreamErrorCode(ErrCodeRequestIncomplete))
-		str.CancelWrite(quic.StreamErrorCode(ErrCodeRequestIncomplete))
+		code := headersFailureCode(err)
+		str.CancelRead(code)
+		str.CancelWrite(code)
 		return
 	}
 	decodeFn := decoder.Decode(headerBlock)
