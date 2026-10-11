@@ -95,6 +95,13 @@ func (c *RawServerConn) CloseWithError(code quic.ApplicationErrorCode, msg strin
 // The stream can either be obtained by calling [quic.Conn.AcceptStream] on the underlying QUIC connection,
 // or (internally) by using the server's stream accept loop.
 func (c *RawServerConn) HandleRequestStream(str *quic.Stream) {
+	// A stream the client has not written is neither a request nor late.
+	// Apple's QUIC connection group implicitly opens client stream 0 and
+	// never writes it; cancelling it fails the client's whole connection.
+	// Header slots, the header deadline and the idle timer apply from the
+	// first byte. Peek also returns at EOF, cancellation or connection close,
+	// which the request parsing below handles as before.
+	_, _ = str.Peek(make([]byte, 1))
 	hstr := c.rawConn.TrackStream(str)
 	c.handleRequestStream(hstr)
 }
