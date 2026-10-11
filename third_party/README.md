@@ -22,7 +22,10 @@ Local changes:
   receiving HEADERS, clear it before calling the handler, bound incomplete
   headers per connection (16; more closes the connection with
   H3_EXCESSIVE_LOAD) and across connections (4096), and preserve extended
-  CONNECT's original scheme.
+  CONNECT's original scheme. These limits and the deadline start at a request
+  stream's first byte: an unwritten stream (such as client stream 0, which
+  Apple's QUIC connection group implicitly opens and never writes) is left
+  open and does not hold the connection out of its idle timeout.
 - quic-go/http3: expose the request stream to handlers (RequestStream) without
   sending the response header, so the relay needs no reflection.
 - x-net/http2: expose CloseWrite, ResetStream and concurrent-write-safe
