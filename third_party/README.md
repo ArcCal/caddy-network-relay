@@ -80,3 +80,11 @@ xcaddy --with build will silently omit the patches. Deployment instructions use
 the repository-root build. Review the upstream diff when updating versions,
 rerun the upstream transport test suites and dependency vulnerability scanning,
 and retire these patches when equivalent upstream APIs become available.
+
+## English source presentation
+
+`english-unicode-fixtures.json` records the ASCII representation of generated
+IDNA data separately from protocol patches. JSON escapes Unicode in both sides
+of the recorded edits. Go string values retain identical runtime bytes. The
+upstream test runner verifies the pinned baseline, strict patch replay, and
+resulting hashes; it does not ignore arbitrary source changes.
