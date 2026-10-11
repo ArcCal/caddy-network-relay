@@ -25,7 +25,10 @@ Local changes:
   CONNECT's original scheme. These limits and the deadline start at a request
   stream's first byte: an unwritten stream (such as client stream 0, which
   Apple's QUIC connection group implicitly opens and never writes) is left
-  open and does not hold the connection out of its idle timeout.
+  open and does not hold the connection out of its idle timeout. A request whose
+  headers do not arrive in time is rejected in both directions with
+  H3_REQUEST_REJECTED (RFC 9114 section 4.1.1); one whose stream ends without
+  complete headers gets H3_REQUEST_INCOMPLETE.
 - quic-go/http3: expose the request stream to handlers (RequestStream) without
   sending the response header, so the relay needs no reflection.
 - x-net/http2: expose CloseWrite, ResetStream and concurrent-write-safe

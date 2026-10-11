@@ -459,7 +459,9 @@ func TestH3IncompleteHeadersTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("incomplete headers survived read_header_timeout")
 	}
-	if code := streamCode(err); code != quic.StreamErrorCode(0x10d) {
+	// RFC 9114 section 4.1.1: a request cancelled without processing is
+	// rejected, so the client may retry it.
+	if code := streamCode(err); code != quic.StreamErrorCode(0x10b) {
 		t.Fatalf("timeout code %x: %v", code, err)
 	}
 	// A rejected stream must not prevent a fresh request on the connection.
