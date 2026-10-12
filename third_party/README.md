@@ -31,16 +31,21 @@ Local changes:
   rejected in both directions with H3_REQUEST_REJECTED (RFC 9114 section
   4.1.1); one whose stream ends without complete headers gets
   H3_REQUEST_INCOMPLETE.
-- quic-go/http3: the frame parser returns CANCEL_PUSH, PUSH_PROMISE and
-  MAX_PUSH_ID instead of skipping them, so they are rejected as RFC 9114
-  requires. Push is not supported, so on the server's control stream a
-  CANCEL_PUSH names a push ID never mentioned (section 7.2.3) and is
-  H3_ID_ERROR, as is a MAX_PUSH_ID smaller than one received before
-  (section 7.2.7); PUSH_PROMISE (section 7.2.5) and push frames on a request
-  stream are H3_FRAME_UNEXPECTED. The client, which never sends MAX_PUSH_ID,
-  treats CANCEL_PUSH and a PUSH_PROMISE on a request stream as H3_ID_ERROR.
-  The upstream test that required these frames to be skipped is replaced by
-  `quic_push_frames_test.go.txt`.
+- quic-go/http3: the frame parser no longer skips push frames, so they are
+  rejected as RFC 9114 requires. Push is not supported, so on the server's
+  control stream a CANCEL_PUSH names a push ID never mentioned (section
+  7.2.3) and is H3_ID_ERROR, as is a MAX_PUSH_ID smaller than one received
+  before (section 7.2.7). The parser closes the connection with
+  H3_FRAME_UNEXPECTED as soon as it reads the type of a PUSH_PROMISE received
+  by a server or on a control stream (section 7.2.5), or of CANCEL_PUSH,
+  SETTINGS, GOAWAY, MAX_PUSH_ID or PRIORITY_UPDATE on a request stream
+  (sections 4.1, 7.2.3, 7.2.4, 7.2.6 and 7.2.7), whatever the payload. The
+  client, which never sends MAX_PUSH_ID, treats CANCEL_PUSH and a PUSH_PROMISE
+  on a request stream as H3_ID_ERROR. The single-integer payloads of
+  CANCEL_PUSH, GOAWAY and MAX_PUSH_ID are read only within their declared
+  length; an empty, shorter or longer payload is H3_FRAME_ERROR (section
+  7.1). The upstream test that required push frames to be skipped is
+  replaced by `quic_push_frames_test.go.txt`.
 - quic-go/http3: expose the request stream to handlers (RequestStream) without
   sending the response header, so the relay needs no reflection.
 - x-net/http2: expose CloseWrite, ResetStream and concurrent-write-safe
