@@ -2,7 +2,7 @@ module github.com/arccal/caddy-network-relay
 
 go 1.26.0
 
-toolchain go1.26.8
+toolchain go1.26.9
 
 replace github.com/quic-go/quic-go => ./third_party/quic-go
 

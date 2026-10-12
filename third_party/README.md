@@ -63,6 +63,26 @@ Local changes:
   stream with ENHANCE_YOUR_CALM and closes it locally even with socket backpressure.
 - x-net/http2: use the reviewed HTTP/2 implementation on Go 1.27 as well, instead
   of forwarding to the standard library which lacks these handler extensions.
+- x-net/http2: security fixes backported from x/net v0.60.0 without its other
+  changes: per-declared-trailer allocation budgeting (GO-2026-6603, frame.go);
+  response Content-Length validation and removal of connection-specific fields
+  in the client and reverse-proxy response path (GO-2026-6610, transport.go);
+  SETTINGS_INITIAL_WINDOW_SIZE changes applied through shared accounting
+  instead of every active stream (GO-2026-6611, flow.go, server.go,
+  transport.go, writesched.go); and HPACK encoder table-size changes deferred
+  until no frame is being written (GO-2026-6617, server.go). x/net v0.60.0's
+  frame_test.go, flow_test.go, writesched_test.go and
+  writesched_priority_rfc7540_test.go replace their v0.59.0 versions during
+  `test_upstream.py` (their SHA-256 values are checked), and
+  `http2_security_test.go.txt` and `http2_security_internal_test.go.txt` add
+  the upstream regression tests for the other advisories and a bounded
+  128-stream shared-accounting check. GO-2026-6612 is not backported: its
+  upstream repair replaces a refund path the relay does not use. The relay's
+  closeStream returns each closed stream's unread credit once, and x/net
+  v0.60.0's TestServerResetStreamUnreadBody passes with only the moment of the
+  refund adapted for a reset stream whose handler never started. The reviewed
+  advisories are recorded in `provenance.json`; the CI version query fails on
+  any other advisory for a recorded snapshot.
 - x-net/http2: SetExtendedConnectProtocol/ExtendedConnectProtocol replace a
   go:linkname to the unexported switch; DefaultServerMaxConcurrentStreams and
   DefaultServerMaxUploadBuffer{PerConnection,PerStream} set the server
