@@ -1,0 +1,559 @@
+// Copyright 2026 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+//go:build !(go1.27 && !http2legacy)
+
+// Regression tests for the HTTP/2 security fixes backported from x/net
+// v0.60.0: GO-2026-6610 (response Content-Length and connection-specific
+// fields), GO-2026-6611 (initial window changes) and GO-2026-6617 (deferred
+// HPACK table size changes). They are copied unchanged from x/net v0.60.0
+// http2/server_test.go and http2/transport_test.go, except the last test.
+// GO-2026-6603 is covered by x/net v0.60.0 http2/frame_test.go, which replaces
+// the v0.59.0 file.
+
+package http2_test
+
+import (
+	"bytes"
+	"io"
+	"maps"
+	"math"
+	"net/http"
+	"slices"
+	"strconv"
+	"testing"
+	"testing/synctest"
+
+	. "golang.org/x/net/http2"
+	"golang.org/x/net/http2/hpack"
+)
+
+// TestServer_HeaderTableSizeDuringWrite tests that a
+// SETTINGS_HEADER_TABLE_SIZE change from the client is not applied to the
+// server's HPACK encoder while a frame write, which may be using the encoder
+// on another goroutine, is in progress.
+func TestServer_HeaderTableSizeDuringWrite(t *testing.T) {
+	synctestTest(t, testServer_HeaderTableSizeDuringWrite)
+}
+
+func testServer_HeaderTableSizeDuringWrite(t testing.TB) {
+	st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {})
+	defer st.Close()
+	st.greet()
+	enc := st.sc.TestHPACKEncoder()
+
+	// Leave the response HEADERS write for stream 1 in progress while the
+	// client changes SETTINGS_HEADER_TABLE_SIZE twice.
+	st.cc.(*synctestNetConn).SetReadBufferSize(0)
+	st.bodylessReq1()
+	synctest.Wait()
+	st.writeSettings(Setting{SettingHeaderTableSize, 0})
+	st.writeSettings(Setting{SettingHeaderTableSize, 2048})
+	synctest.Wait()
+	// Table size should not be changed immediately. To avoid concurrent use of
+	// the encoder, we apply the size change right before we use the encoder to
+	// write frames.
+	if got, want := enc.MaxDynamicTableSize(), uint32(InitialHeaderTableSize); got != want {
+		t.Errorf("during frame write: encoder header table size = %d, want %d", got, want)
+	}
+	st.cc.(*synctestNetConn).SetReadBufferSize(math.MaxInt)
+	st.wantHeaders(wantHeader{streamID: 1, endStream: true})
+	st.wantSettingsAck()
+
+	st.writeHeaders(HeadersFrameParam{
+		StreamID:      3,
+		BlockFragment: st.encodeHeader(),
+		EndStream:     true,
+		EndHeaders:    true,
+	})
+	synctest.Wait()
+	hf := readFrame[*HeadersFrame](t, st)
+	if hf.StreamID != 3 {
+		t.Fatalf("got HEADERS for stream %d, want stream 3", hf.StreamID)
+	}
+	// The response must signal both the smallest (0) and the final (2048)
+	// table size (RFC 7541, Section 4.2), just like an encoder that saw both
+	// size changes directly.
+	var want bytes.Buffer
+	wantEnc := hpack.NewEncoder(&want)
+	wantEnc.SetMaxDynamicTableSize(0)
+	wantEnc.SetMaxDynamicTableSize(2048)
+	wantEnc.WriteField(hpack.HeaderField{Name: ":status", Value: "200"})
+	if got := hf.HeaderBlockFragment(); !bytes.HasPrefix(got, want.Bytes()) {
+		t.Errorf("stream 3 header block = %x, want prefix %x", got, want.Bytes())
+	}
+	if got, want := enc.MaxDynamicTableSize(), uint32(2048); got != want {
+		t.Errorf("after frame write: encoder header table size = %d, want %d", got, want)
+	}
+}
+
+// "An endpoint MUST treat a change to SETTINGS_INITIAL_WINDOW_SIZE
+// that causes any flow-control window to exceed the maximum size as
+// a connection error (Section 5.4.1) of type FLOW_CONTROL_ERROR."
+// -- https://www.rfc-editor.org/rfc/rfc9113.html#section-6.9.2-7
+func TestServerSettingsFlowControlUpdateBeyondLimit(t *testing.T) {
+	synctestTest(t, testServerSettingsFlowControlUpdateBeyondLimit)
+}
+
+func testServerSettingsFlowControlUpdateBeyondLimit(t testing.TB) {
+	st := newServerTester(t, nil)
+	st.greet()
+
+	st.writeHeaders(HeadersFrameParam{
+		StreamID:      1, // clients send odd numbers
+		BlockFragment: st.encodeHeader(":method", "POST"),
+		EndStream:     false, // data coming
+		EndHeaders:    true,
+	})
+	call := st.nextHandlerCall()
+	http.NewResponseController(call.w).Flush()
+	st.wantFrameType(FrameHeaders)
+
+	// Give this stream some additional flow control.
+	const windowIncrease = 1000
+	st.writeWindowUpdate(1, windowIncrease)
+	st.wantIdle()
+
+	// Adjust the initial flow control window. The stream is now over the limit.
+	const maxWindowSize = (1 << 31) - 1 // RFC 9113, 6.9.1
+	const maxInitialWindowSize = maxWindowSize - windowIncrease
+	st.writeSettings(Setting{SettingInitialWindowSize, maxInitialWindowSize + 1})
+	st.wantSettingsAck()
+
+	// We detect this condition lazily. Write something to the stream so we notice.
+	call.w.Write([]byte("hello"))
+	http.NewResponseController(call.w).Flush()
+
+	st.wantGoAway(1, ErrCodeFlowControl)
+}
+
+// Counterpart to TestServerSettingsFlowControlUpdateBeyondLimit:
+// A SETTINGS update which doesn't quite put a stream over the flow control limit.
+func TestServerSettingsFlowControlUpdateWithinLimit(t *testing.T) {
+	synctestTest(t, testServerSettingsFlowControlUpdateWithinLimit)
+}
+
+func testServerSettingsFlowControlUpdateWithinLimit(t testing.TB) {
+	st := newServerTester(t, nil)
+	st.greet()
+
+	st.writeHeaders(HeadersFrameParam{
+		StreamID:      1, // clients send odd numbers
+		BlockFragment: st.encodeHeader(":method", "POST"),
+		EndStream:     false, // data coming
+		EndHeaders:    true,
+	})
+	call := st.nextHandlerCall()
+	http.NewResponseController(call.w).Flush()
+	st.wantFrameType(FrameHeaders)
+
+	// Give this stream some additional flow control.
+	const windowIncrease = 1000
+	st.writeWindowUpdate(1, windowIncrease)
+	st.wantIdle()
+
+	// Adjust the initial flow control window. The stream is just within the limit.
+	const maxWindowSize = (1 << 31) - 1 // RFC 9113, 6.9.1
+	const maxInitialWindowSize = maxWindowSize - windowIncrease
+	st.writeSettings(Setting{SettingInitialWindowSize, maxInitialWindowSize})
+	st.wantSettingsAck()
+
+	call.w.Write([]byte("hello"))
+	http.NewResponseController(call.w).Flush()
+	st.wantFrameType(FrameData)
+	st.wantIdle()
+}
+
+// "An endpoint MUST treat a change to SETTINGS_INITIAL_WINDOW_SIZE
+// that causes any flow-control window to exceed the maximum size as
+// a connection error (Section 5.4.1) of type FLOW_CONTROL_ERROR."
+// -- https://www.rfc-editor.org/rfc/rfc9113.html#section-6.9.2-7
+func TestTransportSettingsFlowControlUpdateBeyondLimit(t *testing.T) {
+	synctestTest(t, testTransportSettingsFlowControlUpdateBeyondLimit)
+}
+
+func testTransportSettingsFlowControlUpdateBeyondLimit(t testing.TB) {
+	tc := newTestClientConn(t)
+	tc.greet()
+
+	body := tc.newRequestBody()
+	req, _ := http.NewRequest("GET", "https://dummy.tld/", body)
+	rt := tc.roundTrip(req)
+	tc.wantFrameType(FrameHeaders)
+
+	// Give this stream some additional flow control.
+	const windowIncrease = 1000
+	tc.writeWindowUpdate(rt.streamID(), windowIncrease)
+	tc.wantIdle()
+
+	// Adjust the initial flow control window. The stream is now over the limit.
+	const maxWindowSize = (1 << 31) - 1 // RFC 9113, 6.9.1
+	const maxInitialWindowSize = maxWindowSize - windowIncrease
+	tc.writeSettings(Setting{SettingInitialWindowSize, maxInitialWindowSize + 1})
+	tc.wantSettingsAck()
+
+	// We detect this condition lazily. Write something to the stream so we notice.
+	body.writeBytes(1)
+	body.closeWithError(io.EOF)
+
+	tc.wantGoAway(0, ErrCodeFlowControl)
+}
+
+// Counterpart to TestTransportSettingsFlowControlUpdateBeyondLimit:
+// A SETTINGS update which doesn't quite put a stream over the flow control limit.
+func TestTransportSettingsFlowControlUpdateWithinLimit(t *testing.T) {
+	synctestTest(t, testTransportSettingsFlowControlUpdateWithinLimit)
+}
+
+func testTransportSettingsFlowControlUpdateWithinLimit(t testing.TB) {
+	tc := newTestClientConn(t)
+	tc.greet()
+
+	body := tc.newRequestBody()
+	req, _ := http.NewRequest("GET", "https://dummy.tld/", body)
+	rt := tc.roundTrip(req)
+	tc.wantFrameType(FrameHeaders)
+
+	// Give this stream some additional flow control.
+	const windowIncrease = 1000
+	tc.writeWindowUpdate(rt.streamID(), windowIncrease)
+	tc.wantIdle()
+
+	// Adjust the initial flow control window. The stream is just within the limit.
+	const maxWindowSize = (1 << 31) - 1 // RFC 9113, 6.9.1
+	const maxInitialWindowSize = maxWindowSize - windowIncrease
+	tc.writeSettings(Setting{SettingInitialWindowSize, maxInitialWindowSize})
+	tc.wantSettingsAck()
+
+	body.writeBytes(1)
+	body.closeWithError(io.EOF)
+	tc.wantData(wantData{
+		streamID:  1,
+		endStream: true,
+		size:      1,
+		multiple:  true,
+	})
+	tc.wantIdle()
+}
+
+// TestTransportResponseContentLength checks that a Content-Length we cannot
+// validate is dropped from the response rather than passed on to the caller,
+// who may be forwarding it to an HTTP/1 endpoint.
+func TestTransportResponseContentLength(t *testing.T) {
+	tests := []struct {
+		name     string
+		clValues []string
+		wantLen  int // -1 means the header is expected to be dropped.
+	}{
+		{
+			name:     "single value",
+			clValues: []string{"3"},
+			wantLen:  3,
+		},
+		{
+			name:     "identical duplicate values",
+			clValues: []string{"3", "3", "3"},
+			wantLen:  3,
+		},
+		{
+			name:     "different duplicate values",
+			clValues: []string{"3", "1", "3"},
+			wantLen:  -1,
+		},
+		{
+			name:     "extraneous whitespace",
+			clValues: []string{" 3"},
+			wantLen:  -1,
+		},
+		{
+			name:     "identical duplicate values with extraneous whitespace",
+			clValues: []string{"3", "3", " 3"},
+			wantLen:  -1,
+		},
+		{
+			name:     "plus sign",
+			clValues: []string{"+3"},
+			wantLen:  -1,
+		},
+		{
+			name:     "non-numeric",
+			clValues: []string{"abc"},
+			wantLen:  -1,
+		},
+		{
+			name:     "empty value",
+			clValues: []string{""},
+			wantLen:  -1,
+		},
+		{
+			name:    "no header",
+			wantLen: -1,
+		},
+	}
+	for _, tt := range tests {
+		synctestSubtest(t, tt.name, func(t testing.TB) {
+			tc := newTestClientConn(t)
+			tc.greet()
+
+			req, _ := http.NewRequest("GET", "https://dummy.tld/", nil)
+			rt := tc.roundTrip(req)
+
+			headers := []string{":status", "200"}
+			for _, val := range tt.clValues {
+				headers = append(headers, "content-length", val)
+			}
+			tc.wantFrameType(FrameHeaders)
+			tc.writeHeaders(HeadersFrameParam{
+				StreamID:      rt.streamID(),
+				EndHeaders:    true,
+				BlockFragment: tc.makeHeaderBlockFragment(headers...),
+			})
+			body := slices.Repeat([]byte("a"), max(tt.wantLen, 1))
+			tc.writeData(rt.streamID(), true, body)
+
+			res := rt.response()
+			rt.wantBody(body)
+
+			if res.ContentLength != int64(tt.wantLen) {
+				t.Errorf("got ContentLength = %d, want %d", res.ContentLength, tt.wantLen)
+			}
+			var wantHeader []string
+			if tt.wantLen >= 0 {
+				wantHeader = []string{strconv.FormatInt(int64(tt.wantLen), 10)}
+			}
+			if got := res.Header["Content-Length"]; !slices.Equal(got, wantHeader) {
+				t.Errorf("got Header[%q] = %q, want %q", "Content-Length", got, wantHeader)
+			}
+		})
+	}
+}
+
+// TestTransportResponseConnHeaders checks that connection-related headers,
+// which are not valid in HTTP/2 and which an HTTP/1 endpoint may use for
+// framing, are dropped from the response.
+func TestTransportResponseConnHeaders(t *testing.T) {
+	tests := []struct {
+		name       string
+		fields     []string
+		wantHeader http.Header
+	}{
+		{
+			name:       "unaffected header",
+			fields:     []string{"content-type", "text/plain"},
+			wantHeader: http.Header{"Content-Type": {"text/plain"}},
+		},
+		{
+			name:   "transfer-encoding",
+			fields: []string{"transfer-encoding", "chunked"},
+		},
+		{
+			name:   "transfer-encoding alongside content-length",
+			fields: []string{"content-length", "-1", "transfer-encoding", "chunked"},
+		},
+		{
+			name:   "connection and keep-alive",
+			fields: []string{"connection", "keep-alive", "keep-alive", "timeout=5"},
+		},
+		{
+			name:   "proxy-connection",
+			fields: []string{"proxy-connection", "keep-alive"},
+		},
+		{
+			name:   "upgrade",
+			fields: []string{"upgrade", "websocket"},
+		},
+	}
+	for _, tt := range tests {
+		synctestSubtest(t, tt.name, func(t testing.TB) {
+			tc := newTestClientConn(t)
+			tc.greet()
+
+			req, _ := http.NewRequest("GET", "https://dummy.tld/", nil)
+			rt := tc.roundTrip(req)
+
+			headers := []string{":status", "200"}
+			headers = append(headers, tt.fields...)
+			tc.wantFrameType(FrameHeaders)
+			tc.writeHeaders(HeadersFrameParam{
+				StreamID:      rt.streamID(),
+				EndHeaders:    true,
+				BlockFragment: tc.makeHeaderBlockFragment(headers...),
+			})
+			tc.writeData(rt.streamID(), true, []byte("body"))
+
+			res := rt.response()
+			rt.wantBody([]byte("body"))
+
+			if !maps.EqualFunc(res.Header, tt.wantHeader, slices.Equal) {
+				t.Errorf("got Header = %q, want %q", res.Header, tt.wantHeader)
+			}
+		})
+	}
+}
+
+// GO-2026-6612 (connection receive credit for unread DATA of reset or
+// discarded streams) is fixed upstream by a refund path the relay does not
+// use: closeStream here returns each stream's unread credit once, recorded in
+// bodyBytesCredited. x/net v0.60.0's TestServerResetStreamUnreadBody, copied
+// below, passes unchanged except that unstarted_handler expects the refund
+// when the reset stream closes instead of when its queued handler is dropped.
+func TestRelayResetStreamUnreadBodyRefundsOnce(t *testing.T) {
+	synctestSubtest(t, "read_after_reset", func(t testing.TB) {
+		st := newServerTester(t, nil)
+		defer st.Close()
+
+		st.greet()
+		st.writeHeaders(HeadersFrameParam{
+			StreamID:      1,
+			BlockFragment: st.encodeHeader(":method", "POST"),
+			EndHeaders:    true,
+		})
+		call := st.nextHandlerCall()
+
+		const size = InflowMinRefresh
+		st.writeData(1, false, make([]byte, size))
+		st.writeRSTStream(1, ErrCodeCancel)
+		st.sync()
+
+		// The handler reads the body after the stream has been reset.
+		call.do(func(w http.ResponseWriter, req *http.Request) {
+			io.ReadAll(req.Body)
+		})
+		st.wantWindowUpdate(0, size)
+
+		// Handler exits; no second refund.
+		call.exit()
+		st.wantIdle()
+	})
+
+	synctestSubtest(t, "exit_without_reading", func(t testing.TB) {
+		st := newServerTester(t, nil)
+		defer st.Close()
+
+		st.greet()
+		st.writeHeaders(HeadersFrameParam{
+			StreamID:      1,
+			BlockFragment: st.encodeHeader(":method", "POST"),
+			EndHeaders:    true,
+		})
+		call := st.nextHandlerCall()
+
+		const size = InflowMinRefresh
+		st.writeData(1, false, make([]byte, size))
+		st.writeRSTStream(1, ErrCodeCancel)
+		st.sync()
+
+		// The handler exits without reading the body. Flow control is returned on exit.
+		call.exit()
+		st.wantWindowUpdate(0, size)
+		st.wantIdle()
+	})
+
+	synctestSubtest(t, "read_after_handler_exit", func(t testing.TB) {
+		st := newServerTester(t, nil)
+		defer st.Close()
+
+		st.greet()
+		st.writeHeaders(HeadersFrameParam{
+			StreamID:      1,
+			BlockFragment: st.encodeHeader(":method", "POST"),
+			EndHeaders:    true,
+		})
+		call := st.nextHandlerCall()
+
+		const size = InflowMinRefresh
+		st.writeData(1, false, make([]byte, size))
+		synctest.Wait()
+
+		// The handler exits without reading the body.
+		call.exit()
+
+		// Flow control is returned when the handler exits.
+		st.wantUnorderedFrames(
+			func(f *WindowUpdateFrame) bool {
+				return f.StreamID == 0 && f.Increment == size
+			},
+			func(f *HeadersFrame) bool {
+				return f.StreamID == 1 && f.StreamEnded()
+			},
+			func(f *RSTStreamFrame) bool {
+				return f.StreamID == 1 && f.ErrCode == ErrCodeNo
+			},
+		)
+
+		// Reading the body after the handler exits must not cause a double refund.
+		io.ReadAll(call.req.Body)
+		st.wantIdle()
+	})
+
+	synctestSubtest(t, "unstarted_handler", func(t testing.TB) {
+		st := newServerTester(t, nil, func(s *Server) {
+			s.MaxConcurrentStreams = 1
+		})
+		defer st.Close()
+
+		st.greet()
+
+		// Stream 1 uses the single handler slot.
+		st.writeHeaders(HeadersFrameParam{
+			StreamID:      1,
+			BlockFragment: st.encodeHeader(),
+			EndStream:     true,
+			EndHeaders:    true,
+		})
+		call := st.nextHandlerCall()
+
+		// Reset stream 1 so the client can open another stream without
+		// exceeding the concurrent stream limit.
+		st.writeRSTStream(1, ErrCodeCancel)
+
+		// Stream 3 is queued in unstartedHandlers because the handler for
+		// stream 1 is still executing.
+		st.writeHeaders(HeadersFrameParam{
+			StreamID:      3,
+			BlockFragment: st.encodeHeader(":method", "POST"),
+			EndHeaders:    true,
+		})
+
+		const size = InflowMinRefresh
+		st.writeData(3, false, make([]byte, size))
+		st.writeRSTStream(3, ErrCodeCancel)
+		// The relay returns a closed stream's unread credit when the stream
+		// closes, rather than when the queued handler is discarded; either
+		// way it is returned exactly once.
+		st.wantWindowUpdate(0, size)
+		st.wantIdle()
+		call.exit()
+		st.wantIdle()
+	})
+
+	// Same thing as exit_without_reading, but some imaginary middleware
+	// replaced Request.Body first.
+	synctestSubtest(t, "middleware_replaces_body", func(t testing.TB) {
+		st := newServerTester(t, nil)
+		defer st.Close()
+
+		st.greet()
+		st.writeHeaders(HeadersFrameParam{
+			StreamID:      1,
+			BlockFragment: st.encodeHeader(":method", "POST"),
+			EndHeaders:    true,
+		})
+		call := st.nextHandlerCall()
+
+		call.do(func(w http.ResponseWriter, r *http.Request) {
+			// Wrap r.Body like some middleware might.
+			r.Body = http.MaxBytesReader(w, r.Body, 1000)
+		})
+
+		const size = InflowMinRefresh
+		st.writeData(1, false, make([]byte, size))
+		st.writeRSTStream(1, ErrCodeCancel)
+		st.sync()
+
+		call.exit()
+		st.wantWindowUpdate(0, size)
+		st.wantIdle()
+	})
+}

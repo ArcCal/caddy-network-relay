@@ -11,6 +11,16 @@ import tempfile
 
 from english_fixtures import apply_records
 
+# x/net v0.60.0 test files, unchanged, that replace their v0.59.0 versions:
+# frame_test.go covers GO-2026-6603; the others follow the GO-2026-6611 flow
+# accounting API.
+HTTP2_SECURITY_TEST_FILES = {
+    "flow_test.go": "3210e9d2f9fb2cb2286eebe350304e4374b22e7258af62ccccefd02a740a202a",
+    "frame_test.go": "f4d911738bcdc395e9e6cb0a252940776ee0f9c17d8f6e054bb8e4ad00ed2186",
+    "writesched_test.go": "55a122db9707e8df1c4b26ae7757ae33fd7b91ccd9a9eaf0a51be0af98188273",
+    "writesched_priority_rfc7540_test.go": "2c3c03d779530e47f64bb696346bbd51f60142b203b009268a030e0e2b0e8b54",
+}
+
 
 def main():
     root = Path(__file__).resolve().parent
@@ -71,6 +81,18 @@ def main():
                                 target / "http2/relay_patch_test.go")
                 shutil.copyfile(root / "http2_buffer_regression_test.go.txt",
                                 target / "http2/relay_buffer_patch_test.go")
+                # Security fixes backported from x/net v0.60.0 come with its
+                # regression tests: whole test files, unchanged, which replace
+                # their v0.59.0 versions, and selected tests.
+                for name, digest in HTTP2_SECURITY_TEST_FILES.items():
+                    fixture = root / f"http2_security_{name}.txt"
+                    if hashlib.sha256(fixture.read_bytes()).hexdigest() != digest:
+                        raise RuntimeError(f"x/net v0.60.0 test fixture changed: {name}")
+                    shutil.copyfile(fixture, target / "http2" / name)
+                shutil.copyfile(root / "http2_security_test.go.txt",
+                                target / "http2/relay_security_test.go")
+                shutil.copyfile(root / "http2_security_internal_test.go.txt",
+                                target / "http2/relay_security_internal_test.go")
             if local.name == "quic-go":
                 shutil.copyfile(root / "quic_receive_budget_test.go.txt",
                                 target / "relay_receive_budget_test.go")
