@@ -4,6 +4,7 @@ The installer was derived from Caddy Network Relay main ef245375aa67eecde830a5bc
 
 Executed successfully:
 
+- Twenty existing installer regression tests passed again on the publish branch, including upgrade, migration, source-list profile generation and rollback behavior. Together with the fourteen domain/profile tests and fourteen new installer tests below, 48 local checks passed.
 - Fourteen domain/profile tests, including the actual Caddy profile CLI: source-copy hashes, exact source selection, Rust pipeline parity, malformed or missing sources, output preservation, empty/all-traffic refusal, HTTP/2-only policy, credential/template validation, exclusions, profile-size cap, and private atomic writes.
 - Fourteen installer transaction tests: real Caddy profile generation and configuration adaptation, with apt/systemd/service validation/network probes stubbed. Covered bootstrap ordering, credential privacy, permissions, conflicting installations, all eighteen offline source fixtures, malformed lists, startup rollback and retry, early unit-copy failure, H2 failures, auth-rejection failures, and H3 diagnostics that must not prevent H2 readiness.
 - Replayed all fourteen installer transaction tests against the exact unpacked script payload: passed.
@@ -14,5 +15,7 @@ Executed successfully:
 - Bash syntax, Python compilation, package extraction, --help and script SHA-256 verification passed. The deployment-only patch passed git apply --check.
 
 Not executed: privileged installation on a real fresh VPS, public ACME issuance/renewal, provider firewall configuration, and profile installation/domain routing on a physical Apple device. The runtime installer requires real H2 TCP/UDP probes plus the existing H1 anonymous rejection check before reporting readiness. A source-list download failure does not silently produce a partial profile.
+
+GitHub Actions did not start its jobs for this PR: the repository check annotation states, "The job was not started because an Actions budget is preventing further use." This is an unavailable CI run, not a successful CI run; the verification described above was performed locally.
 
 The script is a source snapshot and first-install tool. It refuses to overwrite an existing deployment. It does not repair or claim to repair existing server protocol/security findings from previous reviews.
