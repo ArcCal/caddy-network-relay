@@ -501,6 +501,40 @@ func TestH3UnwrittenStreamIsLeftOpen(t *testing.T) {
 	}
 }
 
+// Unwritten streams still take this connection's header slots: it may hold no
+// more of them than of requests with incomplete headers.
+func TestH3UnwrittenStreamsAreBounded(t *testing.T) {
+	port, _ := startRelay(t, nil, nil)
+	h := dialRawH3(t, port)
+	unwritten := func(n int) {
+		for range n {
+			if _, err := h.conn.OpenStreamSync(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	get := [][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}}
+	// Writing a request implicitly opens the unwritten streams below it.
+	unwritten(15)
+	if _, _, rsp := h.request(get); rsp.status != "200" {
+		t.Fatal(rsp.status)
+	}
+	// One more fills the share. The request that opens it may still be served
+	// before it takes its slot; the next one finds none left.
+	unwritten(1)
+	send := func() {
+		if str, err := h.conn.OpenStreamSync(context.Background()); err == nil {
+			_, _ = str.Write(h3Frame(1, qpackHeaders(get)))
+		}
+	}
+	send()
+	time.Sleep(200 * time.Millisecond)
+	send()
+	if code := h.connError(); code != quic.ApplicationErrorCode(0x107) {
+		t.Fatalf("close code %x, want H3_EXCESSIVE_LOAD", code)
+	}
+}
+
 // One connection that starts requests without finishing their headers gets a
 // bounded share of the process-wide header slots, and loses the connection
 // when it asks for more; other clients are still served meanwhile.

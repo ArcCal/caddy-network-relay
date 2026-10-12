@@ -268,7 +268,7 @@
         {
           "path": "http3/server_conn.go",
           "upstream_sha256": "a95e03f55347db9adbcb67976ac9eea15301a5d9a6948c0dcaeb45daa277a402",
-          "local_sha256": "a8e71182f011783dfc3e24dd5e84a085b283a885371330341640464bef526e34",
+          "local_sha256": "dd9d7aec0af5dd800d11c4f974e1c34659528f951801511d48afc47ac6ff24e7",
           "modified": true
         },
         {
