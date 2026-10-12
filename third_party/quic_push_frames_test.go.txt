@@ -1,0 +1,59 @@
+package http3
+
+import (
+	"bytes"
+	"testing"
+
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/quicvarint"
+
+	"github.com/stretchr/testify/require"
+)
+
+// Replaces the upstream TestParserUnsupportedFrameTypes, which required push
+// frames to be skipped. They are returned so that callers can reject them
+// (RFC 9114 sections 7.2.3, 7.2.5 and 7.2.7).
+func TestRelayParserPushFrames(t *testing.T) {
+	for _, tc := range []struct {
+		typ  uint64
+		want frame
+	}{
+		{0x3, &cancelPushFrame{PushID: 7}},
+		{0xd, &maxPushIDFrame{PushID: 7}},
+	} {
+		data := quicvarint.Append(quicvarint.Append(quicvarint.Append(nil, tc.typ), 1), 7)
+		fp := frameParser{r: bytes.NewReader(data)}
+		f, err := fp.ParseNext(nil)
+		require.NoError(t, err)
+		require.Equal(t, tc.want, f)
+
+		// A push ID that does not fill the frame payload is malformed.
+		data = append(quicvarint.Append(quicvarint.Append(quicvarint.Append(nil, tc.typ), 2), 7), 0)
+		fp = frameParser{r: bytes.NewReader(data)}
+		_, err = fp.ParseNext(nil)
+		require.Error(t, err)
+	}
+
+	promise := append(quicvarint.Append(quicvarint.Append(nil, 0x5), 6), []byte("foobar")...)
+	promise = (&dataFrame{Length: 3}).Append(promise)
+	r := bytes.NewReader(promise)
+	fp := frameParser{r: r}
+	f, err := fp.ParseNext(nil)
+	require.NoError(t, err)
+	require.IsType(t, &pushPromiseFrame{}, f)
+	f, err = fp.ParseNext(nil)
+	require.NoError(t, err)
+	require.Equal(t, &dataFrame{Length: 3}, f)
+
+	// A client never sends MAX_PUSH_ID, so any PUSH_PROMISE on its request
+	// streams is H3_ID_ERROR (section 7.2.5).
+	var code quic.ApplicationErrorCode
+	fp = frameParser{
+		client:    true,
+		r:         bytes.NewReader(promise),
+		closeConn: func(c quic.ApplicationErrorCode, _ string) error { code = c; return nil },
+	}
+	_, err = fp.ParseNext(nil)
+	require.Error(t, err)
+	require.Equal(t, quic.ApplicationErrorCode(ErrCodeIDError), code)
+}

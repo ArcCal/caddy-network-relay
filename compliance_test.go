@@ -647,3 +647,84 @@ func TestExtendedConnectOutsideTheTemplate(t *testing.T) {
 		t.Errorf("websocket: %s", rsp.status)
 	}
 }
+
+// Push is not supported: a client's CANCEL_PUSH names a push ID the relay never
+// mentioned (RFC 9114 section 7.2.3) and MAX_PUSH_ID cannot be reduced
+// (section 7.2.7), both H3_ID_ERROR. PUSH_PROMISE (section 7.2.5) and push
+// frames on a request stream (sections 7.2.3 and 7.2.7) are
+// H3_FRAME_UNEXPECTED. An increasing MAX_PUSH_ID is accepted.
+func TestH3PushFramesAreChecked(t *testing.T) {
+	port, _ := startRelay(t, nil, nil)
+	dial := func() *quic.Conn {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		conn, err := quic.DialAddr(ctx, "127.0.0.1:"+strconv.Itoa(port),
+			&tls.Config{ServerName: "relay.test", RootCAs: pki().pool, NextProtos: []string{http3.NextProtoH3}},
+			&quic.Config{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { conn.CloseWithError(0, "") })
+		return conn
+	}
+	frame := func(typ uint64, payload ...byte) []byte { return h3Frame(typ, payload) }
+	closeCode := func(conn *quic.Conn, wait time.Duration) (quic.ApplicationErrorCode, bool) {
+		select {
+		case <-conn.Context().Done():
+		case <-time.After(wait):
+			return 0, false
+		}
+		ae, ok := errors.AsType[*quic.ApplicationError](context.Cause(conn.Context()))
+		if !ok {
+			t.Fatalf("closed with %v", context.Cause(conn.Context()))
+		}
+		return ae.ErrorCode, true
+	}
+	for _, tc := range []struct {
+		name    string
+		control [][]byte
+		request []byte
+		code    quic.ApplicationErrorCode // 0: the connection stays open
+	}{
+		{"CANCEL_PUSH", [][]byte{frame(0x3, 0)}, nil, 0x108},
+		{"MAX_PUSH_ID reduced", [][]byte{frame(0xd, 1), frame(0xd, 0)}, nil, 0x108},
+		{"MAX_PUSH_ID increased", [][]byte{frame(0xd, 0), frame(0xd, 1), frame(0xd, 1)}, nil, 0},
+		{"PUSH_PROMISE on the control stream", [][]byte{frame(0x5, 0)}, nil, 0x105},
+		{"CANCEL_PUSH on a request stream", nil, frame(0x3, 0), 0x105},
+		{"MAX_PUSH_ID on a request stream", nil, frame(0xd, 0), 0x105},
+		{"PUSH_PROMISE on a request stream", nil, frame(0x5, 0), 0x105},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conn := dial()
+			ctrl, err := conn.OpenUniStream()
+			if err != nil {
+				t.Fatal(err)
+			}
+			b := append([]byte{0x00}, frame(0x4)...) // control stream, empty SETTINGS
+			for _, f := range tc.control {
+				b = append(b, f...)
+			}
+			if _, err := ctrl.Write(b); err != nil {
+				t.Fatal(err)
+			}
+			if tc.request != nil {
+				str, err := conn.OpenStreamSync(context.Background())
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := str.Write(tc.request); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.code == 0 {
+				if code, closed := closeCode(conn, time.Second); closed {
+					t.Fatalf("closed with %#x", code)
+				}
+				return
+			}
+			if code, closed := closeCode(conn, 5*time.Second); !closed || code != tc.code {
+				t.Fatalf("close code %#x (closed: %v), want %#x", code, closed, tc.code)
+			}
+		})
+	}
+}

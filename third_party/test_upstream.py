@@ -74,6 +74,8 @@ def main():
             if local.name == "quic-go":
                 shutil.copyfile(root / "quic_receive_budget_test.go.txt",
                                 target / "relay_receive_budget_test.go")
+                shutil.copyfile(root / "quic_push_frames_test.go.txt",
+                                target / "http3/relay_push_frames_test.go")
                 config_test = target / "config_test.go"
                 config_source = config_test.read_text()
                 config_before = '\t\tcase "EnableStreamResetPartialDelivery":'
@@ -101,6 +103,10 @@ def main():
             subprocess.run(["go", "test", "-p", str(os.cpu_count() and min(4, os.cpu_count())),
                             "-race", "-count=1", "-timeout=10m",
                             *(["-tags=http2legacy"] if local.name == "x-net" else []),
+                            # Replaced by relay_push_frames_test.go: it requires
+                            # push frames to be skipped, which RFC 9114 forbids.
+                            *(["-skip", "^TestParserUnsupportedFrameTypes$"]
+                              if local.name == "quic-go" else []),
                             *packages],
                            cwd=target, check=True)
 

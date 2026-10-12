@@ -160,8 +160,8 @@
         {
           "path": "http3/client.go",
           "upstream_sha256": "6faf1c7c0cfe39d374653e5b5464a99f265f83d1477749899bc89010a3d52b52",
-          "local_sha256": "6faf1c7c0cfe39d374653e5b5464a99f265f83d1477749899bc89010a3d52b52",
-          "modified": false
+          "local_sha256": "2cc6ee321248149109ffe596c646e266798a94cbc4ef3c5d3992fee5e346dc9d",
+          "modified": true
         },
         {
           "path": "http3/conn.go",
@@ -184,8 +184,8 @@
         {
           "path": "http3/frames.go",
           "upstream_sha256": "c15056479d707abb4f5f2e018ccae1c484960b7521e3f5581a20f2a24df162fe",
-          "local_sha256": "c15056479d707abb4f5f2e018ccae1c484960b7521e3f5581a20f2a24df162fe",
-          "modified": false
+          "local_sha256": "3085cf70bb73f7e6f3f045170f4144ed5cdcfbd21a041b2574f8e0163fdf68e5",
+          "modified": true
         },
         {
           "path": "http3/gzip_reader.go",
@@ -268,7 +268,7 @@
         {
           "path": "http3/server_conn.go",
           "upstream_sha256": "a95e03f55347db9adbcb67976ac9eea15301a5d9a6948c0dcaeb45daa277a402",
-          "local_sha256": "dd9d7aec0af5dd800d11c4f974e1c34659528f951801511d48afc47ac6ff24e7",
+          "local_sha256": "ef002e93e968c15b085bf68f1c44eb674622ac255bcc0cf09900d7c789aa2af4",
           "modified": true
         },
         {
