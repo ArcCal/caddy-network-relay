@@ -5,7 +5,14 @@ A [Caddy](https://caddyserver.com/) plugin that turns your server into a proxy f
 - **Caddy handles certificates and incoming traffic**: Let's Encrypt certificates are obtained and renewed automatically; HTTP/2 and HTTP/1.1 on TCP 443 are received by Caddy itself; HTTP/3 on UDP 443 is received by the plugin inside the Caddy process (see [below](#why-the-plugin-serves-http3) for why), using Caddy's certificates, and its requests are likewise handled by Caddy.
 - **Standard protocols**: TCP goes over HTTP CONNECT (RFC 9110/9113/9114) and UDP over CONNECT-UDP (RFC 9298); UDP packets travel as HTTP Datagrams (RFC 9297) on HTTP/3 and as Capsules on HTTP/2 and HTTP/1.1. This matches what `HTTP3RelayURL` and `HTTP2RelayURL` in Apple's profiles require.
 - **Looks like an ordinary website**: requests without the right password get your website's answer (by default a "Welcome" page).
-- This is a Go rewrite of [network-relay](https://github.com/ArcCal/network-relay) (a standalone program written in Rust) with the same features, running as a Caddy plugin. The two projects share no code; password hashes from the old version work here as they are.
+- This is a Go rewrite of [network-relay](https://github.com/ArcCal/network-relay) (a standalone program written in Rust) with the same features, running as a Caddy plugin. The relay protocol implementations are separate; the Debian 13 selective installer reuses the Rust deployment domain tooling. Password hashes from the old version work here as they are.
+
+**Fresh Debian 13 x64, selective domains and HTTP/2-only Apple profiles:** download the
+[standalone installer](caddy-network-relay-install-debian13.sh) and its
+[SHA-256 checksum](caddy-network-relay-install-debian13.sh.sha256), then follow the
+[deployment guide](docs/debian13-selective-install.md). The script includes the private
+source tree, builds on the VPS, and uses the Rust installer's base list, gfwlist,
+eighteen service lists and domain-cleaning pipeline.
 
 > This project has not yet been verified with real traffic from an actual iPhone/Mac (for the automated tests and protocol interoperability tests, see the [design document](docs/design.md#6-testing)).
 
