@@ -1,0 +1,10 @@
+{
+  "caddy_repository": "https://github.com/ArcCal/caddy-network-relay",
+  "caddy_commit": "ef245375aa67eecde830a5bcd5044b34cca52c4d",
+  "rust_reference_repository": "https://github.com/ArcCal/network-relay",
+  "rust_reference_commit": "a8cc0e8f3b3949de83634f52ff422c41cb87615d",
+  "copied_helper_sha256": "18ec3021e176033b17a4226c63bab2c0a8f46029b5138e62950ec5a12144b64a",
+  "base_domains_sha256": "b85cc1cedd63e8160a621c79e710f7a49d48c06871b0837e7d93816d986d73fc",
+  "icann_suffixes_sha256": "c296bb2831fb2828dc9eaea2db9c937b3171744c56624446be31b5f739bb2db0",
+  "scope": "Deployment tools and data only; relay server protocol source is unchanged."
+}
