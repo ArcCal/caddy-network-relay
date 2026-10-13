@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -95,6 +96,23 @@ func (c *RawServerConn) CloseWithError(code quic.ApplicationErrorCode, msg strin
 // The stream can either be obtained by calling [quic.Conn.AcceptStream] on the underlying QUIC connection,
 // or (internally) by using the server's stream accept loop.
 func (c *RawServerConn) HandleRequestStream(str *quic.Stream) {
+	// A stream the client has not written is neither a request nor late.
+	// Apple's QUIC connection group implicitly opens client stream 0 and
+	// never writes it; cancelling it fails the client's whole connection.
+	// It still takes one of this connection's header slots, so unwritten
+	// streams stay bounded as before. The global slot, the header deadline
+	// and the idle timer apply from the first byte. Peek also returns at EOF,
+	// cancellation or connection close, which the request parsing below
+	// handles as before.
+	select {
+	case c.pendingHeaders <- struct{}{}:
+	default:
+		// No client needs this many requests without headers: close the
+		// connection rather than let it hold more slots.
+		c.CloseWithError(quic.ApplicationErrorCode(ErrCodeExcessiveLoad), "too many incomplete requests")
+		return
+	}
+	_, _ = str.Peek(make([]byte, 1))
 	hstr := c.rawConn.TrackStream(str)
 	c.handleRequestStream(hstr)
 }
@@ -110,17 +128,20 @@ func (c *RawServerConn) openControlStream(settings *settingsFrame) (*quic.SendSt
 	return c.rawConn.openControlStream(settings)
 }
 
+// headersFailureCode is the code for a request stream whose HEADERS frame could
+// not be read. Headers late: a request cancelled without any processing is
+// rejected, so the client may retry it (RFC 9114 section 4.1.1). A stream that
+// ended without a complete request is incomplete (section 8.1).
+func headersFailureCode(err error) quic.StreamErrorCode {
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return quic.StreamErrorCode(ErrCodeRequestRejected)
+	}
+	return quic.StreamErrorCode(ErrCodeRequestIncomplete)
+}
+
 func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 	if c.readHeaderTimeout > 0 {
 		_ = str.SetReadDeadline(time.Now().Add(c.readHeaderTimeout))
-	}
-	select {
-	case c.pendingHeaders <- struct{}{}:
-	default:
-		// No client needs this many requests without headers: close the
-		// connection rather than let it hold more slots.
-		c.CloseWithError(quic.ApplicationErrorCode(ErrCodeExcessiveLoad), "too many incomplete requests")
-		return
 	}
 	select {
 	case pendingHeaders <- struct{}{}:
@@ -147,15 +168,16 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 	connCtx := c.serverContext
 	maxHeaderBytes := c.requestMaxHeaderBytes()
 
-	fp := &frameParser{closeConn: conn.CloseWithError, r: str, streamID: str.StreamID()}
+	fp := &frameParser{request: true, closeConn: conn.CloseWithError, r: str, streamID: str.StreamID()}
 	frame, err := fp.ParseNext(qlogger)
 	if err != nil {
 		if errors.Is(err, errPriorityUpdateForPush) {
 			conn.CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), "")
 			return
 		}
-		str.CancelRead(quic.StreamErrorCode(ErrCodeRequestIncomplete))
-		str.CancelWrite(quic.StreamErrorCode(ErrCodeRequestIncomplete))
+		code := headersFailureCode(err)
+		str.CancelRead(code)
+		str.CancelWrite(code)
 		return
 	}
 	hf, ok := frame.(*headersFrame)
@@ -174,8 +196,9 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 	headerBlock := make([]byte, hf.Length)
 	if _, err := io.ReadFull(str, headerBlock); err != nil {
 		maybeQlogInvalidHeadersFrame(qlogger, str.StreamID(), hf.Length)
-		str.CancelRead(quic.StreamErrorCode(ErrCodeRequestIncomplete))
-		str.CancelWrite(quic.StreamErrorCode(ErrCodeRequestIncomplete))
+		code := headersFailureCode(err)
+		str.CancelRead(code)
+		str.CancelWrite(code)
 		return
 	}
 	decodeFn := decoder.Decode(headerBlock)
@@ -306,6 +329,8 @@ func (c *RawServerConn) handleRequestStream(str *stateTrackingStream) {
 }
 
 func (c *RawServerConn) handleControlStream(_ *quic.ReceiveStream, fp *frameParser) {
+	var maxPushID uint64
+	var gotMaxPushID bool
 	for {
 		f, err := fp.ParseNext(c.qlogger)
 		if err != nil {
@@ -334,6 +359,18 @@ func (c *RawServerConn) handleControlStream(_ *quic.ReceiveStream, fp *framePars
 			c.rawConn.UpdateStreamPriority(quic.StreamID(frame.ElementID), urgency, incremental)
 		case *goAwayFrame:
 			// Server push is not supported, so there is no push state to update.
+		case *maxPushIDFrame:
+			// RFC 9114 section 7.2.7: MAX_PUSH_ID cannot reduce the maximum push ID.
+			if gotMaxPushID && frame.PushID < maxPushID {
+				c.CloseWithError(quic.ApplicationErrorCode(ErrCodeIDError), "")
+				return
+			}
+			maxPushID, gotMaxPushID = frame.PushID, true
+		case *cancelPushFrame:
+			// Server push is not supported. Since we never send PUSH_PROMISE frames,
+			// the client can't reference a mentioned push ID (RFC 9114 section 7.2.3).
+			c.CloseWithError(quic.ApplicationErrorCode(ErrCodeIDError), "")
+			return
 		default:
 			c.CloseWithError(quic.ApplicationErrorCode(ErrCodeFrameUnexpected), "")
 			return

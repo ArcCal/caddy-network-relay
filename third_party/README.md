@@ -22,7 +22,30 @@ Local changes:
   receiving HEADERS, clear it before calling the handler, bound incomplete
   headers per connection (16; more closes the connection with
   H3_EXCESSIVE_LOAD) and across connections (4096), and preserve extended
-  CONNECT's original scheme.
+  CONNECT's original scheme. An unwritten request stream (such as client
+  stream 0, which Apple's QUIC connection group implicitly opens and never
+  writes) is left open and does not hold the connection out of its idle
+  timeout, but it takes one of the connection's 16 slots like a request with
+  incomplete headers; the global slot and the deadline start at a request
+  stream's first byte. A request whose headers do not arrive in time is
+  rejected in both directions with H3_REQUEST_REJECTED (RFC 9114 section
+  4.1.1); one whose stream ends without complete headers gets
+  H3_REQUEST_INCOMPLETE.
+- quic-go/http3: the frame parser no longer skips push frames, so they are
+  rejected as RFC 9114 requires. Push is not supported, so on the server's
+  control stream a CANCEL_PUSH names a push ID never mentioned (section
+  7.2.3) and is H3_ID_ERROR, as is a MAX_PUSH_ID smaller than one received
+  before (section 7.2.7). The parser closes the connection with
+  H3_FRAME_UNEXPECTED as soon as it reads the type of a PUSH_PROMISE received
+  by a server or on a control stream (section 7.2.5), or of CANCEL_PUSH,
+  SETTINGS, GOAWAY, MAX_PUSH_ID or PRIORITY_UPDATE on a request stream
+  (sections 4.1, 7.2.3, 7.2.4, 7.2.6 and 7.2.7), whatever the payload. The
+  client, which never sends MAX_PUSH_ID, treats CANCEL_PUSH and a PUSH_PROMISE
+  on a request stream as H3_ID_ERROR. The single-integer payloads of
+  CANCEL_PUSH, GOAWAY and MAX_PUSH_ID are read only within their declared
+  length; an empty, shorter or longer payload is H3_FRAME_ERROR (section
+  7.1). The upstream test that required push frames to be skipped is
+  replaced by `quic_push_frames_test.go.txt`.
 - quic-go/http3: expose the request stream to handlers (RequestStream) without
   sending the response header, so the relay needs no reflection.
 - x-net/http2: expose CloseWrite, ResetStream and concurrent-write-safe
@@ -40,6 +63,26 @@ Local changes:
   stream with ENHANCE_YOUR_CALM and closes it locally even with socket backpressure.
 - x-net/http2: use the reviewed HTTP/2 implementation on Go 1.27 as well, instead
   of forwarding to the standard library which lacks these handler extensions.
+- x-net/http2: security fixes backported from x/net v0.60.0 without its other
+  changes: per-declared-trailer allocation budgeting (GO-2026-6603, frame.go);
+  response Content-Length validation and removal of connection-specific fields
+  in the client and reverse-proxy response path (GO-2026-6610, transport.go);
+  SETTINGS_INITIAL_WINDOW_SIZE changes applied through shared accounting
+  instead of every active stream (GO-2026-6611, flow.go, server.go,
+  transport.go, writesched.go); and HPACK encoder table-size changes deferred
+  until no frame is being written (GO-2026-6617, server.go). x/net v0.60.0's
+  frame_test.go, flow_test.go, writesched_test.go and
+  writesched_priority_rfc7540_test.go replace their v0.59.0 versions during
+  `test_upstream.py` (their SHA-256 values are checked), and
+  `http2_security_test.go.txt` and `http2_security_internal_test.go.txt` add
+  the upstream regression tests for the other advisories and a bounded
+  128-stream shared-accounting check. GO-2026-6612 is not backported: its
+  upstream repair replaces a refund path the relay does not use. The relay's
+  closeStream returns each closed stream's unread credit once, and x/net
+  v0.60.0's TestServerResetStreamUnreadBody passes with only the moment of the
+  refund adapted for a reset stream whose handler never started. The reviewed
+  advisories are recorded in `provenance.json`; the CI version query fails on
+  any other advisory for a recorded snapshot.
 - x-net/http2: SetExtendedConnectProtocol/ExtendedConnectProtocol replace a
   go:linkname to the unexported switch; DefaultServerMaxConcurrentStreams and
   DefaultServerMaxUploadBuffer{PerConnection,PerStream} set the server

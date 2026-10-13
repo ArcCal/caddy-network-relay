@@ -12,6 +12,7 @@ import (
 	"golang.org/x/net/http2/hpack"
 	"io"
 	"net"
+	"os"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -458,13 +459,79 @@ func TestH3IncompleteHeadersTimeout(t *testing.T) {
 	if err == nil {
 		t.Fatal("incomplete headers survived read_header_timeout")
 	}
-	if code := streamCode(err); code != quic.StreamErrorCode(0x10d) {
+	// RFC 9114 section 4.1.1: a request cancelled without processing is
+	// rejected, so the client may retry it.
+	if code := streamCode(err); code != quic.StreamErrorCode(0x10b) {
 		t.Fatalf("timeout code %x: %v", code, err)
 	}
 	// A rejected stream must not prevent a fresh request on the connection.
 	_, _, rsp := h.request([][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}})
 	if rsp.status != "200" {
 		t.Fatal(rsp.status)
+	}
+}
+
+// Apple's QUIC connection group owns client bidirectional stream 0 and never
+// writes it; its first request uses stream 4, which implicitly opens stream 0
+// (RFC 9000 section 3.2). Cancelling stream 0 fails the client's whole
+// connection, so the header deadline starts at a stream's first byte.
+func TestH3UnwrittenStreamIsLeftOpen(t *testing.T) {
+	port, _ := startRelay(t, nil, map[string]any{"read_header_timeout": int64(100 * time.Millisecond)})
+	h := dialRawH3(t, port)
+	unwritten, err := h.conn.OpenStreamSync(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer unwritten.Close()
+	if unwritten.StreamID() != 0 {
+		t.Fatalf("stream ID %d", unwritten.StreamID())
+	}
+	get := [][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}}
+	if _, _, rsp := h.request(get); rsp.status != "200" {
+		t.Fatal(rsp.status)
+	}
+	time.Sleep(300 * time.Millisecond)
+	unwritten.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	_, err = unwritten.Read(make([]byte, 1))
+	if !errors.Is(err, os.ErrDeadlineExceeded) {
+		t.Fatalf("unwritten stream 0 was not left open: %v", err)
+	}
+	if _, _, rsp := h.request(get); rsp.status != "200" {
+		t.Fatal(rsp.status)
+	}
+}
+
+// Unwritten streams still take this connection's header slots: it may hold no
+// more of them than of requests with incomplete headers.
+func TestH3UnwrittenStreamsAreBounded(t *testing.T) {
+	port, _ := startRelay(t, nil, nil)
+	h := dialRawH3(t, port)
+	unwritten := func(n int) {
+		for range n {
+			if _, err := h.conn.OpenStreamSync(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	get := [][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}}
+	// Writing a request implicitly opens the unwritten streams below it.
+	unwritten(15)
+	if _, _, rsp := h.request(get); rsp.status != "200" {
+		t.Fatal(rsp.status)
+	}
+	// One more fills the share. The request that opens it may still be served
+	// before it takes its slot; the next one finds none left.
+	unwritten(1)
+	send := func() {
+		if str, err := h.conn.OpenStreamSync(context.Background()); err == nil {
+			_, _ = str.Write(h3Frame(1, qpackHeaders(get)))
+		}
+	}
+	send()
+	time.Sleep(200 * time.Millisecond)
+	send()
+	if code := h.connError(); code != quic.ApplicationErrorCode(0x107) {
+		t.Fatalf("close code %x, want H3_EXCESSIVE_LOAD", code)
 	}
 }
 

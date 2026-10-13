@@ -1,0 +1,131 @@
+// Supplemental GO-2026-6611 regression from caddy-masque's
+// tests/test-http2-security.py, unchanged: SETTINGS_INITIAL_WINDOW_SIZE must
+// update shared accounting instead of every active stream.
+
+package http2
+
+import (
+	"bytes"
+	"context"
+	"fmt"
+	"net/http"
+	"sync"
+	"testing"
+)
+
+// SETTINGS_INITIAL_WINDOW_SIZE must change the shared initial window, rather
+// than mutating every active stream's private accounting. This bounded test
+// checks that property and the resulting usable windows. It does not use a
+// timing threshold or claim to measure CPU exhaustion. Verified upstream source
+// additionally establishes that neither SETTINGS handler traverses stream maps.
+func TestSecurityServerInitialWindowChangesUseSharedAccounting(t *testing.T) {
+	sc := &serverConn{
+		serveG:     newGoroutineLock(),
+		hs:         &http.Server{},
+		baseCtx:    context.Background(),
+		streams:    make(map[uint32]*stream),
+		writeSched: NewRoundRobinWriteScheduler(),
+	}
+	sc.flow.add(1 << 20)
+	if err := sc.processSettingInitialWindowSize(initialWindowSize); err != nil {
+		t.Fatal(err)
+	}
+	flows := make([]*outflow, 128)
+	for i := range flows {
+		st := sc.newStream(uint32(i*2+1), 0, stateOpen, PriorityParam{})
+		defer st.cancelCtx()
+		flows[i] = &st.flow
+	}
+	checkSecuritySharedAccounting(t, flows, func(size uint32) error {
+		return sc.processSettingInitialWindowSize(size)
+	})
+}
+
+func TestSecurityClientInitialWindowChangesUseSharedAccounting(t *testing.T) {
+	cc := &ClientConn{
+		t:                &Transport{},
+		streams:          make(map[uint32]*clientStream),
+		seenSettingsChan: make(chan struct{}),
+		nextStreamID:     1,
+	}
+	cc.cond = sync.NewCond(&cc.mu)
+	cc.flow.add(1 << 20)
+	rl := &clientConnReadLoop{cc: cc}
+	apply := func(size uint32) error {
+		var wire bytes.Buffer
+		fr := NewFramer(&wire, &wire)
+		if err := fr.WriteSettings(Setting{SettingInitialWindowSize, size}); err != nil {
+			return err
+		}
+		frame, err := fr.ReadFrame()
+		if err != nil {
+			return err
+		}
+		return rl.processSettingsNoWrite(frame.(*SettingsFrame))
+	}
+	if err := apply(initialWindowSize); err != nil {
+		t.Fatal(err)
+	}
+	flows := make([]*outflow, 128)
+	for i := range flows {
+		st := &clientStream{}
+		cc.addStreamLocked(st)
+		flows[i] = &st.flow
+	}
+	checkSecuritySharedAccounting(t, flows, apply)
+}
+
+func checkSecuritySharedAccounting(t *testing.T, flows []*outflow, apply func(uint32) error) {
+	t.Helper()
+	snapshots := make([]string, len(flows))
+	deltas := make([]int32, len(flows))
+	for i, flow := range flows {
+		// Model differently consumed/granted windows, including streams that
+		// become temporarily negative after a SETTINGS shrink and recover.
+		deltas[i] = []int32{0, 7, -11, -initialWindowSize + 2}[i%4]
+		if !flow.add(deltas[i]) {
+			t.Fatalf("stream %d: failed to prepare window", i)
+		}
+		snapshots[i] = fmt.Sprintf("%#v", *flow)
+		if got := securityAvailable(t, flow); got != initialWindowSize+deltas[i] {
+			t.Fatalf("stream %d: initial window %d, want %d", i, got, initialWindowSize+deltas[i])
+		}
+	}
+	for _, size := range []uint32{initialWindowSize - 1, 0, 5, initialWindowSize, initialWindowSize + 9} {
+		if err := apply(size); err != nil {
+			t.Fatal(err)
+		}
+		changed := 0
+		for i, flow := range flows {
+			if fmt.Sprintf("%#v", *flow) != snapshots[i] {
+				changed++
+			}
+			if got, want := securityAvailable(t, flow), int32(size)+deltas[i]; got != want {
+				t.Errorf("stream %d after initial window %d: available %d, want %d", i, size, got, want)
+			}
+		}
+		if changed != 0 {
+			t.Fatalf("SETTINGS initial window %d eagerly changed %d of %d stream accounts; shared updates must leave stream-local counters untouched", size, changed, len(flows))
+		}
+	}
+}
+
+// The pre-fix API returned one value; the fixed API also reports lazy overflow.
+// Keeping this adapter allows identical regression code to exercise both the
+// vulnerable baseline and fixed implementation without patching either source.
+func securityAvailable(t *testing.T, flow *outflow) int32 {
+	t.Helper()
+	switch value := any(flow).(type) {
+	case interface{ available() (int32, bool) }:
+		n, ok := value.available()
+		if !ok {
+			t.Fatal("unexpected flow-control overflow")
+		}
+		return n
+	case interface{ available() int32 }:
+		return value.available()
+	default:
+		t.Fatal("unrecognized flow-control API")
+		return 0
+	}
+}

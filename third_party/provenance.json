@@ -160,8 +160,8 @@
         {
           "path": "http3/client.go",
           "upstream_sha256": "6faf1c7c0cfe39d374653e5b5464a99f265f83d1477749899bc89010a3d52b52",
-          "local_sha256": "6faf1c7c0cfe39d374653e5b5464a99f265f83d1477749899bc89010a3d52b52",
-          "modified": false
+          "local_sha256": "2cc6ee321248149109ffe596c646e266798a94cbc4ef3c5d3992fee5e346dc9d",
+          "modified": true
         },
         {
           "path": "http3/conn.go",
@@ -184,8 +184,8 @@
         {
           "path": "http3/frames.go",
           "upstream_sha256": "c15056479d707abb4f5f2e018ccae1c484960b7521e3f5581a20f2a24df162fe",
-          "local_sha256": "c15056479d707abb4f5f2e018ccae1c484960b7521e3f5581a20f2a24df162fe",
-          "modified": false
+          "local_sha256": "52e17b8e96794341ce32f4338a96c7c64f921a8f85362014b4e097548a3b9a99",
+          "modified": true
         },
         {
           "path": "http3/gzip_reader.go",
@@ -268,7 +268,7 @@
         {
           "path": "http3/server_conn.go",
           "upstream_sha256": "a95e03f55347db9adbcb67976ac9eea15301a5d9a6948c0dcaeb45daa277a402",
-          "local_sha256": "620a20a038245b8d6e732350cef6f03daa6202bb937981750f8663fe2a17b48c",
+          "local_sha256": "28d7c4aaeaea40de947cb979022aff29b3684cb910d45437885a8c7534268778",
           "modified": true
         },
         {
@@ -286,8 +286,8 @@
         {
           "path": "http3/stream.go",
           "upstream_sha256": "5fdf4a076a3a2298905ee78af99311801b69be2eb06e1dd7cf74410c75e39ff1",
-          "local_sha256": "5fdf4a076a3a2298905ee78af99311801b69be2eb06e1dd7cf74410c75e39ff1",
-          "modified": false
+          "local_sha256": "0115c17e8faa80c969c1501a86e4a653fa00895708f0848ba738069f27cc83d7",
+          "modified": true
         },
         {
           "path": "http3/trace.go",
@@ -1585,14 +1585,14 @@
         {
           "path": "http2/flow.go",
           "upstream_sha256": "cdf7ad077c182118d3967a63d33f0731717b060b43bded46796d226c8fcb11f2",
-          "local_sha256": "cdf7ad077c182118d3967a63d33f0731717b060b43bded46796d226c8fcb11f2",
-          "modified": false
+          "local_sha256": "fedf89792079bcd134e4c41da64f5ac99a0881a681cf5b642c9e086d4e655250",
+          "modified": true
         },
         {
           "path": "http2/frame.go",
           "upstream_sha256": "7087a540c7d8c93b142d0b97b6f3a6b780be48863cbd0cf2187de845743857b7",
-          "local_sha256": "7087a540c7d8c93b142d0b97b6f3a6b780be48863cbd0cf2187de845743857b7",
-          "modified": false
+          "local_sha256": "4466f8ba7f851901df67721935d75f526f9f91184bd93c899307e577b97d9bd7",
+          "modified": true
         },
         {
           "path": "http2/gotrack.go",
@@ -1663,7 +1663,7 @@
         {
           "path": "http2/server.go",
           "upstream_sha256": "cf07329cd7d5d95909a5404f3b29f10f4252189012b98ad4c8fdbfca384cb9d1",
-          "local_sha256": "574d889cef940dfc122b9cb76c9fccbdb355c14ba3bf3ae9baab5e45a1c49d58",
+          "local_sha256": "9978b315dd4274800e982b25ec94037f721a79cd4576e86439f540bc901e43d1",
           "modified": true
         },
         {
@@ -1681,7 +1681,7 @@
         {
           "path": "http2/transport.go",
           "upstream_sha256": "325985fcac0a5a08e125656424c86e84955caaf642d823e855a6e9651c6fa303",
-          "local_sha256": "bd5b30df01d9611589b1e5d69af5338355ae86d44265d024811a254e682f0157",
+          "local_sha256": "465f1bc7cce360d8e61ab180b29f07e5d12543b9258599cab79f461434119432",
           "modified": true
         },
         {
@@ -1711,7 +1711,7 @@
         {
           "path": "http2/writesched.go",
           "upstream_sha256": "c09ff6579f38fac88fab3e925f89de0b40713edd6e941790c6c3deb40a16ea66",
-          "local_sha256": "295212d778549d74ab74e1d24b70db37d34ba2ec9326629047257200fd9d7566",
+          "local_sha256": "281eee0b33697d148bcc9faedb0d5f9d401df19edcda0709008b577bed2dde49",
           "modified": true
         },
         {
@@ -4480,7 +4480,14 @@
           "local_sha256": "98355e7d317b076d3d82ce73905552fce021f1aaad078988c231ffdbb9e369a3",
           "modified": false
         }
-      ]
+      ],
+      "reviewed_advisories": {
+        "GO-2026-6603": "fixed: x/net v0.60.0 trailer-declaration budget backported to http2/frame.go",
+        "GO-2026-6610": "fixed: x/net v0.60.0 response Content-Length and connection-specific field handling backported to http2/transport.go",
+        "GO-2026-6611": "fixed: x/net v0.60.0 shared initial-window accounting backported to http2/flow.go, server.go, transport.go and writesched.go",
+        "GO-2026-6612": "not affected: the relay's closeStream returns each closed stream's unread credit once (bodyBytesCredited); x/net v0.60.0's regression test passes with only the refund moment adapted",
+        "GO-2026-6617": "fixed: x/net v0.60.0 deferred HPACK encoder table-size updates backported to http2/server.go"
+      }
     }
   ]
 }
