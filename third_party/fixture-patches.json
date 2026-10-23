@@ -1,6 +1,6 @@
 {
   "format": 1,
-  "description": "ASCII source representations for Unicode conformance data. Go literal values are unchanged.",
+  "description": "Conformance fixture patches with verified input and output hashes.",
   "files": [
     {
       "path": "idna/tables17.0.0.go",

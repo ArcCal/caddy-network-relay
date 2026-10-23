@@ -9,7 +9,7 @@ import shutil
 import subprocess
 import tempfile
 
-from english_fixtures import apply_records
+from fixture_patches import apply_records
 
 # x/net v0.60.0 test files, unchanged, that replace their v0.59.0 versions:
 # frame_test.go covers GO-2026-6603; the others follow the GO-2026-6611 flow
@@ -38,17 +38,17 @@ def main():
             actual = {str(p.relative_to(local)) for p in local.rglob("*") if p.is_file()}
             if actual != set(files):
                 raise RuntimeError(f"snapshot file list changed: {module}")
-            language = {}
+            fixture_hashes = {}
             if local.name == "x-net":
-                records = json.loads((root / "english-unicode-fixtures.json").read_text())
+                records = json.loads((root / "fixture-patches.json").read_text())
                 for entry in records["files"]:
                     name = entry["path"]
                     if files[name]["modified"] or files[name]["local_sha256"] != entry["before_sha256"]:
-                        raise RuntimeError(f"English fixture provenance mismatch: {name}")
-                    language[name] = entry["after_sha256"]
+                        raise RuntimeError(f"Fixture provenance mismatch: {name}")
+                    fixture_hashes[name] = entry["after_sha256"]
             for name, entry in files.items():
                 digest = hashlib.sha256((local / name).read_bytes()).hexdigest()
-                if digest != language.get(name, entry["local_sha256"]):
+                if digest != fixture_hashes.get(name, entry["local_sha256"]):
                     raise RuntimeError(f"snapshot hash mismatch: {module}/{name}")
 
             downloaded = json.loads(subprocess.check_output(
@@ -63,11 +63,11 @@ def main():
                     raise RuntimeError(f"upstream source hash mismatch: {module}/{name}")
 
             if local.name == "x-net":
-                baseline = {name: (original / name).read_bytes() for name in language}
-                replayed = apply_records(baseline, root / "english-unicode-fixtures.json")
+                baseline = {name: (original / name).read_bytes() for name in fixture_hashes}
+                replayed = apply_records(baseline, root / "fixture-patches.json")
                 for name, data in replayed.items():
                     if data != (local / name).read_bytes():
-                        raise RuntimeError(f"English fixture replay mismatch: {name}")
+                        raise RuntimeError(f"Fixture replay mismatch: {name}")
 
             target = Path(scratch) / local.name
             shutil.copytree(original, target)

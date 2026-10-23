@@ -124,10 +124,9 @@ the repository-root build. Review the upstream diff when updating versions,
 rerun the upstream transport test suites and dependency vulnerability scanning,
 and retire these patches when equivalent upstream APIs become available.
 
-## English source presentation
+## Conformance fixtures
 
-`english-unicode-fixtures.json` records the ASCII representation of generated
-IDNA data separately from protocol patches. JSON escapes Unicode in both sides
-of the recorded edits. Go string values retain identical runtime bytes. The
-upstream test runner verifies the pinned baseline, strict patch replay, and
-resulting hashes; it does not ignore arbitrary source changes.
+`fixture-patches.json` defines additional generated IDNA data and fixture patches
+applied during upstream verification. Go string values retain identical runtime
+bytes. The upstream test runner verifies the pinned baseline, strict patch
+replay, and resulting hashes; arbitrary source changes fail verification.

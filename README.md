@@ -139,7 +139,7 @@ Afterwards, remember to delete the copy in `/home/YOUR_USER/` on the server.
 
 Once installed, it is listed under Settings → General → VPN & Device Management. Open a site from the list (Gemini, for example) to try it.
 
-**After installing, delete the copy in `~/Downloads/` on the Mac**: anyone who gets it can use your relay. Do not send this file over WeChat, email or the like.
+**After installing, delete the copy in `~/Downloads/` on the Mac**: anyone who gets it can use your relay. Do not send this file through messaging services or email.
 
 ---
 
