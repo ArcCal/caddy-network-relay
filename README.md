@@ -1,5 +1,8 @@
 # caddy-network-relay
 
+**Practical manual:** [installation, profiles, configuration, operations,
+recovery, troubleshooting and validation evidence](docs/USER_GUIDE.md).
+
 A [Caddy](https://caddyserver.com/) plugin that turns your server into a proxy for Apple's Network Relay. An iPhone, iPad or Mac **only needs one configuration profile (.mobileconfig)**, and no app, to send chosen websites (or all of its traffic) through your server.
 
 - **Caddy handles certificates and incoming traffic**: Let's Encrypt certificates are obtained and renewed automatically; HTTP/2 and HTTP/1.1 on TCP 443 are received by Caddy itself; HTTP/3 on UDP 443 is received by the plugin inside the Caddy process (see [below](#why-the-plugin-serves-http3) for why), using Caddy's certificates, and its requests are likewise handled by Caddy.
@@ -307,9 +310,9 @@ systemctl daemon-reload && deluser --system caddy
 
 ### Downloading a prebuilt binary
 
-Every push to `main` is tested and built by GitHub Actions; pushing a version tag also creates a Release. Under **Releases** on the repository page, download `caddy-network-relay-<version>-linux-amd64.tar.gz` (x86_64 servers) or `-linux-arm64.tar.gz` (ARM servers; `-darwin-arm64` is for running `check` on a Mac), unpack it to get a `caddy` binary, and put it at `/usr/local/bin/caddy`; there is no need to build on the server. The repository is private, so download it in a browser while signed in, then upload it to the server.
+The test workflow builds Linux artifacts for applicable source pushes and pull requests; documentation-only changes are excluded. The release workflow can attach platform archives after successful verification and builds. Check the actual **Releases** asset list before choosing a prebuilt binary. When available, use `caddy-network-relay-<version>-linux-amd64.tar.gz` for x86_64 or `-linux-arm64.tar.gz` for ARM (`-darwin-arm64` can run `check` on a Mac), unpack `caddy`, and install it at `/usr/local/bin/caddy`. Otherwise build from source below. The repository is private: download through a signed-in browser and upload to the server.
 
-There are three ways to publish a version; use any one. About 5 minutes later, the Release page has 4 files (Linux x86_64 / arm64, macOS Apple silicon / Intel) and checksums:
+Maintainers can request release builds in three ways. Successful jobs attach archives for Linux x86_64/arm64 and macOS Apple silicon/Intel with checksums; failed or unavailable Actions runs do not produce those downloads:
 
 - On the GitHub website: on the right of the repository home page, **Releases → Draft a new release → Choose a tag**, type a new tag (for example `v1.0.0`) → **Create new tag on publish** → fill in a title → **Publish release**.
 - Locally: `git tag v1.0.0 && git push origin v1.0.0`.
