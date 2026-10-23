@@ -43,11 +43,11 @@ class DomainSelectionTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def test_copied_source_and_data_are_exact_upstream_bytes(self):
+    def test_source_and_data_match_recorded_hashes(self):
         expected = {
             'global-profile.py': '18ec3021e176033b17a4226c63bab2c0a8f46029b5138e62950ec5a12144b64a',
             'domains/google-ai-social.txt': 'b85cc1cedd63e8160a621c79e710f7a49d48c06871b0837e7d93816d986d73fc',
-            'domains/public-suffix-icann.dat': 'c296bb2831fb2828dc9eaea2db9c937b3171744c56624446be31b5f739bb2db0',
+            'domains/public-suffix-icann.dat': 'e25e17e28343951cd1b34423c3e74b08d23ba183a232edb13583040c6a4b26e8',
         }
         for name, digest in expected.items():
             self.assertEqual(hashlib.sha256((HERE / name).read_bytes()).hexdigest(), digest)

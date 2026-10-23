@@ -192,7 +192,7 @@ func main1() error {
 			case s == "tw" || strings.HasSuffix(s, ".tw"):
 			case s == "zw" || strings.HasSuffix(s, ".zw"):
 			case s == "xn--p1ai" || strings.HasSuffix(s, ".xn--p1ai"):
-				// xn--p1ai is Russian-Cyrillic "рф".
+				// xn--p1ai encodes the Russian abbreviation for "Russian Federation".
 			default:
 				continue
 			}
