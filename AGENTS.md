@@ -1,21 +1,5 @@
 # Agent instructions for caddy-network-relay
 
-## Project context
-
-- This Caddy plugin implements authenticated classic CONNECT and CONNECT-UDP
-  over H1/H2/H3. It does not use the CONNECT-IP server's TUN/NAT architecture.
-- Start with `docs/USER_GUIDE.md`, `commands.go`, `caddyfile.go`, `handler.go`
-  and `app.go`. Preserve local QUIC/x/net replacements; patched x/net is used
-  regardless of the retained `http2legacy` compatibility tag.
-- CONNECT authority differs from TLS SNI. Preserve listener matching,
-  destination protections, bounded resources and reload ownership. A stable
-  unique `relay_id` supports eligible tunnel retention, not every security change.
-- Keep the Debian 13 selective first-install/H2-profile workflow distinct from
-  general `deploy/install.sh` upgrades. Standalone payloads are generated snapshots.
-- Relay authentication does not protect Caddy's administration API. Distinguish
-  protocol tests, stubbed installers, native service observations and physical
-  Apple-device acceptance when reporting results.
-
 ## Repository-wide contribution rules
 
 The following six rules apply to this repository and all its subdirectories.
@@ -46,10 +30,7 @@ unless the user explicitly requests changing those objectives.
 
 ### 4. Server requirements
 
-All MASQUE-related servers must have no violations of applicable IETF
-specifications, no known performance or security issues, and no regressions.
-
-All network-relay-related servers must have no violations of applicable IETF
+This project must have no violations of applicable IETF
 specifications and Apple's specifications, no known performance or security
 issues, and no regressions.
 
