@@ -63,6 +63,8 @@ while (($#)); do
 done
 
 [[ $EUID == 0 || -n $ROOT ]] || die 'Run this script with sudo or as root.'
+# The operating system's platform description, or a test fixture.
+# shellcheck source=/dev/null
 . "${RELAY_TEST_OS_RELEASE:-/etc/os-release}"
 [[ ${ID:-} == debian && ${VERSION_ID:-} == 13 ]] || die 'This installer requires Debian 13.'
 [[ $(uname -m) == x86_64 ]] || die 'This installer requires x86_64 (amd64).'
