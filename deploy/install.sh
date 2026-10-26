@@ -20,12 +20,12 @@
 set -Eeuo pipefail
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
-GO_VERSION=1.26.9
+GO_VERSION=1.26.10
 # h1 hashes of golang.org/toolchain@v0.0.1-go$GO_VERSION.linux-* from
 # sum.golang.org.
 declare -A GO_SUMS=(
-    [amd64]='h1:H1MNjtpLSXRMijiKWuh1cj9j9YM4NXKqM93/8h6Aics='
-    [arm64]='h1:7zX/9hOPdr3dzQYUa5W/Bpz3BIL2eF1oDoQjg/io1U8='
+    [amd64]='h1:5VAGHlY8yl8pTPVSNIez3SNMy6fWabs+QMR25f3oMT0='
+    [arm64]='h1:TuAzKmE5TqYnXpnhgY3GtBJCVg4AfNDA/K1gLyX5Hig='
 )
 # For tests: all paths under this directory, and no real downloads.
 ROOT=${RELAY_TEST_ROOT:-}

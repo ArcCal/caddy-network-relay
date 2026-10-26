@@ -215,7 +215,7 @@ install nor a pristine host is implied by an error exit.
 
 ## Manual build and Caddy integration
 
-Use the toolchain in [go.mod](../go.mod), currently Go 1.26 with `go1.26.9`.
+Use the toolchain in [go.mod](../go.mod), currently Go 1.26 with `go1.26.10`.
 From the repository root:
 
 ```bash
@@ -601,7 +601,7 @@ later build.
 | --- | --- | --- |
 | [Production readiness](production-readiness.md) | Local race/protocol/fault/MTU/resource checks, independent clients, upstream transport checks and limited native systemd observations | Complete Apple acceptance, arbitrary WAN paths and production capacity |
 | [Hardening report](production-hardening-report.md) | Recorded 1,000-account synthetic H3 run, real Debian systemd process checks and selected rollback faults | Not a production RAM estimate or every download/ACME/device scenario |
-| [Selective installer validation](debian13-selective-validation.md) | 48 local installer/domain/profile checks, real Caddy profile generation/adaptation, source payload verification | Fresh public VPS/ACME and physical Apple routing not executed; recorded toolchain snapshot predates current Go 1.26.9 selection |
+| [Selective installer validation](debian13-selective-validation.md) | 48 local installer/domain/profile checks, real Caddy profile generation/adaptation, source payload verification | Fresh public VPS/ACME and physical Apple routing not executed; recorded toolchain snapshot predates current Go 1.26.10 selection |
 | [Test workflow](../.github/workflows/test.yml) | Intended lint/race/vulnerability/build recipe | Workflow existence does not prove execution; selective validation records an Actions-budget-blocked run |
 | [On-device procedure](test-on-device.md) | Repeatable native acceptance steps | A procedure itself is not a recorded pass |
 

@@ -135,8 +135,8 @@ shutil.copyfile(source, target)
 target.chmod(0o755)
 PY
 else
-    GO_VERSION=1.26.9
-    GO_SUM='h1:H1MNjtpLSXRMijiKWuh1cj9j9YM4NXKqM93/8h6Aics='
+    GO_VERSION=1.26.10
+    GO_SUM='h1:5VAGHlY8yl8pTPVSNIez3SNMy6fWabs+QMR25f3oMT0='
     GO=$OPT/go/bin/go
     if [[ -n ${RELAY_TEST_GO:-} ]]; then
         GO=$RELAY_TEST_GO
