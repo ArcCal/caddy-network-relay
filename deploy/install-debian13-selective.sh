@@ -32,7 +32,7 @@ HELP
 say() { printf '%s\n' "$*"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 value() { [[ $# == 2 && -n $2 && $2 != --* ]] || die "Missing value for $1."; }
-apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=1800 "$@"; }
+apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=1800 -o Acquire::Retries=3 "$@"; }
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
 ROOT=${RELAY_TEST_ROOT:-}
@@ -146,7 +146,7 @@ else
         say "==> Downloading and verifying Go $GO_VERSION"
         module=golang.org/toolchain@v0.0.1-go$GO_VERSION.linux-amd64
         zip=$CACHE/go-toolchain.zip
-        curl -fsSL --max-time 900 -o "$zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go$GO_VERSION.linux-amd64.zip"
+        curl -fsSL --retry 3 --retry-delay 5 --max-time 900 -o "$zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go$GO_VERSION.linux-amd64.zip"
         rm -rf "$OPT/go.new"
         python3 - "$zip" "$OPT/go.new" "$module" "$GO_SUM" <<'PY'
 import base64

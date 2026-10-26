@@ -43,7 +43,7 @@ MARKER='# Managed by caddy-network-relay deploy/install.sh'
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
-run_apt() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=1800 "$@"; }
+run_apt() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=1800 -o Acquire::Retries=3 "$@"; }
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
 DOMAIN='' RELAY_USER='' EMAIL='' GFWLIST=1 REPLACE_OLD=0 DNS_CHECK=1
@@ -160,7 +160,7 @@ elif [[ ! -x $GO || $("$GO" env GOVERSION 2>/dev/null) != "go$GO_VERSION" ]]; th
     module=golang.org/toolchain@v0.0.1-go$GO_VERSION.linux-$GOARCH
     mkdir -p "$CACHE" "$OPT"
     zip=$CACHE/go-toolchain.zip
-    curl -fsSL --max-time 900 -o "$zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go$GO_VERSION.linux-$GOARCH.zip" \
+    curl -fsSL --retry 3 --retry-delay 5 --max-time 900 -o "$zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go$GO_VERSION.linux-$GOARCH.zip" \
         || die 'Downloading Go failed: this machine must be able to reach proxy.golang.org.'
     rm -rf "$OPT/go.new"
     python3 - "$zip" "$OPT/go.new" "$module" "${GO_SUMS[$GOARCH]}" <<'PY' || die 'Verifying the Go toolchain failed: the download is incomplete or has been tampered with.'
