@@ -1,5 +1,7 @@
 # Builds Caddy with the network_relay plugin for Linux (x86_64, arm64) and
-# macOS (Apple silicon, Intel) and attaches the files to a GitHub Release.
+# macOS (Apple silicon, Intel), the Linux builds that also include the
+# Cloudflare DNS plugin, and attaches them and the Debian 13 installer to a
+# GitHub Release.
 #
 # Runs when: a tag like v1.2.3 is pushed; a release is published on the
 # GitHub website; or by hand from the Actions page, which creates the tag
@@ -19,6 +21,12 @@ on:
 
 permissions:
   contents: write
+
+# Publishing a release on the website with a new tag also pushes that tag:
+# run the two triggered workflows one after the other, not concurrently.
+concurrency:
+  group: release-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   verify:
@@ -90,15 +98,86 @@ jobs:
           name: ${{ matrix.os }}-${{ matrix.arch }}
           path: caddy-network-relay-*.tar.gz*
 
+  build-cloudflare:
+    name: build linux/${{ matrix.arch }} with Cloudflare DNS
+    needs: verify
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
+          path: caddy-network-relay-src
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          repository: caddy-dns/cloudflare
+          ref: master
+          path: cloudflare-src
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: caddy-network-relay-src/go.mod
+      # Same overlay as build-linux-servers-on-linux.sh: alternate module
+      # files keep the tracked go.mod and the transport replacements intact.
+      - name: Build
+        working-directory: caddy-network-relay-src
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          grep -Eq 'ID:[[:space:]]*"dns\.providers\.cloudflare"' ../cloudflare-src/cloudflare.go
+          cp go.mod build-plugins.mod
+          cp go.sum build-plugins.sum
+          printf 'package main\n\nimport _ "github.com/caddy-dns/cloudflare"\n' > cmd/caddy/cloudflare_dns_build.go
+          go mod edit -modfile build-plugins.mod -replace github.com/caddy-dns/cloudflare=../cloudflare-src
+          go get -modfile build-plugins.mod github.com/caddy-dns/cloudflare@v0.0.0
+          go build -modfile build-plugins.mod -mod=readonly -tags http2legacy -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
+          info=$(go version -m caddy)
+          for replacement in github.com/caddy-dns/cloudflare=../cloudflare-src \
+                             golang.org/x/net=./third_party/x-net \
+                             github.com/quic-go/quic-go=./third_party/quic-go; do
+            awk -F '\t' -v module="${replacement%%=*}" -v path="${replacement#*=}" '
+              ($2 == "dep" || $2 == "mod") && $3 == module { pending=1; next }
+              pending { if ($2 == "=>" && $3 == path) found=1; pending=0 }
+              END { exit !found }
+            ' <<< "$info" || { echo "missing replacement: $replacement" >&2; exit 1; }
+          done
+          if [[ $GOARCH == amd64 ]]; then
+            modules=$(./caddy list-modules)
+            for module in network_relay http.handlers.network_relay dns.providers.cloudflare; do
+              grep -Fxq -- "$module" <<< "$modules" || { echo "missing Caddy module: $module" >&2; exit 1; }
+            done
+          fi
+          name=caddy-network-relay-cloudflare-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}-linux-${{ matrix.arch }}
+          tar -czf "../$name.tar.gz" caddy
+          (cd .. && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-${{ matrix.arch }}-cloudflare
+          path: caddy-network-relay-cloudflare-*.tar.gz*
+
   release:
     name: attach to the release
-    needs: [verify, build]
+    needs: [verify, build, build-cloudflare]
     runs-on: ubuntu-24.04
     steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ needs.verify.outputs.sha }}
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
           merge-multiple: true
+      - name: Verify the Debian 13 installer
+        run: |
+          python3 deploy/package-debian13-installer.py --out dist/caddy-network-relay-install-debian13.sh
+          cmp caddy-network-relay-install-debian13.sh dist/caddy-network-relay-install-debian13.sh
+          bash -n dist/caddy-network-relay-install-debian13.sh
+          (cd dist && sha256sum -c caddy-network-relay-install-debian13.sh.sha256)
       - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
         with:
           tag_name: ${{ inputs.tag || github.event.release.tag_name || github.ref_name }}
