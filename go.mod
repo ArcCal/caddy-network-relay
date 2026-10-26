@@ -10,7 +10,7 @@ replace golang.org/x/net => ./third_party/x-net
 
 require (
 	github.com/KimMachineGun/automemlimit v1.0.0
-	github.com/caddyserver/caddy/v2 v2.11.6
+	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/quic-go/masque-go v0.6.0
 	github.com/quic-go/qpack v0.6.0
 	github.com/quic-go/quic-go v0.63.0
@@ -61,7 +61,7 @@ require (
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da // indirect
 	github.com/dlclark/regexp2/v2 v2.8.0 // indirect
 	github.com/dunglas/go-urlpattern v1.0.0 // indirect
-	github.com/dunglas/httpsfv v1.1.0 // indirect
+	github.com/dunglas/httpsfv v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/felixge/httpsnoop v1.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.4 // indirect
