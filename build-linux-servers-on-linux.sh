@@ -6,7 +6,7 @@ set -euo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: bash build-servers-linux.sh [--output DIR] [--jobs N]
+Usage: bash build-linux-servers-on-linux.sh [--output DIR] [--jobs N]
                                    [--install-deps] [--check]
 
 Build these three servers from the latest main branches on GitHub:
@@ -46,11 +46,11 @@ then delete downloaded source and intermediate build files. Failed runs
 retain a private .work directory for diagnosis.
 
 Example on a fresh VPS with git credentials configured:
-  bash build-servers-linux.sh --install-deps
+  bash build-linux-servers-on-linux.sh --install-deps
 EOF
 }
 
-die() { printf 'build-servers-linux: %s\n' "$*" >&2; exit 1; }
+die() { printf 'build-linux-servers-on-linux: %s\n' "$*" >&2; exit 1; }
 value() { [[ $# -ge 2 && -n $2 && $2 != --* ]] || die "Pass a value to $1."; }
 output=
 install_deps=0
