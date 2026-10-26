@@ -9,7 +9,7 @@ replace github.com/quic-go/quic-go => ./third_party/quic-go
 replace golang.org/x/net => ./third_party/x-net
 
 require (
-	github.com/KimMachineGun/automemlimit v1.0.0
+	github.com/KimMachineGun/automemlimit v1.0.1
 	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/quic-go/masque-go v0.6.0
 	github.com/quic-go/qpack v0.6.0
@@ -19,10 +19,10 @@ require (
 	go.uber.org/zap v1.28.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
-	golang.org/x/sys v0.48.0
-	golang.org/x/term v0.46.0
+	golang.org/x/sys v0.49.0
+	golang.org/x/term v0.47.0
 	golang.org/x/time v0.16.0
-	software.sslmate.com/src/go-pkcs12 v0.7.3
+	software.sslmate.com/src/go-pkcs12 v0.7.4
 )
 
 require (
