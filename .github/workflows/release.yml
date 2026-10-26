@@ -115,7 +115,8 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           repository: caddy-dns/cloudflare
-          ref: master
+          # v0.2.4, the release pinned in build-linux-servers-on-linux.sh.
+          ref: a8737d095ad5a48ca031cea6ab704057dbc2d250
           path: cloudflare-src
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:

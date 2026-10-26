@@ -32,7 +32,7 @@ and static linking. Native executables also run version/module smoke checks.
 The newest committed script handles each build. Local commits are refused;
 uncommitted files are preserved and never used as build inputs. The Caddy
 snapshot pins the fetched checkout commit. The Rust server uses a fresh
-network-relay main clone; caddy-dns/cloudflare uses current master.
+network-relay main clone; caddy-dns/cloudflare uses its pinned v0.2.4 release.
 Fetched commits are fixed for this
 run and recorded in MANIFEST.txt. Credentials must allow both private repos.
 Optional NETWORK_RELAY_TOKEN / CADDY_NETWORK_RELAY_TOKEN provide read tokens.
@@ -44,6 +44,9 @@ only their private work directory is removed. Failed runs retain .work.
 No server installation or service configuration is performed.
 HELP
 }
+# The reviewed caddy-dns/cloudflare release built into Caddy, and its commit.
+LR_CLOUDFLARE_DNS_TAG=v0.2.4
+LR_CLOUDFLARE_DNS_COMMIT=a8737d095ad5a48ca031cea6ab704057dbc2d250
 lr_die() { printf 'build-linux-servers-on-linux: %s\n' "$*" >&2; exit 1; }
 lr_value() { [[ $# -ge 2 && -n $2 && $2 != --* ]] || lr_die "Pass a value to $1."; }
 lr_physical_dir() { REPLY=$(cd -P -- "$1" && printf '%s/' "$PWD"); REPLY=${REPLY%/}; }
@@ -444,8 +447,13 @@ lr_snapshot() {
 }
 lr_run source-caddy-network-relay lr_snapshot
 lr_run source-network-relay lr_clone_repo network-relay "$repo" NETWORK_RELAY_TOKEN
-lr_run source-cloudflare env GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch master --single-branch -- \
-    https://github.com/caddy-dns/cloudflare.git "$cloudflare_src"
+lr_clone_cloudflare() {
+    GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$LR_CLOUDFLARE_DNS_TAG" --single-branch -- \
+        https://github.com/caddy-dns/cloudflare.git "$cloudflare_src"
+    [[ $(git -C "$cloudflare_src" rev-parse --verify HEAD) == "$LR_CLOUDFLARE_DNS_COMMIT" ]] ||
+        lr_die "caddy-dns/cloudflare $LR_CLOUDFLARE_DNS_TAG is not the reviewed commit."
+}
+lr_run source-cloudflare lr_clone_cloudflare
 export GOWORK=off GOFLAGS='' GOAMD64=v1 GOARM64=v8.0
 unset GOOS GOARCH CARGO_TARGET_DIR CARGO_BUILD_TARGET RUSTFLAGS
 export CARGO_ENCODED_RUSTFLAGS=''
@@ -479,6 +487,7 @@ lr_write_manifest() {
     for source in "$repo" "$caddy_src" "$cloudflare_src"; do
         commit=$(git -C "$source" rev-parse --verify HEAD)
         if [[ $source == "$caddy_src" ]]; then branch=main; fetched=$root_commit;
+        elif [[ $source == "$cloudflare_src" ]]; then branch=$LR_CLOUDFLARE_DNS_TAG; fetched=$LR_CLOUDFLARE_DNS_COMMIT;
         else branch=$(git -C "$source" symbolic-ref --short HEAD); fetched=$(git -C "$source" rev-parse --verify "refs/remotes/origin/$branch"); fi
         [[ $fetched == "$commit" ]] || lr_die "Source commit changed: $source"
         git -C "$source" diff --quiet HEAD -- || lr_die "Build changed tracked sources: $source"
