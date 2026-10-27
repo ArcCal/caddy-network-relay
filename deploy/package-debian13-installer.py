@@ -5,6 +5,7 @@ import base64
 import gzip
 import hashlib
 import io
+import os
 from pathlib import Path
 import tarfile
 import textwrap
@@ -80,7 +81,19 @@ bash "$bundle_dir/source/deploy/install-debian13-selective.sh" "$@"
     print(f'Wrote {output}: {output.stat().st_size} bytes; {len(files)} bundled files.')
 
 
+def open_dirs(*roots):
+    """Leave the source and artifact folders, and every folder below them, open to all users."""
+    for root in roots:
+        for folder, _, _ in os.walk(root):
+            try:
+                os.chmod(folder, 0o777)
+            except OSError:
+                pass
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--out', type=Path, default=ROOT / 'caddy-network-relay-install-debian13.sh')
-    package(parser.parse_args().out)
+    output = parser.parse_args().out
+    package(output)
+    open_dirs(ROOT, output.resolve().parent)

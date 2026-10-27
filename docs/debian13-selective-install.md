@@ -161,7 +161,8 @@ bash caddy-network-relay-install-debian13.sh --extract /tmp/caddy-relay-source
 ```
 
 The self-extracting payload has an embedded SHA-256 check and a separate
-script checksum. Source code, helper behavior, real Caddy profile generation,
+script checksum. After packaging, every folder in the repository and the output
+folder is mode 777. Source code, helper behavior, real Caddy profile generation,
 configuration adaptation and installer transaction paths can be tested
 without deploying a public server. Scratch installer tests substitute apt,
 systemd, port inspection and network self-check commands. They do not prove

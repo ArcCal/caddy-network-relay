@@ -334,6 +334,21 @@ replacements in their main module. The patched x/net HTTP/2 implementation is
 used on all supported Go versions; the `http2legacy` tag remains accepted for
 existing build scripts. See [transport patch provenance](third_party/README.md).
 
+To build static Linux x64 and arm64 binaries of both this server and the Rust
+`network-relay` from fresh sources, run this on Debian 13 or Ubuntu 26.04:
+
+```bash
+bash build-linux-servers-on-linux.sh
+```
+
+It keeps its checkout in `~/caddy-network-relay` (change it with `--repo`),
+installs missing prerequisites, and writes the four binaries, logs,
+`MANIFEST.txt` and `SHA256SUMS` to a new `relay-servers-*` folder. The Caddy
+binaries include the Cloudflare DNS plugin. Run it with `--help` for all
+options. When it ends, successfully or not, every folder in the checkout and
+the results is mode 777, so other users and file synchronization tools such as
+Syncthing can use them.
+
 ### Caddyfile
 
 See [deploy/Caddyfile.example](deploy/Caddyfile.example):
