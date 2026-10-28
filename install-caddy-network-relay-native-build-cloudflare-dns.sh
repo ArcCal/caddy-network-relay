@@ -13,7 +13,7 @@ PLUGIN_COMMIT=a8737d095ad5a48ca031cea6ab704057dbc2d250
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 ETC=/etc/$SERVICE
 CONFIG=$ETC/Caddyfile
-TOKEN_FILE=$ETC/cloudflare.env
+TOKEN_FILE=$ETC/cloudflare.token
 PROFILE=$ETC/relay/device.mobileconfig
 CLIENT_CONFIG=$ETC/relay/network-relay-rs-client.toml
 BIN=/usr/local/bin/$SERVICE
@@ -37,14 +37,16 @@ Interactively build this checkout for native amd64/arm64 with the pinned
 caddy-dns/cloudflare plugin. Configure DNS-01 certificate issuance and renewal,
 a relay user, private Apple and Rust client configurations, systemd and protocol
 self-checks. The Rust TOML is generated after the protocol checks succeed.
-Requires Debian 12+ or Ubuntu 22.04+, systemd and at least 5 GiB of free disk.
+Requires Debian 12+ or Ubuntu 22.04+, systemd 249+ and 5 GiB of free disk.
 
 Only two prompts: relay domain and hidden CF_API_TOKEN.
 Defaults: user iphone, one build job, bundled selected-domain device profile.
 Running the installer accepts the ACME CA terms. No confirmation prompt.
 Fresh installations only; existing $SERVICE files/services are refused.
-Caddyfile uses: tls { dns cloudflare {env.CF_API_TOKEN} }
-The token is loaded from a root-only systemd EnvironmentFile for renewal.
+Caddy reads the DNS token from systemd credentials, not its environment.
+The root-only token source is $TOKEN_FILE and is retained for renewal.
+The service has a read-only host filesystem, private state/runtime directories,
+and only the capability needed to bind port 443.
 DNS-only A/AAAA records must point here. Open TCP/UDP 443 in the provider firewall.
 No inbound port 80 is needed; automatic HTTP redirects are disabled.
 Binary: $BIN
@@ -200,12 +202,13 @@ cr_config_text() {
 # Managed by install-caddy-network-relay-native-build-cloudflare-dns.sh
 {
     auto_https disable_redirects
+    persist_config off
     admin $ADMIN_ADDRESS
 }
 # Catch-all :443 is required for CONNECT requests naming destination hosts.
 $domain, :443 {
     tls {
-        dns cloudflare {env.CF_API_TOKEN}
+        dns cloudflare {file.{\$CREDENTIALS_DIRECTORY}/CF_API_TOKEN}
     }
     network_relay {
         relay_id $domain
@@ -218,25 +221,61 @@ EOF
 }
 cr_unit_text() {
     # Adapt the repository's unit without changing the shared deployment template.
-    # EnvironmentFile is read by systemd as root, not by the service user.
+    # https://caddyserver.com/docs/running
+    # https://caddyserver.com/docs/api
+    # https://www.freedesktop.org/software/systemd/man/systemd.exec.html
+    # Preserve networking and /proc/meminfo for relay traffic and memory budgets.
+    # The CGO-disabled binary needs no external executables or writable code.
     awk -v service="$SERVICE" -v binary="$BIN" -v config="$CONFIG" \
-        -v token="$TOKEN_FILE" -v data="$DATA" -v unit="$UNIT" -v admin="$ADMIN_ADDRESS" '
+        -v token="$TOKEN_FILE" -v data="$DATA" -v unit="$UNIT" -v admin="$ADMIN_ADDRESS" \
+        -v private="${PROFILE%/*}" -v tools="$TOOLS" '
         /^# Installed by / {
             print "# Installed by install-caddy-network-relay-native-build-cloudflare-dns.sh as " unit "."
             next
         }
+        /^(ProtectSystem|PrivateTmp|AmbientCapabilities)=/ { next }
         /^User=/ { print "User=" service; next }
         /^Group=/ { print "Group=" service; next }
         /^ExecStart=/ { print "ExecStart=" binary " run --config " config " --adapter caddyfile"; next }
         /^ExecReload=/ { print "ExecReload=" binary " reload --address " admin " --config " config " --adapter caddyfile --force"; next }
         { print }
         /^\[Service\]$/ {
-            print "EnvironmentFile=" token
+            print "LoadCredential=CF_API_TOKEN:" token
             print "Environment=HOME=" data
             print "Environment=XDG_DATA_HOME=" data "/.local/share"
             print "Environment=XDG_CONFIG_HOME=" data "/.config"
             print "RuntimeDirectory=" service
-            print "RuntimeDirectoryMode=0750"
+            print "RuntimeDirectoryMode=0700"
+            print "StateDirectory=" service
+            print "StateDirectoryMode=0700"
+            print "UMask=0077"
+            print "LimitCORE=0"
+            print "NoNewPrivileges=yes"
+            print "CapabilityBoundingSet=CAP_NET_BIND_SERVICE"
+            print "AmbientCapabilities=CAP_NET_BIND_SERVICE"
+            print "ProtectSystem=strict"
+            print "ProtectHome=yes"
+            print "PrivateTmp=yes"
+            print "PrivateDevices=yes"
+            print "PrivateIPC=yes"
+            print "ProtectKernelTunables=yes"
+            print "ProtectKernelModules=yes"
+            print "ProtectKernelLogs=yes"
+            print "ProtectControlGroups=yes"
+            print "ProtectClock=yes"
+            print "ProtectHostname=yes"
+            print "ProtectProc=invisible"
+            print "RestrictNamespaces=yes"
+            print "RestrictRealtime=yes"
+            print "RestrictSUIDSGID=yes"
+            print "LockPersonality=yes"
+            print "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK"
+            print "SystemCallArchitectures=native"
+            print "MemoryDenyWriteExecute=yes"
+            print "SystemCallFilter=~@mount @reboot @swap @raw-io @debug @cpu-emulation @obsolete memfd_create"
+            print "InaccessiblePaths=-" token " -" private " -" tools " -/dev/shm"
+            print "NoExecPaths=/"
+            print "ExecPaths=" binary
         }
     ' "$REPO/deploy/caddy.service"
 }
@@ -256,6 +295,14 @@ cr_profile_args() {
 cr_account() {
     if id -u "$SERVICE" >/dev/null 2>&1; then
         [[ $(id -u "$SERVICE") != 0 && $(id -g "$SERVICE") != 0 && $(id -gn "$SERVICE") == "$SERVICE" ]] || cr_die 'Refusing a privileged or mismatched Caddy account.'
+        # systemd also inherits the account's NSS groups. A reused account must
+        # not bring access to Docker, disks or other services into this sandbox.
+        local primary_group group_id groups
+        primary_group=$(id -g "$SERVICE")
+        groups=$(id -G "$SERVICE")
+        for group_id in $groups; do
+            [[ $group_id == "$primary_group" ]] || cr_die 'The service account must not have supplementary groups.'
+        done
     else
         useradd --system --user-group --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin "$SERVICE"
     fi
@@ -281,11 +328,12 @@ cr_deploy() {
     cr_account
     install -d -o root -g "$SERVICE" -m 750 "$ETC"
     install -d -o root -g root -m 700 "${PROFILE%/*}"
-    install -d -o "$SERVICE" -g "$SERVICE" -m 750 "$DATA"
+    install -d -o "$SERVICE" -g "$SERVICE" -m 700 "$DATA"
     [[ -d ${WWW%/*} ]] || install -d -m 755 "${WWW%/*}"
     install -d -m 755 "$WWW"
     printf '<!doctype html>\n<title>Welcome</title>\n<h1>Welcome</h1>\n' | cr_new_file "$WWW/index.html" 644
-    printf 'CF_API_TOKEN=%s\n' "$cf_token" | cr_new_file "$TOKEN_FILE" 600
+    printf '%s' "$cf_token" | cr_new_file "$TOKEN_FILE" 600
+    unset cf_token
     relay_password=$(openssl rand -hex 24)
     account=$(printf '%s\n' "$relay_password" | "$work/$SERVICE" network-relay passwd --name "$device_user" --stdin --fast-hash)
     [[ $account =~ ^user[[:space:]]$device_user[[:space:]]\$[A-Za-z0-9\$=,+/._-]+$ ]] || cr_die 'Unexpected password hash output.'
@@ -295,11 +343,14 @@ cr_deploy() {
     chmod 600 "$PROFILE"
     install -m 755 "$work/$SERVICE" "$BIN"
     cr_unit_text | cr_new_file "$UNIT" 644
-    # Caddy must see the same token and storage paths during validation and runtime.
-    # The assignment is an environment binding, never a command-line argument.
-    CF_API_TOKEN=$cf_token runuser -u "$SERVICE" -- env HOME="$DATA" XDG_DATA_HOME="$DATA/.local/share" \
-        XDG_CONFIG_HOME="$DATA/.config" "$BIN" validate --config "$CONFIG" --adapter caddyfile
-    unset cf_token
+    # Validate with a copied credential, as at runtime. The root-owned source
+    # stays private; --wait preserves the validator exit status.
+    systemd-run --no-ask-password --unit="$SERVICE-validate" --collect --wait --pipe --service-type=exec \
+        --property="User=$SERVICE" --property="Group=$SERVICE" \
+        --property="LoadCredential=CF_API_TOKEN:$TOKEN_FILE" --property=UMask=0077 \
+        --setenv="HOME=$DATA" --setenv="XDG_DATA_HOME=$DATA/.local/share" \
+        --setenv="XDG_CONFIG_HOME=$DATA/.config" \
+        "$BIN" validate --config "$CONFIG" --adapter caddyfile
     {
         printf '# UDP buffer limits for Caddy network relay.\n'
         for key in net.core.rmem_max net.core.wmem_max; do
@@ -336,6 +387,11 @@ cr_deploy() {
     printf 'Rust client configuration: %s (contains the same credentials; mode 600).\n' "$CLIENT_CONFIG"
     printf 'Download it over SSH; import into Network Relay RS or use network-relay-rs --config FILE.\n'
     printf 'Caddy renews certificates automatically. Keep %s and %s.\n' "$TOKEN_FILE" "$DATA"
+    printf 'Reload through systemd: systemctl reload %s\n' "$SERVICE"
+}
+cr_token_valid() {
+    # Match the pinned plugin before it can print rejected input in an error.
+    [[ $1 =~ ^[A-Za-z0-9_-]{35,50}$ || $1 =~ ^cf(ut|at)_[A-Za-z0-9_-]{32,256}$ ]]
 }
 cr_inputs() {
     cr_ask 'Relay domain'; domain=${REPLY,,}; domain=${domain%.}
@@ -345,7 +401,7 @@ cr_inputs() {
         read -r -s -p 'CF_API_TOKEN (hidden): ' cf_token </dev/tty || cr_die 'Could not read token.'
         printf '\n'
     fi
-    [[ $cf_token =~ ^[A-Za-z0-9_-]{20,256}$ ]] || cr_die 'Expected a Cloudflare API Token.'
+    cr_token_valid "$cf_token" || cr_die 'Expected a Cloudflare API Token.'
 }
 cr_noninteractive() {
     # Only the domain/token prompts may read from the terminal. All subsequent
@@ -353,6 +409,12 @@ cr_noninteractive() {
     exec </dev/null
     export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false
     export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none
+}
+cr_require_systemd() {
+    local version
+    version=$(systemctl --version | awk 'NR == 1 { print $2 }')
+    [[ $version =~ ^[0-9]+$ ]] && (( 10#$version >= 249 )) \
+        || cr_die 'systemd 249+ is required for private credentials and service hardening.'
 }
 cr_main() {
     case ${1:-} in
@@ -367,6 +429,7 @@ cr_main() {
     local cf_token=${CF_API_TOKEN:-} jobs path free_kib
     unset CF_API_TOKEN
     export -n cf_token
+    cr_require_systemd
     umask 077
     command -v flock >/dev/null || cr_die 'flock from util-linux is required.'
     install -d -m 700 "/run/$SERVICE-install"
