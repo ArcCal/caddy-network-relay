@@ -19,6 +19,8 @@ CLIENT_CONFIG=$ETC/relay/network-relay-rs-client.toml
 BIN=/usr/local/bin/$SERVICE
 UNIT=/etc/systemd/system/$SERVICE.service
 DATA=/var/lib/$SERVICE
+RUNTIME=/run/$SERVICE
+ADMIN_ADDRESS=unix/$RUNTIME/admin.sock
 TOOLS=/opt/$SERVICE
 WWW=/var/www/$SERVICE
 SYSCTL=/etc/sysctl.d/90-caddy-network-relay-cloudflare-dns.conf
@@ -48,6 +50,7 @@ No inbound port 80 is needed; automatic HTTP redirects are disabled.
 Binary: $BIN
 Configuration and private client files: $ETC
 Service/account: $SERVICE; state/certificates: $DATA; build tools/cache: $TOOLS
+Local management socket: $ADMIN_ADDRESS
 Service logs: journalctl -u $SERVICE
 EOF
 }
@@ -197,6 +200,7 @@ cr_config_text() {
 # Managed by install-caddy-network-relay-native-build-cloudflare-dns.sh
 {
     auto_https disable_redirects
+    admin $ADMIN_ADDRESS
 }
 # Catch-all :443 is required for CONNECT requests naming destination hosts.
 $domain, :443 {
@@ -216,7 +220,7 @@ cr_unit_text() {
     # Adapt the repository's unit without changing the shared deployment template.
     # EnvironmentFile is read by systemd as root, not by the service user.
     awk -v service="$SERVICE" -v binary="$BIN" -v config="$CONFIG" \
-        -v token="$TOKEN_FILE" -v data="$DATA" -v unit="$UNIT" '
+        -v token="$TOKEN_FILE" -v data="$DATA" -v unit="$UNIT" -v admin="$ADMIN_ADDRESS" '
         /^# Installed by / {
             print "# Installed by install-caddy-network-relay-native-build-cloudflare-dns.sh as " unit "."
             next
@@ -224,13 +228,15 @@ cr_unit_text() {
         /^User=/ { print "User=" service; next }
         /^Group=/ { print "Group=" service; next }
         /^ExecStart=/ { print "ExecStart=" binary " run --config " config " --adapter caddyfile"; next }
-        /^ExecReload=/ { print "ExecReload=" binary " reload --config " config " --adapter caddyfile --force"; next }
+        /^ExecReload=/ { print "ExecReload=" binary " reload --address " admin " --config " config " --adapter caddyfile --force"; next }
         { print }
         /^\[Service\]$/ {
             print "EnvironmentFile=" token
             print "Environment=HOME=" data
             print "Environment=XDG_DATA_HOME=" data "/.local/share"
             print "Environment=XDG_CONFIG_HOME=" data "/.config"
+            print "RuntimeDirectory=" service
+            print "RuntimeDirectoryMode=0750"
         }
     ' "$REPO/deploy/caddy.service"
 }
