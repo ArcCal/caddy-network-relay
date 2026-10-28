@@ -19,6 +19,13 @@
 set +x
 set +v
 
+# Select trusted system utilities before resolving REPO or running checks. Keep
+# proxy/CA settings intact. Sourcing helpers leaves the caller's PATH untouched.
+if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
+    export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+    unset CDPATH
+fi
+
 # Keep the account, unit and installed paths separate from a general Caddy
 # installation. These defaults are intentionally fixed; they add no prompts.
 SERVICE=caddy-network-relay
@@ -66,7 +73,7 @@ Requires Debian 12+ or Ubuntu 22.04+, systemd 249+ and 5 GiB of free disk.
 Only two prompts: relay domain and hidden CF_API_TOKEN.
 Defaults: user iphone, one build job, bundled selected-domain device profile.
 Running the installer accepts the ACME CA terms. No confirmation prompt.
-Fresh installations only; existing $SERVICE files/services are refused.
+Fresh installations only; existing $SERVICE accounts, paths and units are refused.
 Caddy reads the DNS token from systemd credentials, not its environment.
 The root-only token source is $TOKEN_FILE and is retained for renewal.
 The service has a read-only host filesystem, private state/runtime directories,
@@ -117,16 +124,55 @@ cr_ask() {
     read -r -p "$prompt: " REPLY </dev/tty || cr_die 'Interactive terminal input is required.'
     REPLY=${REPLY:-$default}
 }
+# Reusing an account could expose credentials to its existing login sessions,
+# shared UID or supplementary groups. A fresh deployment needs a new identity.
+# Repeat this check immediately before useradd after the potentially long build.
+cr_require_new_account() {
+    if id -u "$SERVICE" >/dev/null 2>&1; then
+        cr_die "Existing service account: $SERVICE. Fresh installs only."
+    fi
+    if getent group "$SERVICE" >/dev/null; then
+        cr_die "Existing service group: $SERVICE. Fresh installs only."
+    fi
+}
+# A root-owned leaf is insufficient when another service can rename it through
+# a writable parent. In particular, file_server follows symlinks: replacing the
+# web root could otherwise expose files readable by the relay account. Check
+# both lexical and resolved ancestors so a symlink cannot hide an unsafe parent.
+# Refuse unsafe shared directories instead of changing their ownership or mode.
+cr_check_parent_dirs() {
+    local path=$1 parent resolved metadata owner mode
+    [[ $path == /* ]] || cr_die 'Installation paths must be absolute.'
+    parent=${path%/*}; [[ -n $parent ]] || parent=/
+    resolved=$(readlink -m -- "$parent") || cr_die "Cannot resolve parent of $path."
+    for parent in "$parent" "$resolved"; do
+        while :; do
+            if [[ -e $parent || -L $parent ]]; then
+                [[ -d $parent ]] || cr_die "Installation parent is not a directory: $parent."
+                metadata=$(stat -Lc '%u %a' -- "$parent") || cr_die "Cannot inspect installation parent: $parent."
+                read -r owner mode <<< "$metadata"
+                [[ $owner == 0 && $mode =~ ^[0-7]{3,4}$ ]] && (( (8#$mode & 0022) == 0 )) \
+                    || cr_die "Installation parent must be root-owned and not group/other writable: $parent."
+            fi
+            [[ $parent != / ]] || break
+            parent=${parent%/*}; [[ -n $parent ]] || parent=/
+        done
+    done
+}
 # Fail before installing packages or writing deployment files if a dedicated
 # path/unit already exists. Check symlinks too, including dangling symlinks.
-# Vendor and runtime unit paths are checked in addition to /etc overrides.
+# Include dedicated unit drop-ins: they could override the generated sandbox.
+# Do not reuse runtime trees or build caches owned by an earlier deployment.
 cr_fresh() {
     local path loaded
-    local paths=("$ETC" "$BIN" "$UNIT" "$DATA" "$WWW" "$SYSCTL"
-        "/lib/systemd/system/$SERVICE.service" "/usr/lib/systemd/system/$SERVICE.service" "/run/systemd/system/$SERVICE.service")
+    local paths=("$ETC" "$BIN" "$UNIT" "$DATA" "$RUNTIME" "$TOOLS" "$WWW" "$SYSCTL" "$UNIT.d"
+        "/lib/systemd/system/$SERVICE.service" "/usr/lib/systemd/system/$SERVICE.service" "/run/systemd/system/$SERVICE.service"
+        "/lib/systemd/system/$SERVICE.service.d" "/usr/lib/systemd/system/$SERVICE.service.d" "/run/systemd/system/$SERVICE.service.d")
     for path in "${paths[@]}"; do
         [[ ! -e $path && ! -L $path ]] || cr_die "Existing installation/file: $path. Fresh installs only."
+        cr_check_parent_dirs "$path"
     done
+    cr_require_new_account
     loaded=$(systemctl show "$SERVICE" --property=LoadState --value) || cr_die 'Cannot inspect systemd.'
     [[ -z $loaded || $loaded == not-found ]] || cr_die "An existing $SERVICE unit is loaded."
     # Inspect kernel socket tables without depending on tools not yet installed.
@@ -146,9 +192,11 @@ cr_fresh() {
     fi
 }
 # Downloads and redirects must remain HTTPS with normal certificate checking.
+# Ignore .curlrc so local defaults cannot disable TLS verification or add requests.
+# --disable must be curl's first argument, including for the readiness request.
 # Retry transient failures, but bound connection setup and each transfer attempt.
 cr_download() {
-    curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --show-error --location \
+    curl --disable --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --show-error --location \
         --retry 3 --connect-timeout 20 --max-time 900 --output "$2" "$1"
 }
 # Validate the metadata format before comparing the downloaded file's SHA-256.
@@ -170,16 +218,26 @@ cr_new_file() {
     chmod "$mode" "$path"
     chown root:"$group" "$path"
 }
-# Capture the original exit status for the final diagnostic and exit command.
-# Stopping the service is best-effort; scratch removal can itself fail.
+# Preserve the first failure status even when stopping or scratch removal fails.
+# A cleanup error after otherwise successful deployment returns failure too.
 # This does not roll back installed packages or remove diagnostic partial files.
 # A later protocol-check failure leaves an already ready service running; only
 # startup_pending authorizes stopping/disabling this newly installed service.
 cr_cleanup() {
     local status=$?
     trap - EXIT
-    if (( startup_pending )); then systemctl disable --now "$SERVICE" >/dev/null 2>&1 || true; fi
-    [[ -z $work ]] || rm -rf -- "$work"
+    if (( startup_pending )); then
+        if ! systemctl disable --now "$SERVICE" >/dev/null 2>&1; then
+            printf 'Warning: could not stop/disable %s; inspect its state manually.\n' "$SERVICE" >&2
+            if (( status == 0 )); then status=1; fi
+        fi
+    fi
+    if [[ -n $work ]]; then
+        if ! rm -rf -- "$work"; then
+            printf 'Warning: could not remove private build directory %s.\n' "$work" >&2
+            if (( status == 0 )); then status=1; fi
+        fi
+    fi
     if (( status )); then
         printf 'Deployment incomplete (exit %s). No existing installation was replaced.\n' "$status" >&2
         printf 'Packages, certificates and partial files may remain. Inspect the last completed step before retrying.\n' >&2
@@ -215,15 +273,20 @@ cr_build() {
     cr_verify "$work/go.tar.gz" "$expected"
     tar --no-same-owner -C "$work" -xzf "$work/go.tar.gz"
     # Pin the same reviewed DNS plugin release and commit as the repository builder.
-    GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$PLUGIN_TAG" --single-branch \
+    # No inherited checkout hook or template may run before commit verification.
+    GIT_TERMINAL_PROMPT=0 git -c core.hooksPath=/dev/null clone --template= --depth 1 --branch "$PLUGIN_TAG" --single-branch \
         https://github.com/caddy-dns/cloudflare.git "$work/cloudflare-src"
     [[ $(git -C "$work/cloudflare-src" rev-parse --verify HEAD) == "$PLUGIN_COMMIT" ]] || cr_die 'Cloudflare plugin commit does not match the reviewed release.'
     [[ -f $work/cloudflare-src/go.mod ]] || cr_die 'Incomplete Cloudflare plugin source.'
     # Ignore inherited Go configuration/workspaces and forbid automatic toolchain
     # switching. Disable CGO for a self-contained binary; choose baseline CPU
     # features so it does not accidentally require the build host's extensions.
-    unset GOOS GOARCH GOFLAGS GOWORK GOROOT GOENV
+    # These public modules need no inherited auth/cache executables or checksum
+    # exemptions. Pin HTTPS module sources and keep checksum verification on.
+    unset GOOS GOARCH GOFLAGS GOWORK GOROOT GOENV GOEXPERIMENT GOFIPS140
+    unset GOCACHEPROG GOINSECURE GONOSUMDB GOPRIVATE GONOPROXY
     export GOTOOLCHAIN=local GOWORK=off GOENV=off GOFLAGS='' GOOS=linux GOARCH=$arch CGO_ENABLED=0
+    export GO111MODULE=on GOAUTH=off GOPROXY=https://proxy.golang.org,direct GOSUMDB=sum.golang.org
     export GOAMD64=v1 GOARM64=v8.0 GOPATH=$TOOLS/gopath GOCACHE=$TOOLS/gocache
     local go=$work/go/bin/go mod=$work/source/cloudflare-build.mod
     "$go" version
@@ -301,6 +364,7 @@ EOF
 #
 # - LoadCredential copies the root-only token for this service before applying
 #   its filesystem restrictions. Hide the original source, not /run/credentials.
+#   Remove any raw token inherited through the manager's environment as well.
 # - StateDirectory and RuntimeDirectory provide private writable exceptions to
 #   ProtectSystem=strict. Certificate/ACME state survives service restarts.
 #   PrivateTmp also provides writable temporary storage inside the sandbox.
@@ -339,6 +403,7 @@ cr_unit_text() {
         { print }
         /^\[Service\]$/ {
             print "LoadCredential=CF_API_TOKEN:" token
+            print "UnsetEnvironment=CF_API_TOKEN"
             print "Environment=HOME=" data
             print "Environment=XDG_DATA_HOME=" data "/.local/share"
             print "Environment=XDG_CONFIG_HOME=" data "/.config"
@@ -394,22 +459,18 @@ cr_profile_args() {
     fi
 }
 # The installer needs root to deploy; the long-running service does not. Create
-# a system account without a login shell, or verify that an existing same-name
-# account is non-root, has the expected primary group and no extra groups.
+# a new system account without a login shell. Never adopt an existing identity.
+# Check the newly created account's actual NSS groups before granting file access.
 cr_account() {
-    if id -u "$SERVICE" >/dev/null 2>&1; then
-        [[ $(id -u "$SERVICE") != 0 && $(id -g "$SERVICE") != 0 && $(id -gn "$SERVICE") == "$SERVICE" ]] || cr_die 'Refusing a privileged or mismatched Caddy account.'
-        # systemd also inherits the account's NSS groups. A reused account must
-        # not bring access to Docker, disks or other services into this sandbox.
-        local primary_group group_id groups
-        primary_group=$(id -g "$SERVICE")
-        groups=$(id -G "$SERVICE")
-        for group_id in $groups; do
-            [[ $group_id == "$primary_group" ]] || cr_die 'The service account must not have supplementary groups.'
-        done
-    else
-        useradd --system --user-group --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin "$SERVICE"
-    fi
+    cr_require_new_account
+    useradd --system --user-group --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin "$SERVICE"
+    [[ $(id -u "$SERVICE") != 0 && $(id -g "$SERVICE") != 0 && $(id -gn "$SERVICE") == "$SERVICE" ]] || cr_die 'Refusing a privileged or mismatched Caddy account.'
+    local primary_group group_id groups
+    primary_group=$(id -g "$SERVICE")
+    groups=$(id -G "$SERVICE")
+    for group_id in $groups; do
+        [[ $group_id == "$primary_group" ]] || cr_die 'The service account must not have supplementary groups.'
+    done
 }
 # Export the same domain/user/password used by the server and Apple profile.
 # This TOML supports the Rust GUI importer and headless client. SOCKS listens
@@ -456,7 +517,11 @@ cr_generate_password() {
 # token are never served by the public web root. The service can read Caddyfile
 # but cannot change it; its state directory is writable for ACME renewal.
 cr_deploy() {
-    local relay_password account key current response ready=0 attempt
+    local relay_password account key current response ready=0 attempt path
+    # Recheck shared ancestors after the build, before creating deployment files.
+    for path in "$ETC" "$BIN" "$UNIT" "$DATA" "$RUNTIME" "$WWW" "$SYSCTL" "$TOOLS"; do
+        cr_check_parent_dirs "$path"
+    done
     cr_account
     install -d -o root -g "$SERVICE" -m 750 "$ETC"
     install -d -o root -g root -m 700 "${PROFILE%/*}"
@@ -517,7 +582,7 @@ cr_deploy() {
     # This proves local HTTPS readiness, not public DNS or external reachability.
     for ((attempt=0; attempt<60; attempt++)); do
         systemctl is-active --quiet "$SERVICE" || cr_die "$SERVICE stopped during certificate issuance; inspect journalctl -u $SERVICE."
-        if response=$(curl --noproxy '*' --fail --silent --show-error --max-time 3 \
+        if response=$(curl --disable --noproxy '*' --fail --silent --show-error --max-time 3 \
             --resolve "$domain:443:127.0.0.1" "https://$domain/" 2>/dev/null); then
             if [[ $response == *'<h1>Welcome</h1>'* ]]; then ready=1; break; fi
         fi
