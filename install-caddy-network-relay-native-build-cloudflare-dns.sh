@@ -4,30 +4,54 @@
 # Keep Cloudflare DNS records DNS-only and allow inbound TCP/UDP 443.
 # Token: Zone:DNS:Edit + Zone:Zone:Read, scoped to the relay's zone.
 # No Certbot: Caddy obtains and renews certificates using its DNS plugin.
+#
+# Run this file from a complete checkout on the target server. It performs:
+#   1. Read-only platform, installation and port checks, then two input prompts.
+#   2. Noninteractive package installation and a verified native Go build.
+#   3. Dedicated account, private credentials, configuration and unit creation.
+#   4. Configuration validation, certificate readiness and relay self-checks.
+#   5. Export of the Rust client configuration with the same relay credentials.
+# The Apple profile is created before startup so its password is recoverable if
+# later checks fail. This is a fresh installer, not an upgrade or repair tool.
+#
+# Tracing must be disabled before reading secrets, including when invoked with
+# bash -x or bash -v. Neither tokens nor generated passwords belong in logs.
 set +x
 set +v
 
+# Keep the account, unit and installed paths separate from a general Caddy
+# installation. These defaults are intentionally fixed; they add no prompts.
 SERVICE=caddy-network-relay
+# Check both the release label and its commit: a moved tag must not silently
+# change which DNS provider source is incorporated into the binary.
 PLUGIN_TAG=v0.2.4
 PLUGIN_COMMIT=a8737d095ad5a48ca031cea6ab704057dbc2d250
+# Resolve relative to this script, not the caller's working directory.
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 ETC=/etc/$SERVICE
 CONFIG=$ETC/Caddyfile
 TOKEN_FILE=$ETC/cloudflare.token
+# Client exports contain the plaintext relay password and remain root-only.
 PROFILE=$ETC/relay/device.mobileconfig
 CLIENT_CONFIG=$ETC/relay/network-relay-rs-client.toml
 BIN=/usr/local/bin/$SERVICE
 UNIT=/etc/systemd/system/$SERVICE.service
+# DATA survives restarts for ACME accounts/certificates; RUNTIME is temporary
+# and holds the local management socket. Build caches live outside both.
 DATA=/var/lib/$SERVICE
 RUNTIME=/run/$SERVICE
 ADMIN_ADDRESS=unix/$RUNTIME/admin.sock
 TOOLS=/opt/$SERVICE
 WWW=/var/www/$SERVICE
 SYSCTL=/etc/sysctl.d/90-caddy-network-relay-cloudflare-dns.conf
+# The EXIT trap removes only this run's scratch directory. startup_pending
+# marks the interval in which a failed start/readiness check stops the service.
 work=
 startup_pending=0
 
+# Diagnostics must describe the failed step without embedding secret values.
 cr_die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+# --help describes prerequisites and outputs without installing anything.
 cr_usage() {
     cat <<EOF
 Usage: sudo bash ${0##*/}
@@ -56,6 +80,9 @@ Local management socket: $ADMIN_ADDRESS
 Service logs: journalctl -u $SERVICE
 EOF
 }
+# Detect the host rather than cross-compiling. The Go build and downloaded
+# toolchain use arch; triple records the corresponding native GNU target.
+# Only the package-manager/systemd combinations supported here are accepted.
 cr_host() {
     [[ $(uname -s) == Linux ]] || cr_die 'Run this on the Linux server.'
     case $(uname -m) in
@@ -76,16 +103,23 @@ cr_host() {
         *) cr_die 'Only Debian 12+ and Ubuntu 22.04+ are supported.' ;;
     esac
 }
+# Accept a bare ASCII DNS hostname, not a URL, IP address or wildcard. Inputs
+# are lowercased first. This also excludes Caddyfile/TOML injection characters.
 cr_domain() {
     local value=$1
     (( ${#value} <= 253 )) && [[ $value =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z]{2,63}$ ]]
 }
+# Read deliberately from the controlling terminal. Later subprocesses receive
+# EOF on stdin, so only this helper and the hidden token read are interactive.
 cr_ask() {
     local prompt=$1 default=${2:-}
     if [[ -n $default ]]; then prompt+=" [$default]"; fi
     read -r -p "$prompt: " REPLY </dev/tty || cr_die 'Interactive terminal input is required.'
     REPLY=${REPLY:-$default}
 }
+# Fail before installing packages or writing deployment files if a dedicated
+# path/unit already exists. Check symlinks too, including dangling symlinks.
+# Vendor and runtime unit paths are checked in addition to /etc overrides.
 cr_fresh() {
     local path loaded
     local paths=("$ETC" "$BIN" "$UNIT" "$DATA" "$WWW" "$SYSCTL"
@@ -95,28 +129,39 @@ cr_fresh() {
     done
     loaded=$(systemctl show "$SERVICE" --property=LoadState --value) || cr_die 'Cannot inspect systemd.'
     [[ -z $loaded || $loaded == not-found ]] || cr_die "An existing $SERVICE unit is loaded."
+    # Inspect kernel socket tables without depending on tools not yet installed.
+    # 01BB is hexadecimal 443; 0A is TCP LISTEN. Any UDP binding on 443 conflicts
+    # with the relay's QUIC listener. Inspect IPv6 tables when available, too.
     local sockets=(/proc/net/tcp /proc/net/udp) file
     for file in /proc/net/tcp6 /proc/net/udp6; do [[ ! -r $file ]] || sockets+=("$file"); done
     for file in "${sockets[@]}"; do
         [[ -r $file ]] || cr_die "Cannot inspect listening sockets: $file is unreadable."
     done
     local port_state
+    # An inspection error is not evidence that a port is free: fail closed.
     port_state=$(awk 'FNR > 1 && $2 ~ /:01BB$/ && (FILENAME ~ /udp/ || $4 == "0A") {busy=1} END {print busy+0}' "${sockets[@]}") \
         || cr_die 'Cannot inspect listening sockets; port availability is unknown.'
     if [[ $port_state != 0 ]]; then
         cr_die 'TCP or UDP 443 is busy. Stop the conflicting service yourself.'
     fi
 }
+# Downloads and redirects must remain HTTPS with normal certificate checking.
+# Retry transient failures, but bound connection setup and each transfer attempt.
 cr_download() {
     curl --proto '=https' --proto-redir '=https' --tlsv1.2 --fail --show-error --location \
         --retry 3 --connect-timeout 20 --max-time 900 --output "$2" "$1"
 }
+# Validate the metadata format before comparing the downloaded file's SHA-256.
+# A checksum mismatch stops execution before extraction or use of the artifact.
 cr_verify() {
     local actual
     [[ $2 =~ ^[a-f0-9]{64}$ ]] || cr_die 'Invalid checksum metadata.'
     actual=$(sha256sum -- "$1"); actual=${actual%% *}
     [[ $actual == "$2" ]] || cr_die 'Download checksum mismatch; refusing to use the artifact.'
 }
+# Consume file contents from stdin, create exclusively under a private umask,
+# then grant only the requested access. Parent directories must already exist.
+# Service-readable configuration uses its group; secret exports stay root-only.
 cr_new_file() {
     local path=$1 mode=$2 group=${3:-root}
     [[ ! -e $path && ! -L $path ]] || cr_die "Refusing to replace $path."
@@ -125,6 +170,11 @@ cr_new_file() {
     chmod "$mode" "$path"
     chown root:"$group" "$path"
 }
+# Capture the original exit status for the final diagnostic and exit command.
+# Stopping the service is best-effort; scratch removal can itself fail.
+# This does not roll back installed packages or remove diagnostic partial files.
+# A later protocol-check failure leaves an already ready service running; only
+# startup_pending authorizes stopping/disabling this newly installed service.
 cr_cleanup() {
     local status=$?
     trap - EXIT
@@ -137,6 +187,8 @@ cr_cleanup() {
     fi
     exit "$status"
 }
+# Inspect adjacent module/replacement records in `go version -m` output. Merely
+# finding a module name is insufficient: the binary must use its patched source.
 cr_check_replacement() {
     local info=$1 module=$2 replacement=$3
     awk -F '\t' -v module="$module" -v replacement="$replacement" '
@@ -145,11 +197,15 @@ cr_check_replacement() {
         END { exit !found }
     ' <<< "$info"
 }
+# Build in a disposable source snapshot. Never edit the checkout's module files
+# or transport forks while adding the pinned Cloudflare provider to the build.
 cr_build() {
     local jobs=$1 version expected modules info module
     mkdir "$work/source"
     tar -C "$REPO" --exclude=.git --exclude=target --exclude=__pycache__ --exclude=.venv \
         --exclude='relay-servers-*' -cf - . | tar -C "$work/source" -xf -
+    # Use the repository's exact Go release and the official archive metadata.
+    # Require one archive matching both the release and native Linux architecture.
     version=$(sed -n 's/^toolchain \(go[0-9][0-9.]*\)$/\1/p' "$work/source/go.mod")
     [[ $version =~ ^go[0-9]+[.][0-9]+[.][0-9]+$ ]] || cr_die 'go.mod must pin a release Go toolchain.'
     cr_download 'https://go.dev/dl/?mode=json&include=all' "$work/go-releases.json"
@@ -163,6 +219,9 @@ cr_build() {
         https://github.com/caddy-dns/cloudflare.git "$work/cloudflare-src"
     [[ $(git -C "$work/cloudflare-src" rev-parse --verify HEAD) == "$PLUGIN_COMMIT" ]] || cr_die 'Cloudflare plugin commit does not match the reviewed release.'
     [[ -f $work/cloudflare-src/go.mod ]] || cr_die 'Incomplete Cloudflare plugin source.'
+    # Ignore inherited Go configuration/workspaces and forbid automatic toolchain
+    # switching. Disable CGO for a self-contained binary; choose baseline CPU
+    # features so it does not accidentally require the build host's extensions.
     unset GOOS GOARCH GOFLAGS GOWORK GOROOT GOENV
     export GOTOOLCHAIN=local GOWORK=off GOENV=off GOFLAGS='' GOOS=linux GOARCH=$arch CGO_ENABLED=0
     export GOAMD64=v1 GOARM64=v8.0 GOPATH=$TOOLS/gopath GOCACHE=$TOOLS/gocache
@@ -177,14 +236,22 @@ cr_build() {
     printf 'package main\n\nimport _ "github.com/caddy-dns/cloudflare"\n' > "$work/source/cmd/caddy/cloudflare_dns_build.go"
     (
         cd "$work/source"
+        # A local replacement binds the provider import to the verified checkout.
+        # Alternate module files isolate dependency resolution from go.mod/go.sum.
         "$go" mod edit -modfile "$mod" -replace github.com/caddy-dns/cloudflare=../cloudflare-src
         "$go" get -modfile "$mod" github.com/caddy-dns/cloudflare@"$PLUGIN_TAG"
+        # Preserve the project's patched HTTP/2 and QUIC transports. Upstream
+        # substitutions could compile successfully while changing relay behavior.
         "$go" mod edit -modfile "$mod" -json | jq -e '
             any(.Replace[]; .Old.Path == "golang.org/x/net" and .New.Path == "./third_party/x-net") and
             any(.Replace[]; .Old.Path == "github.com/quic-go/quic-go" and .New.Path == "./third_party/quic-go") and
             any(.Replace[]; .Old.Path == "github.com/caddy-dns/cloudflare" and .New.Path == "../cloudflare-src")' >/dev/null
+        # Dependency resolution is complete: building may no longer edit it.
+        # Keep the repository's compatibility tag and limit build parallelism.
         "$go" build -modfile "$mod" -mod=readonly -tags http2legacy -trimpath -p "$jobs" -o "$work/$SERVICE" ./cmd/caddy
     )
+    # Check the resulting executable, not just the requested build options:
+    # required Caddy modules, source replacements, architecture and CGO status.
     modules=$("$work/$SERVICE" list-modules)
     for module in network_relay http.handlers.network_relay dns.providers.cloudflare; do
         grep -Fxq "$module" <<< "$modules" || cr_die "Built Caddy is missing $module."
@@ -197,6 +264,15 @@ cr_build() {
     grep -Eq '^[[:space:]]*build[[:space:]]+CGO_ENABLED=0$' <<< "$info" || cr_die 'Binary unexpectedly requires CGO.'
     "$work/$SERVICE" version
 }
+# Emit only configuration text; the caller supplies the validated domain/hash
+# and writes it with service-readable, root-owned permissions. DNS-01 needs no
+# port 80 listener, and disabling persistence avoids autosaved admin-API configs.
+# The catch-all site is necessary because CONNECT's authority names the target,
+# while the TLS SNI and certificate name identify this relay's domain.
+#
+# Escape the dollar sign in the heredoc: Caddy, not this shell, expands the
+# CREDENTIALS_DIRECTORY environment placeholder. The provider then resolves the
+# file placeholder to the systemd-delivered token. The token is not in this text.
 cr_config_text() {
     cat <<EOF
 # Managed by install-caddy-network-relay-native-build-cloudflare-dns.sh
@@ -219,6 +295,28 @@ $domain, :443 {
 }
 EOF
 }
+# Generate a dedicated unit from the shared template without editing that file.
+# Keep its notification type, descriptor limit and transport environment while
+# replacing its generic Caddy paths/account and adding the following sandbox:
+#
+# - LoadCredential copies the root-only token for this service before applying
+#   its filesystem restrictions. Hide the original source, not /run/credentials.
+# - StateDirectory and RuntimeDirectory provide private writable exceptions to
+#   ProtectSystem=strict. Certificate/ACME state survives service restarts.
+#   PrivateTmp also provides writable temporary storage inside the sandbox.
+# - Run as the dedicated user with only CAP_NET_BIND_SERVICE for TCP/UDP 443.
+#   NoNewPrivileges blocks privilege gains through later executable launches.
+# - Isolate temporary files, devices and IPC; protect host/kernel control paths,
+#   hide other users' processes and restrict namespace and identity changes.
+# - Keep Internet/Unix sockets and AF_NETLINK for actual relay networking. Do not
+#   hide /proc/meminfo: the application uses it for its memory-budget defaults.
+# - Deny selected dangerous syscall groups without a broad allowlist that could
+#   break Go networking. Native syscall architecture excludes alternate ABIs.
+# - The CGO-disabled Go binary needs no JIT or external helpers. Restrict both
+#   writable executable mappings and executable paths; hide build tools, client
+#   exports and the raw token source from the runtime filesystem view.
+# These limits reduce access after a compromise; the process still needs its
+# delivered DNS credential and TLS keys to issue and renew certificates.
 cr_unit_text() {
     # Adapt the repository's unit without changing the shared deployment template.
     # https://caddyserver.com/docs/running
@@ -279,6 +377,9 @@ cr_unit_text() {
         }
     ' "$REPO/deploy/caddy.service"
 }
+# Build an argument array so bundled paths and domain values remain individual
+# arguments. Exclude the relay's own domain to avoid routing it back to itself.
+# The Apple profile uses bundled selected-domain rules, not a new user prompt.
 cr_profile_args() {
     profile_args=(network-relay profile --host "$domain" --user "$device_user" --password-stdin
         --exclude-domain "$domain" --ui-toggle-enabled true --out "$PROFILE")
@@ -292,6 +393,9 @@ cr_profile_args() {
         done
     fi
 }
+# The installer needs root to deploy; the long-running service does not. Create
+# a system account without a login shell, or verify that an existing same-name
+# account is non-root, has the expected primary group and no extra groups.
 cr_account() {
     if id -u "$SERVICE" >/dev/null 2>&1; then
         [[ $(id -u "$SERVICE") != 0 && $(id -g "$SERVICE") != 0 && $(id -gn "$SERVICE") == "$SERVICE" ]] || cr_die 'Refusing a privileged or mismatched Caddy account.'
@@ -307,6 +411,12 @@ cr_account() {
         useradd --system --user-group --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin "$SERVICE"
     fi
 }
+# Export the same domain/user/password used by the server and Apple profile.
+# This TOML supports the Rust GUI importer and headless client. SOCKS listens
+# on loopback only, so importing it does not expose an unauthenticated LAN proxy.
+# It does not import the Apple profile's selected-domain rules; applications
+# choose which connections to send through this local SOCKS listener.
+# The caller creates the file only after protocol checks pass, with mode 0600.
 cr_client_config_text() {
     # Validated domain/user and the base64 password alphabet are TOML-safe.
     cat <<EOF
@@ -322,6 +432,12 @@ mode = "socks"
 listen = ["127.0.0.1:1080"]
 EOF
 }
+# Generate exactly 22 ASCII characters using OpenSSL's cryptographic RNG. The
+# alphabet is safe in Basic authentication, XML and a quoted TOML string, with
+# no quotes, backslashes, whitespace or colon requiring separate escaping.
+# Reject incomplete/malformed RNG output and propagate OpenSSL failures. Check
+# character classes after truncation; a symbol in the discarded suffix does not
+# count. Resampling avoids a predictable mandatory prefix or suffix.
 cr_generate_password() {
     local candidate
     while :; do
@@ -336,6 +452,9 @@ cr_generate_password() {
         fi
     done
 }
+# Deploy only the candidate produced by cr_build. Private exports and the DNS
+# token are never served by the public web root. The service can read Caddyfile
+# but cannot change it; its state directory is writable for ACME renewal.
 cr_deploy() {
     local relay_password account key current response ready=0 attempt
     cr_account
@@ -346,25 +465,37 @@ cr_deploy() {
     install -d -m 755 "$WWW"
     printf '<!doctype html>\n<title>Welcome</title>\n<h1>Welcome</h1>\n' | cr_new_file "$WWW/index.html" 644
     printf '%s' "$cf_token" | cr_new_file "$TOKEN_FILE" 600
+    # Keep the renewal source on disk; remove the shell copy after writing it.
     unset cf_token
     relay_password=$(cr_generate_password)
     # The fast hash requires 24+ characters; use the supported Argon2id mode.
+    # Feed plaintext over stdin, never command-line arguments. Capture only the
+    # validated hash line; retain plaintext for exports and protocol self-checks.
     account=$(printf '%s\n' "$relay_password" | "$work/$SERVICE" network-relay passwd --name "$device_user" --stdin)
     [[ $account =~ ^user[[:space:]]$device_user[[:space:]]\$[A-Za-z0-9\$=,+/._-]+$ ]] || cr_die 'Unexpected password hash output.'
     cr_config_text | cr_new_file "$CONFIG" 640 "$SERVICE"
     cr_profile_args
+    # Create the Apple profile before startup. If a later check fails, this
+    # root-only file still holds the generated account's usable credentials.
     printf '%s\n' "$relay_password" | "$work/$SERVICE" "${profile_args[@]}"
     chmod 600 "$PROFILE"
     install -m 755 "$work/$SERVICE" "$BIN"
     cr_unit_text | cr_new_file "$UNIT" 644
     # Validate with a copied credential, as at runtime. The root-owned source
     # stays private; --wait preserves the validator exit status.
+    # This transient unit checks provisioning as the service user; it does not
+    # reproduce every restriction of the installed unit or perform ACME issuance.
     systemd-run --no-ask-password --unit="$SERVICE-validate" --collect --wait --pipe --service-type=exec \
         --property="User=$SERVICE" --property="Group=$SERVICE" \
         --property="LoadCredential=CF_API_TOKEN:$TOKEN_FILE" --property=UMask=0077 \
         --setenv="HOME=$DATA" --setenv="XDG_DATA_HOME=$DATA/.local/share" \
         --setenv="XDG_CONFIG_HOME=$DATA/.config" \
         "$BIN" validate --config "$CONFIG" --adapter caddyfile
+    # Raise the socket-buffer ceilings used by QUIC/UDP, preserving larger
+    # existing values. These are host-wide ceilings, not per-socket allocations
+    # or firewall rules. A restricted container may deny sysctl; warn and continue
+    # with its existing limits rather than claiming the tuning took effect. The
+    # persistent file remains even on denial and may take effect after a reboot.
     {
         printf '# UDP buffer limits for Caddy network relay.\n'
         for key in net.core.rmem_max net.core.wmem_max; do
@@ -375,10 +506,15 @@ cr_deploy() {
         done
     } | cr_new_file "$SYSCTL" 644
     sysctl -p "$SYSCTL" || printf 'Warning: UDP buffer tuning was denied; using system defaults.\n'
+    # From this point until trusted HTTPS succeeds, the EXIT trap stops and
+    # disables the candidate on failure. No previously installed unit is replaced.
     systemctl daemon-reload
     startup_pending=1
     systemctl enable --now "$SERVICE"
     printf 'Waiting for DNS challenge and trusted HTTPS (up to about eight minutes)...\n'
+    # DNS-01 issuance is asynchronous. Connect directly to the local listener,
+    # preserving the real hostname for SNI and normal certificate verification.
+    # This proves local HTTPS readiness, not public DNS or external reachability.
     for ((attempt=0; attempt<60; attempt++)); do
         systemctl is-active --quiet "$SERVICE" || cr_die "$SERVICE stopped during certificate issuance; inspect journalctl -u $SERVICE."
         if response=$(curl --noproxy '*' --fail --silent --show-error --max-time 3 \
@@ -388,12 +524,15 @@ cr_deploy() {
         sleep 5
     done
     (( ready )) || cr_die "Certificate/HTTPS readiness failed. Check Cloudflare permissions, DNS propagation and journalctl -u $SERVICE. The new service will be stopped."
+    # Later self-check errors may be caused by outbound network policy. Keep the
+    # HTTPS-ready service available for diagnosis instead of removing its files.
     startup_pending=0
     printf 'Trusted local HTTPS works. Protected device profile: %s\n' "$PROFILE"
     if ! printf '%s\n' "$relay_password" | "$BIN" network-relay check --server "$domain" --address 127.0.0.1 \
         --user "$device_user" --password-stdin; then
         cr_die "$SERVICE remains running, but protocol checks failed. Check outbound TCP 80/UDP 53 and journalctl -u $SERVICE. Do not rerun this fresh installer."
     fi
+    # Publish the Rust export only after the built-in relay protocol checks pass.
     cr_client_config_text | cr_new_file "$CLIENT_CONFIG" 600
     unset relay_password
     printf 'All built-in TCP/UDP checks passed. Verify external access on a real device.\n'
@@ -403,10 +542,16 @@ cr_deploy() {
     printf 'Caddy renews certificates automatically. Keep %s and %s.\n' "$TOKEN_FILE" "$DATA"
     printf 'Reload through systemd: systemctl reload %s\n' "$SERVICE"
 }
+# Token syntax must match the pinned provider. Some provider errors include the
+# rejected input, so reject malformed tokens here with a value-free diagnostic.
+# Valid syntax does not prove that the token has access to the requested zone.
 cr_token_valid() {
     # Match the pinned plugin before it can print rejected input in an error.
     [[ $1 =~ ^[A-Za-z0-9_-]{35,50}$ || $1 =~ ^cf(ut|at)_[A-Za-z0-9_-]{32,256}$ ]]
 }
+# These are the only interactive inputs. An inherited CF_API_TOKEN may supply
+# the token without prompting; otherwise read it silently from the terminal.
+# Normalize hostname case and a trailing DNS dot before validating it.
 cr_inputs() {
     cr_ask 'Relay domain'; domain=${REPLY,,}; domain=${domain%.}
     cr_domain "$domain" || cr_die 'Invalid DNS hostname; omit scheme, port and wildcard.'
@@ -417,6 +562,7 @@ cr_inputs() {
     fi
     cr_token_valid "$cf_token" || cr_die 'Expected a Cloudflare API Token.'
 }
+# Prevent apt, Git or later helpers from adding questions after the two inputs.
 cr_noninteractive() {
     # Only the domain/token prompts may read from the terminal. All subsequent
     # commands get EOF unless explicitly fed a generated secret through a pipe.
@@ -424,12 +570,16 @@ cr_noninteractive() {
     export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false
     export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none
 }
+# systemd 249 is this installer's minimum supported version (Ubuntu 22.04's
+# baseline). Check the actual manager tool version rather than the OS label.
 cr_require_systemd() {
     local version
     version=$(systemctl --version | awk 'NR == 1 { print $2 }')
     [[ $version =~ ^[0-9]+$ ]] && (( 10#$version >= 249 )) \
         || cr_die 'systemd 249+ is required for private credentials and service hardening.'
 }
+# Sequence matters: reject unsupported/conflicting installations before taking
+# input or installing packages, and complete the build before writing the unit.
 cr_main() {
     case ${1:-} in
         -h|--help) cr_usage; return ;;
@@ -440,35 +590,47 @@ cr_main() {
     esac
     cr_host
     [[ $EUID == 0 && -d /run/systemd/system ]] || cr_die 'Run as root on a server booted with systemd.'
+    # Remove the exported token name before subsequent deployment commands. The
+    # dynamically scoped shell-local copy is available to cr_inputs/cr_deploy,
+    # not their environment.
     local cf_token=${CF_API_TOKEN:-} jobs path free_kib
     unset CF_API_TOKEN
     export -n cf_token
     cr_require_systemd
     umask 077
     command -v flock >/dev/null || cr_die 'flock from util-linux is required.'
+    # Serialize installers before inspecting shared paths. The lock descriptor
+    # remains open until process exit; its private directory persists harmlessly.
     install -d -m 700 "/run/$SERVICE-install"
     exec {install_lock}>"/run/$SERVICE-install/lock"
     flock -n "$install_lock" || cr_die 'Another installer is running.'
     cr_fresh
     cr_inputs
     cr_noninteractive
+    # Fixed choices satisfy the two-input contract and bound build parallelism.
     device_user=iphone
     scope=selected
     jobs=1
     printf 'Defaults: user iphone, one build job, bundled selected-domain profile.\n'
     printf 'Set DNS-only A/AAAA records to this server; open TCP/UDP 443 in the provider firewall.\n'
     printf 'Installing Caddy with Cloudflare DNS-01 and automatic certificate renewal.\n'
+    # The local patched transports, command entry point, unit and domain lists
+    # are mandatory. This installer cannot work as a standalone downloaded file.
     local required=(go.mod go.sum cmd/caddy/main.go third_party/quic-go/go.mod third_party/x-net/go.mod
         deploy/caddy.service deploy/domains/google-ai-social.txt deploy/domains/global-services.txt)
     for path in "${required[@]}"; do [[ -f $REPO/$path ]] || cr_die "Complete checkout required; missing $path."; done
     free_kib=$(df -Pk /opt | awk 'NR==2 {print $4}')
     [[ $free_kib =~ ^[0-9]+$ ]] && (( free_kib >= 5*1024*1024 )) || cr_die 'At least 5 GiB free under /opt is required.'
+    # Bound apt lock waits, retry downloads and retain existing local conffiles.
+    # Install only build/deployment prerequisites; no firewall package is added.
     local apt=(apt-get -o DPkg::Lock::Timeout=1800 -o Acquire::Retries=3
         -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none "${apt[@]}" update
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none "${apt[@]}" install -y --no-install-recommends ca-certificates curl git jq openssl iproute2
     install -d -m 700 "$TOOLS"
     work=$(mktemp -d "$TOOLS/build.XXXXXXXX")
+    # Install traps only after this run owns a unique scratch directory. Signal
+    # exits retain their conventional codes and pass through the same cleanup.
     trap cr_cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
@@ -477,6 +639,9 @@ cr_main() {
 }
 
 # Sourcing exposes helpers for isolated tests without installing anything.
+# Executing directly enables strict error/undefined-variable/pipeline handling.
+# Clear CDPATH for later directory changes; C locale stabilizes parsing and the
+# ASCII character-class checks used for domains, passwords and metadata.
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then
     set -Eeuo pipefail
     unset CDPATH
