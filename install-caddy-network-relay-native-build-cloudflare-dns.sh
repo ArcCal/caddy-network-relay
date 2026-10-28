@@ -308,8 +308,7 @@ cr_account() {
     fi
 }
 cr_client_config_text() {
-    # Domain/user were validated and the generated password is hexadecimal,
-    # so these strings need no additional TOML escaping.
+    # Validated domain/user and the base64 password alphabet are TOML-safe.
     cat <<EOF
 # Network Relay RS client configuration. Contains a password: keep private.
 # Import into Network Relay RS, or run network-relay-rs --config FILE.
@@ -323,6 +322,19 @@ mode = "socks"
 listen = ["127.0.0.1:1080"]
 EOF
 }
+cr_generate_password() {
+    local candidate
+    while :; do
+        # 36 random bytes produce 48 base64 characters without padding. Resample
+        # until all four classes occur; never add a predictable prefix/suffix.
+        candidate=$(openssl rand -base64 36) || return
+        [[ $candidate =~ ^[A-Za-z0-9+/]{48}$ ]] || cr_die 'OpenSSL returned invalid password material.'
+        if [[ $candidate =~ [A-Z] && $candidate =~ [a-z] && $candidate =~ [0-9] && $candidate =~ [+/] ]]; then
+            printf '%s\n' "$candidate"
+            return
+        fi
+    done
+}
 cr_deploy() {
     local relay_password account key current response ready=0 attempt
     cr_account
@@ -334,7 +346,7 @@ cr_deploy() {
     printf '<!doctype html>\n<title>Welcome</title>\n<h1>Welcome</h1>\n' | cr_new_file "$WWW/index.html" 644
     printf '%s' "$cf_token" | cr_new_file "$TOKEN_FILE" 600
     unset cf_token
-    relay_password=$(openssl rand -hex 24)
+    relay_password=$(cr_generate_password)
     account=$(printf '%s\n' "$relay_password" | "$work/$SERVICE" network-relay passwd --name "$device_user" --stdin --fast-hash)
     [[ $account =~ ^user[[:space:]]$device_user[[:space:]]\$[A-Za-z0-9\$=,+/._-]+$ ]] || cr_die 'Unexpected password hash output.'
     cr_config_text | cr_new_file "$CONFIG" 640 "$SERVICE"
