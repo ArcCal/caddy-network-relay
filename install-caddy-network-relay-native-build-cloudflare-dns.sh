@@ -7,20 +7,20 @@
 set +x
 set +v
 
-SERVICE=caddy
+SERVICE=caddy-network-relay
 PLUGIN_TAG=v0.2.4
 PLUGIN_COMMIT=a8737d095ad5a48ca031cea6ab704057dbc2d250
 REPO=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
-ETC=/etc/caddy
+ETC=/etc/$SERVICE
 CONFIG=$ETC/Caddyfile
 TOKEN_FILE=$ETC/cloudflare.env
 PROFILE=$ETC/relay/device.mobileconfig
 CLIENT_CONFIG=$ETC/relay/network-relay-rs-client.toml
-BIN=/usr/local/bin/caddy
-UNIT=/etc/systemd/system/caddy.service
-DATA=/var/lib/caddy
-TOOLS=/opt/caddy-network-relay-native-cloudflare-dns
-WWW=/var/www/caddy-network-relay
+BIN=/usr/local/bin/$SERVICE
+UNIT=/etc/systemd/system/$SERVICE.service
+DATA=/var/lib/$SERVICE
+TOOLS=/opt/$SERVICE
+WWW=/var/www/$SERVICE
 SYSCTL=/etc/sysctl.d/90-caddy-network-relay-cloudflare-dns.conf
 work=
 startup_pending=0
@@ -40,11 +40,15 @@ Requires Debian 12+ or Ubuntu 22.04+, systemd and at least 5 GiB of free disk.
 Only two prompts: relay domain and hidden CF_API_TOKEN.
 Defaults: user iphone, one build job, bundled selected-domain device profile.
 Running the installer accepts the ACME CA terms. No confirmation prompt.
-Fresh installations only; existing Caddy configuration/data/services are refused.
+Fresh installations only; existing $SERVICE files/services are refused.
 Caddyfile uses: tls { dns cloudflare {env.CF_API_TOKEN} }
 The token is loaded from a root-only systemd EnvironmentFile for renewal.
 DNS-only A/AAAA records must point here. Open TCP/UDP 443 in the provider firewall.
 No inbound port 80 is needed; automatic HTTP redirects are disabled.
+Binary: $BIN
+Configuration and private client files: $ETC
+Service/account: $SERVICE; state/certificates: $DATA; build tools/cache: $TOOLS
+Service logs: journalctl -u $SERVICE
 EOF
 }
 cr_host() {
@@ -80,12 +84,12 @@ cr_ask() {
 cr_fresh() {
     local path loaded
     local paths=("$ETC" "$BIN" "$UNIT" "$DATA" "$WWW" "$SYSCTL"
-        /lib/systemd/system/caddy.service /usr/lib/systemd/system/caddy.service /run/systemd/system/caddy.service)
+        "/lib/systemd/system/$SERVICE.service" "/usr/lib/systemd/system/$SERVICE.service" "/run/systemd/system/$SERVICE.service")
     for path in "${paths[@]}"; do
         [[ ! -e $path && ! -L $path ]] || cr_die "Existing installation/file: $path. Fresh installs only."
     done
-    loaded=$(systemctl show caddy --property=LoadState --value) || cr_die 'Cannot inspect systemd.'
-    [[ -z $loaded || $loaded == not-found ]] || cr_die 'An existing Caddy unit is loaded.'
+    loaded=$(systemctl show "$SERVICE" --property=LoadState --value) || cr_die 'Cannot inspect systemd.'
+    [[ -z $loaded || $loaded == not-found ]] || cr_die "An existing $SERVICE unit is loaded."
     local sockets=(/proc/net/tcp /proc/net/udp) file
     for file in /proc/net/tcp6 /proc/net/udp6; do [[ ! -r $file ]] || sockets+=("$file"); done
     for file in "${sockets[@]}"; do
@@ -174,19 +178,19 @@ cr_build() {
             any(.Replace[]; .Old.Path == "golang.org/x/net" and .New.Path == "./third_party/x-net") and
             any(.Replace[]; .Old.Path == "github.com/quic-go/quic-go" and .New.Path == "./third_party/quic-go") and
             any(.Replace[]; .Old.Path == "github.com/caddy-dns/cloudflare" and .New.Path == "../cloudflare-src")' >/dev/null
-        "$go" build -modfile "$mod" -mod=readonly -tags http2legacy -trimpath -p "$jobs" -o "$work/caddy" ./cmd/caddy
+        "$go" build -modfile "$mod" -mod=readonly -tags http2legacy -trimpath -p "$jobs" -o "$work/$SERVICE" ./cmd/caddy
     )
-    modules=$("$work/caddy" list-modules)
+    modules=$("$work/$SERVICE" list-modules)
     for module in network_relay http.handlers.network_relay dns.providers.cloudflare; do
         grep -Fxq "$module" <<< "$modules" || cr_die "Built Caddy is missing $module."
     done
-    info=$("$go" version -m "$work/caddy")
+    info=$("$go" version -m "$work/$SERVICE")
     cr_check_replacement "$info" github.com/caddy-dns/cloudflare ../cloudflare-src || cr_die 'Missing Cloudflare build replacement.'
     cr_check_replacement "$info" golang.org/x/net ./third_party/x-net || cr_die 'Missing patched HTTP/2 transport.'
     cr_check_replacement "$info" github.com/quic-go/quic-go ./third_party/quic-go || cr_die 'Missing patched QUIC transport.'
     grep -Eq "^[[:space:]]*build[[:space:]]+GOARCH=$arch$" <<< "$info" || cr_die 'Wrong binary architecture.'
     grep -Eq '^[[:space:]]*build[[:space:]]+CGO_ENABLED=0$' <<< "$info" || cr_die 'Binary unexpectedly requires CGO.'
-    "$work/caddy" version
+    "$work/$SERVICE" version
 }
 cr_config_text() {
     cat <<EOF
@@ -209,14 +213,26 @@ $domain, :443 {
 EOF
 }
 cr_unit_text() {
+    # Adapt the repository's unit without changing the shared deployment template.
     # EnvironmentFile is read by systemd as root, not by the service user.
-    sed -e '/^\[Service\]$/a\
-EnvironmentFile=/etc/caddy/cloudflare.env\
-Environment=HOME=/var/lib/caddy\
-Environment=XDG_DATA_HOME=/var/lib/caddy/.local/share\
-Environment=XDG_CONFIG_HOME=/var/lib/caddy/.config' \
-        -e 's|^ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile$|& --adapter caddyfile|' \
-        "$REPO/deploy/caddy.service"
+    awk -v service="$SERVICE" -v binary="$BIN" -v config="$CONFIG" \
+        -v token="$TOKEN_FILE" -v data="$DATA" -v unit="$UNIT" '
+        /^# Installed by / {
+            print "# Installed by install-caddy-network-relay-native-build-cloudflare-dns.sh as " unit "."
+            next
+        }
+        /^User=/ { print "User=" service; next }
+        /^Group=/ { print "Group=" service; next }
+        /^ExecStart=/ { print "ExecStart=" binary " run --config " config " --adapter caddyfile"; next }
+        /^ExecReload=/ { print "ExecReload=" binary " reload --config " config " --adapter caddyfile --force"; next }
+        { print }
+        /^\[Service\]$/ {
+            print "EnvironmentFile=" token
+            print "Environment=HOME=" data
+            print "Environment=XDG_DATA_HOME=" data "/.local/share"
+            print "Environment=XDG_CONFIG_HOME=" data "/.config"
+        }
+    ' "$REPO/deploy/caddy.service"
 }
 cr_profile_args() {
     profile_args=(network-relay profile --host "$domain" --user "$device_user" --password-stdin
@@ -232,10 +248,10 @@ cr_profile_args() {
     fi
 }
 cr_account() {
-    if id -u caddy >/dev/null 2>&1; then
-        [[ $(id -u caddy) != 0 && $(id -g caddy) != 0 && $(id -gn caddy) == caddy ]] || cr_die 'Refusing a privileged or mismatched Caddy account.'
+    if id -u "$SERVICE" >/dev/null 2>&1; then
+        [[ $(id -u "$SERVICE") != 0 && $(id -g "$SERVICE") != 0 && $(id -gn "$SERVICE") == "$SERVICE" ]] || cr_die 'Refusing a privileged or mismatched Caddy account.'
     else
-        useradd --system --user-group --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin caddy
+        useradd --system --user-group --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin "$SERVICE"
     fi
 }
 cr_client_config_text() {
@@ -257,25 +273,25 @@ EOF
 cr_deploy() {
     local relay_password account key current response ready=0 attempt
     cr_account
-    install -d -o root -g caddy -m 750 "$ETC"
+    install -d -o root -g "$SERVICE" -m 750 "$ETC"
     install -d -o root -g root -m 700 "${PROFILE%/*}"
-    install -d -o caddy -g caddy -m 750 "$DATA"
+    install -d -o "$SERVICE" -g "$SERVICE" -m 750 "$DATA"
     [[ -d ${WWW%/*} ]] || install -d -m 755 "${WWW%/*}"
     install -d -m 755 "$WWW"
     printf '<!doctype html>\n<title>Welcome</title>\n<h1>Welcome</h1>\n' | cr_new_file "$WWW/index.html" 644
     printf 'CF_API_TOKEN=%s\n' "$cf_token" | cr_new_file "$TOKEN_FILE" 600
     relay_password=$(openssl rand -hex 24)
-    account=$(printf '%s\n' "$relay_password" | "$work/caddy" network-relay passwd --name "$device_user" --stdin --fast-hash)
+    account=$(printf '%s\n' "$relay_password" | "$work/$SERVICE" network-relay passwd --name "$device_user" --stdin --fast-hash)
     [[ $account =~ ^user[[:space:]]$device_user[[:space:]]\$[A-Za-z0-9\$=,+/._-]+$ ]] || cr_die 'Unexpected password hash output.'
-    cr_config_text | cr_new_file "$CONFIG" 640 caddy
+    cr_config_text | cr_new_file "$CONFIG" 640 "$SERVICE"
     cr_profile_args
-    printf '%s\n' "$relay_password" | "$work/caddy" "${profile_args[@]}"
+    printf '%s\n' "$relay_password" | "$work/$SERVICE" "${profile_args[@]}"
     chmod 600 "$PROFILE"
-    install -m 755 "$work/caddy" "$BIN"
+    install -m 755 "$work/$SERVICE" "$BIN"
     cr_unit_text | cr_new_file "$UNIT" 644
     # Caddy must see the same token and storage paths during validation and runtime.
     # The assignment is an environment binding, never a command-line argument.
-    CF_API_TOKEN=$cf_token runuser -u caddy -- env HOME="$DATA" XDG_DATA_HOME="$DATA/.local/share" \
+    CF_API_TOKEN=$cf_token runuser -u "$SERVICE" -- env HOME="$DATA" XDG_DATA_HOME="$DATA/.local/share" \
         XDG_CONFIG_HOME="$DATA/.config" "$BIN" validate --config "$CONFIG" --adapter caddyfile
     unset cf_token
     {
@@ -290,22 +306,22 @@ cr_deploy() {
     sysctl -p "$SYSCTL" || printf 'Warning: UDP buffer tuning was denied; using system defaults.\n'
     systemctl daemon-reload
     startup_pending=1
-    systemctl enable --now caddy
+    systemctl enable --now "$SERVICE"
     printf 'Waiting for DNS challenge and trusted HTTPS (up to about eight minutes)...\n'
     for ((attempt=0; attempt<60; attempt++)); do
-        systemctl is-active --quiet caddy || cr_die 'Caddy stopped during certificate issuance; inspect journalctl -u caddy.'
+        systemctl is-active --quiet "$SERVICE" || cr_die "$SERVICE stopped during certificate issuance; inspect journalctl -u $SERVICE."
         if response=$(curl --noproxy '*' --fail --silent --show-error --max-time 3 \
             --resolve "$domain:443:127.0.0.1" "https://$domain/" 2>/dev/null); then
             if [[ $response == *'<h1>Welcome</h1>'* ]]; then ready=1; break; fi
         fi
         sleep 5
     done
-    (( ready )) || cr_die 'Certificate/HTTPS readiness failed. Check Cloudflare permissions, DNS propagation and journalctl -u caddy. The new service will be stopped.'
+    (( ready )) || cr_die "Certificate/HTTPS readiness failed. Check Cloudflare permissions, DNS propagation and journalctl -u $SERVICE. The new service will be stopped."
     startup_pending=0
     printf 'Trusted local HTTPS works. Protected device profile: %s\n' "$PROFILE"
     if ! printf '%s\n' "$relay_password" | "$BIN" network-relay check --server "$domain" --address 127.0.0.1 \
         --user "$device_user" --password-stdin; then
-        cr_die 'Caddy remains running, but protocol checks failed. Check outbound TCP 80/UDP 53 and journalctl -u caddy. Do not rerun this fresh installer.'
+        cr_die "$SERVICE remains running, but protocol checks failed. Check outbound TCP 80/UDP 53 and journalctl -u $SERVICE. Do not rerun this fresh installer."
     fi
     cr_client_config_text | cr_new_file "$CLIENT_CONFIG" 600
     unset relay_password
@@ -347,8 +363,8 @@ cr_main() {
     export -n cf_token
     umask 077
     command -v flock >/dev/null || cr_die 'flock from util-linux is required.'
-    install -d -m 700 /run/caddy-native-cloudflare-install
-    exec {install_lock}>/run/caddy-native-cloudflare-install/lock
+    install -d -m 700 "/run/$SERVICE-install"
+    exec {install_lock}>"/run/$SERVICE-install/lock"
     flock -n "$install_lock" || cr_die 'Another installer is running.'
     cr_fresh
     cr_inputs
