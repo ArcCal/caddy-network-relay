@@ -325,10 +325,11 @@ EOF
 cr_generate_password() {
     local candidate
     while :; do
-        # 36 random bytes produce 48 base64 characters without padding. Resample
-        # until all four classes occur; never add a predictable prefix/suffix.
-        candidate=$(openssl rand -base64 36) || return
-        [[ $candidate =~ ^[A-Za-z0-9+/]{48}$ ]] || cr_die 'OpenSSL returned invalid password material.'
+        # 18 random bytes produce 24 base64 characters without padding. Take
+        # 22 independent characters and resample until all four classes occur.
+        candidate=$(openssl rand -base64 18) || return
+        [[ $candidate =~ ^[A-Za-z0-9+/]{24}$ ]] || cr_die 'OpenSSL returned invalid password material.'
+        candidate=${candidate:0:22}
         if [[ $candidate =~ [A-Z] && $candidate =~ [a-z] && $candidate =~ [0-9] && $candidate =~ [+/] ]]; then
             printf '%s\n' "$candidate"
             return
@@ -347,7 +348,8 @@ cr_deploy() {
     printf '%s' "$cf_token" | cr_new_file "$TOKEN_FILE" 600
     unset cf_token
     relay_password=$(cr_generate_password)
-    account=$(printf '%s\n' "$relay_password" | "$work/$SERVICE" network-relay passwd --name "$device_user" --stdin --fast-hash)
+    # The fast hash requires 24+ characters; use the supported Argon2id mode.
+    account=$(printf '%s\n' "$relay_password" | "$work/$SERVICE" network-relay passwd --name "$device_user" --stdin)
     [[ $account =~ ^user[[:space:]]$device_user[[:space:]]\$[A-Za-z0-9\$=,+/._-]+$ ]] || cr_die 'Unexpected password hash output.'
     cr_config_text | cr_new_file "$CONFIG" 640 "$SERVICE"
     cr_profile_args
