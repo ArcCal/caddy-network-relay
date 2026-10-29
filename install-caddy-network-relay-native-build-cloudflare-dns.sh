@@ -1,9 +1,135 @@
 #!/usr/bin/env bash
 # Interactive native Caddy relay build with the Cloudflare DNS plugin and ACME.
 # Debian 12+ / Ubuntu 24.04+, amd64/arm64, Bash 4+, systemd; install/upgrade/repair.
-# Keep Cloudflare DNS records DNS-only and allow inbound TCP/UDP 443.
+# Direct client access uses TCP/UDP 443; DNS-01 has no A/AAAA target prerequisite.
 # Token: Zone:DNS:Edit + Zone:Zone:Read, scoped to the relay's zone.
 # No Certbot: Caddy obtains and renews certificates using its DNS plugin.
+#
+# Maintainer contract: requirements and deployment lessons
+# ========================================================
+# Keep these notes when maintaining this installer. They distinguish observed
+# failures, required behavior and remaining verification limits.
+#
+# Required behavior
+# -----------------
+# - Keep a clearly named executable Bash installer in the repository root.
+#   Modify this installer, not application code or shared source templates.
+#   Read repository design/deployment documentation before making changes.
+# - Support Debian 12+ and Ubuntu 24.04+ without an artificial upper version cap.
+#   Detect native amd64/arm64 and build the corresponding pinned server.
+# - Accept only the domain and hidden CF_API_TOKEN as terminal input. An inherited
+#   token can skip its prompt. Do not ask for email, username, build jobs, profile
+#   scope, password or confirmation. Keep apt/Git/helper commands noninteractive.
+# - Use Cloudflare DNS-01. It validates TXT records and requires appropriate
+#   zone-scoped token permissions, not an A/AAAA record pointing at this machine.
+#   Do not add a public-IP lookup or DNS-to-host IP equality prerequisite.
+# - Support install, upgrade and repair on every run. The current script governs
+#   dedicated configuration/unit files; validate and automatically replace them.
+#   Reuse a safe dedicated account and create it only when absent. Existing files,
+#   directories or accounts are not errors by themselves. Keep genuine conflicts
+#   (unsafe shared identities/parents, foreign listeners) distinct from existence.
+# - Retain valid managed certificates, matching keys, issuer metadata and ACME
+#   accounts. Do not force issuance just because the installer runs again.
+#   Missing/invalid certificates need issuance; renewal when due stays enabled.
+#   Never delete certificate state merely to make an installation look new.
+# - Use a cryptographically random 22-character password with uppercase, lowercase,
+#   digits and + or /. Reuse a compatible private client record when possible.
+#   Keep server, Apple profile and Rust Network Relay RS TOML credentials aligned.
+#   If plaintext credentials are unrecoverable, generate new ones and explain
+#   that old clients need the refreshed configuration. Export both files privately.
+# - Run the daemon as its dedicated non-root user with restricted groups and only
+#   necessary capabilities. Protect DNS tokens, TLS keys, client exports and
+#   backups; keep secrets out of argv/logs and outside the public web directory.
+#   Preserve certificate renewal/reload and required TCP/UDP traffic.
+# - Do not install UFW or another firewall, add firewall rules, or configure VPN
+#   tunnel pools/NAT as a side effect of installing this application relay.
+# - Persist binaries, configuration, credentials and certificate state. Reserve
+#   /run for systemd-recreated transient data. Require active service state,
+#   persistent enabled state and successful HTTPS/protocol checks before success.
+#   Retain automatic restart and certificate renewal across host reboots.
+# - Build and validate the candidate while the prior service remains running.
+#   Back up dedicated files privately; stop only the old dedicated unit, verify
+#   443 is free, and install atomically. On failure restore files and the prior
+#   active/enabled state, including runtime-only enablement. Preserve ACME state
+#   and unrelated services. Backups cannot recover files deleted before the run.
+#
+# Earlier failures and remedies
+# -----------------------------
+# 1. Fresh-only checks rejected each existing file, directory and account, forcing
+#    manual deletion and risking certificate loss. Inspect/reuse safe resources
+#    and replace managed files transactionally; support interrupted installs.
+# 2. systemd-run tried to execute /run/<service>-candidate/<binary> before its
+#    BindReadOnlyPaths namespace existed. It resolves the first executable in the
+#    HOST namespace. Use the host's /usr/bin/env -- entry point to exec the mapped
+#    candidate inside the unit, retaining --wait to propagate failures. Never
+#    expose the root-only work tree to work around a namespace/permission error.
+# 3. The old mock mapped paths before checking the host executable and hid that
+#    real ARM deployment failure. Test host lookup, then namespace execution,
+#    argument/credential preservation and nonzero exits; reproduce the real CLI
+#    behavior where possible. A passing mock alone is not deployment evidence.
+# 4. Stopping a missing old unit may return exit 5 during a first/partial install.
+#    Continue only if it is inactive and 443 is free. Treat a live listener/failed
+#    stop as a genuine problem. Stop with the OLD unit before replacing drop-ins
+#    or unit content; never terminate another service to steal its port.
+# 5. A long hexadecimal password did not meet the requested length/classes. It
+#    was not insecure merely for being hexadecimal. The application fast-hash
+#    mode requires 24+ characters, so the requested 22-character password uses the
+#    supported Argon2id stdin mode. Never expose plaintext in command arguments.
+# 6. Earlier firewall handling and generic paths did not match the deployment
+#    requirements. Keep firewall management out, and use dedicated binary/config/
+#    account/state names instead of altering a general-purpose installation.
+# 7. Hardening must fit the actual process: check filesystem needs, credential
+#    copy timing, dynamic libraries and reload helpers. Do not grant broad write
+#    access or extra privileges simply to silence a sandbox failure.
+#
+# Lesson from an external installer's DNS gate
+# --------------------------------------------
+# An external script refused installation unless the DNS-only A record matched
+# one detected public IPv4. That is inappropriate as a Cloudflare DNS-01 issuance
+# prerequisite: the CA checks _acme-challenge TXT records, not that IP endpoint.
+# A/AAAA may point elsewhere or be absent. IPv6-only DNS, multiple records, NAT,
+# multiple NICs and VPN/proxy egress also make one IPv4 comparison unreliable.
+# Its log alone does not prove the detected IP was wrong; DNS may truly point
+# elsewhere. Do not reproduce that issuance gate. Cloudflare proxy/grey-cloud
+# routing choices are also separate from TXT-based domain authorization.
+#
+# Verification limits and maintenance improvements
+# ------------------------------------------------
+# - A certificate proves domain authorization, not public routing or client
+#   connectivity. Current HTTPS/relay checks connect to 127.0.0.1 with real
+#   hostname/SNI and bypass public DNS. Report their local scope accurately;
+#   do not turn this observation into a new A/AAAA installation prerequisite.
+# - Current built-in test targets are example.com:80 and 1.1.1.1:53. Restricted
+#   egress or no IPv4 route may fail them while other destinations work. Diagnose
+#   target reachability before blaming DNS/certificates or changing server policy.
+# - Distinguish config validation, active/enabled state, offline unit checks,
+#   mocks and actual end-to-end/reboot tests. Never claim a real reboot, public
+#   ACME flow or a deployment on every OS version without actually testing it.
+#   Keep regressions for reruns, partial repair, certificate reuse, canonical
+#   replacement, boot paths, secrets and failed-switch restoration.
+# - journalctl -f waits for new entries; Ctrl+C exits the viewer. Missing old
+#   units, skipped recent storage cleaning and renewal-information messages are
+#   not by themselves deployment failures. Several available certificate chains
+#   do not mean several separate certificate requests.
+#
+# Caddy-specific requirements
+# ---------------------------
+# Build with pinned caddy-dns/cloudflare and repository transport patches.
+# Use /usr/local/bin/caddy-network-relay, /etc/caddy-network-relay and persistent
+# /var/lib/caddy-network-relay ACME state. Load the token via systemd credentials;
+# keep the Unix admin socket private under /run/caddy-network-relay.
+# Managed certificate reuse needs the valid CRT/key and CertMagic JSON for the
+# configured issuer. Do not fabricate metadata or silently treat arbitrary
+# external PEMs as that cache. Preserve Caddy's normal automatic renewal.
+# The permanent CGO-disabled unit permits only its own executable; the env
+# wrapper belongs only to the separate transient validation unit.
+# Takeover includes old dedicated-unit processes and manually started instances.
+# Identify standalone servers by executable and run/config arguments, not by a
+# truncated process name. Send TERM, then KILL after a bounded grace period,
+# before replacing files. Do not signal general-purpose Caddy or other servers.
+# If another program owns any TCP/UDP 443 socket, exit before takeover and report
+# both protocols with listener addresses and available executable/PID details.
+# Rollback restores the previous managed unit, not terminated standalone commands.
 #
 # Run this file from a complete checkout on the target server. It performs:
 #   1. Read-only platform, safe-path/account and port checks, then two inputs.
@@ -11,8 +137,8 @@
 #   3. Candidate preparation/validation while the previous service keeps running.
 #   4. Root-only backup, atomic file replacement and service/protocol checks.
 #   5. Export of the Rust client configuration with the same relay credentials.
-# The Apple profile is created before startup so its password is recoverable if
-# later checks fail. Rerunning also repairs missing dedicated files and upgrades
+# Client exports are staged before startup and published after checks pass.
+# Rerunning also repairs missing dedicated files and upgrades
 # an existing dedicated installation. General-purpose Caddy is never changed.
 #
 # Tracing must be disabled before reading secrets, including when invoked with
@@ -215,11 +341,81 @@ cr_check_leaf() {
             [[ -d $path && ( $owner == 0 || $owner == "$service_uid" ) ]] || cr_die "Dedicated state/runtime directory has an unrelated owner: $path." ;;
     esac
 }
-cr_port_inodes() {
+cr_port_records() {
     local sockets=(/proc/net/tcp /proc/net/udp) file
     for file in /proc/net/tcp6 /proc/net/udp6; do [[ ! -r $file ]] || sockets+=("$file"); done
     for file in "${sockets[@]}"; do [[ -r $file ]] || cr_die "Cannot inspect listening sockets: $file."; done
-    awk 'FNR > 1 && $2 ~ /:01BB$/ && (FILENAME ~ /udp/ || $4 == "0A") {print $10}' "${sockets[@]}"
+    awk 'FNR > 1 && $2 ~ /:01BB$/ && (FILENAME ~ /udp/ || $4 == "0A") {
+        printf "%s\t%s\t%s\n", (FILENAME ~ /udp/ ? "UDP" : "TCP"), $2, $10
+    }' "${sockets[@]}"
+}
+cr_port_inodes() {
+    cr_port_records | awk -F '\t' '{print $3}'
+}
+# Convert Linux's little-endian socket-table addresses for diagnostics when ss
+# is unavailable. Supported amd64/arm64 hosts use this kernel representation.
+cr_endpoint_text() {
+    local address=${1%:*} reordered= part index result=
+    if [[ $address =~ ^[a-fA-F0-9]{8}$ ]]; then
+        printf '%d.%d.%d.%d:443' "0x${address:6:2}" "0x${address:4:2}" "0x${address:2:2}" "0x${address:0:2}"
+    elif [[ $address =~ ^[a-fA-F0-9]{32}$ ]]; then
+        for ((index=0; index<32; index+=8)); do
+            part=${address:index:8}
+            reordered+=${part:6:2}${part:4:2}${part:2:2}${part:0:2}
+        done
+        for ((index=0; index<32; index+=4)); do
+            [[ -z $result ]] || result+=:
+            result+=${reordered:index:4}
+        done
+        printf '[%s]:443' "$result"
+    else
+        printf '%s' "$1"
+    fi
+}
+# Fallback ownership lookup is read-only. Report executable/PID rather than
+# full command lines, which could contain secrets from an old manual launch.
+cr_socket_owners() {
+    local inode=$1 link pid executable name seen=$'\n' found=0
+    [[ $inode =~ ^[0-9]+$ ]] || return 1
+    while IFS= read -r link; do
+        pid=${link#/proc/}; pid=${pid%%/*}
+        [[ $pid =~ ^[0-9]+$ && $seen != *$'\n'"$pid"$'\n'* ]] || continue
+        seen+="$pid"$'\n'
+        executable=$(readlink -- "/proc/$pid/exe" 2>/dev/null || printf unavailable)
+        name=$(cat "/proc/$pid/comm" 2>/dev/null || printf unavailable)
+        printf '    PID=%s process=%q executable=%q\n' "$pid" "$name" "$executable" >&2
+        found=1
+    done < <(find -P /proc/[0-9]*/fd -maxdepth 1 -type l -lname "socket:\[$inode\]" -print 2>/dev/null)
+    (( found )) || printf '    Owner unavailable in this PID namespace (socket inode %s).\n' "$inode" >&2
+}
+# Every conflict prints both protocols, even if only one is occupied. ss gives
+# readable listener addresses and PID/process details; /proc remains a fallback
+# on a minimal host before iproute2 is installed. Never install/stop anything
+# merely to produce these diagnostics.
+cr_report_ports() {
+    local records protocol item address inode output reported
+    records=$(cr_port_records) || return 1
+    for protocol in TCP UDP; do
+        printf '%s 443:\n' "$protocol" >&2
+        reported=0
+        if command -v ss >/dev/null 2>&1; then
+            if [[ $protocol == TCP ]]; then
+                output=$(ss -H -ltnp '( sport = :443 )' 2>/dev/null) || output=
+            else
+                output=$(ss -H -aunp '( sport = :443 )' 2>/dev/null) || output=
+            fi
+            if [[ -n $output ]]; then printf '%s\n' "$output" >&2; reported=1; fi
+        fi
+        if (( !reported )); then
+            while IFS=$'\t' read -r item address inode; do
+                [[ $item == "$protocol" ]] || continue
+                printf '  local=%s\n' "$(cr_endpoint_text "$address")" >&2
+                cr_socket_owners "$inode"
+                reported=1
+            done <<< "$records"
+            if (( !reported )); then printf '  Not occupied.\n' >&2; fi
+        fi
+    done
 }
 cr_pid_socket_inodes() {
     local pid=$1 fd target
@@ -229,28 +425,125 @@ cr_pid_socket_inodes() {
         if [[ $target =~ ^socket:\[([0-9]+)\]$ ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; fi
     done
 }
-# The running dedicated unit may keep 443 during a long rebuild. Every occupied
-# inode must belong to its actual MainPID; never stop or kill a different server.
+cr_unit_main_pid() {
+    local pid
+    pid=$(systemctl show "$SERVICE" --property=MainPID --value 2>/dev/null || true)
+    if [[ $pid =~ ^[1-9][0-9]*$ && $pid != 1 && $pid != "$$" && $pid != "$BASHPID" ]]; then
+        printf '%s\n' "$pid"
+    fi
+}
+# A manually launched old server may have no unit or MainPID. Linux comm names
+# are truncated, so pkill by process name is insufficient and risks unrelated
+# processes. Inspect the actual executable (including unlinked old binaries)
+# and NUL-delimited argv. A generic caddy binary qualifies only when its run
+# command explicitly uses this deployment's exact configuration path.
+cr_is_relay_pid() {
+    local pid=$1 executable argument index
+    local -a arguments=()
+    [[ $pid =~ ^[1-9][0-9]*$ && $pid != 1 && $pid != "$$" && $pid != "$BASHPID" ]] || return 1
+    executable=$(readlink -- "/proc/$pid/exe" 2>/dev/null) || return 1
+    executable=${executable% (deleted)}
+    {
+        while IFS= read -r -d '' argument; do arguments+=("$argument"); done < "/proc/$pid/cmdline"
+    } 2>/dev/null || return 1
+    [[ ${arguments[1]:-} == run ]] || return 1
+    if [[ $executable == "$BIN" || ${executable##*/} == "$SERVICE" ]]; then return 0; fi
+    [[ ${executable##*/} == caddy ]] || return 1
+    for ((index=2; index<${#arguments[@]}; index++)); do
+        if [[ ${arguments[index]} == "--config=$CONFIG" ]]; then return 0; fi
+        if [[ ${arguments[index]} == --config && ${arguments[index+1]:-} == "$CONFIG" ]]; then return 0; fi
+    done
+    return 1
+}
+cr_old_pids() {
+    local unit_pid pid directory
+    unit_pid=$(cr_unit_main_pid)
+    if [[ -n $unit_pid && -d /proc/$unit_pid ]]; then printf '%s\n' "$unit_pid"; fi
+    for directory in /proc/[0-9]*; do
+        pid=${directory##*/}
+        [[ $pid != "$unit_pid" ]] || continue
+        if cr_is_relay_pid "$pid"; then printf '%s\n' "$pid"; fi
+    done
+}
+# Existing dedicated-unit and standalone relay instances may retain 443 during
+# compilation. Every occupied socket must belong to one of these old instances;
+# an unrelated listener is a conflict and is never terminated by takeover.
 cr_ports() {
-    local occupied pid owned inode found item
+    local occupied pids pid owned sockets inode found item foreign=0
     occupied=$(cr_port_inodes) || cr_die 'Cannot inspect listening sockets; port availability is unknown.'
     [[ -n $occupied ]] || return 0
-    pid=$(systemctl show "$SERVICE" --property=MainPID --value) || cr_die 'Cannot inspect dedicated service MainPID.'
-    [[ $pid =~ ^[0-9]+$ && $pid != 0 ]] || cr_die 'TCP or UDP 443 belongs to another process; no other service was stopped.'
-    owned=$(cr_pid_socket_inodes "$pid") || cr_die 'Cannot establish service socket ownership.'
+    pids=$(cr_old_pids)
+    owned=
+    while IFS= read -r pid; do
+        [[ -n $pid ]] || continue
+        # A process may exit between the socket-table snapshot and this read.
+        if sockets=$(cr_pid_socket_inodes "$pid" 2>/dev/null); then owned+="$sockets"$'\n'; fi
+    done <<< "$pids"
     while IFS= read -r inode; do
         [[ $inode =~ ^[0-9]+$ ]] || cr_die 'Invalid kernel socket record.'
         found=0
         while IFS= read -r item; do [[ $inode != "$item" ]] || found=1; done <<< "$owned"
-        (( found )) || cr_die 'TCP or UDP 443 belongs to another process; no other service was stopped.'
+        (( found )) || foreign=1
     done <<< "$occupied"
+    if (( foreign )); then
+        cr_report_ports || true
+        cr_die 'TCP or UDP 443 belongs to another program; takeover was cancelled without stopping it.'
+    fi
+}
+# Recheck identity before every signal, especially after waiting, to reduce the
+# risk of signalling another process that reused an exited server's numeric PID.
+# Signal only the dedicated unit or positively identified standalone instances.
+cr_signal_old() {
+    local signal=$1 pids pid unit_pid
+    pids=$(cr_old_pids)
+    while IFS= read -r pid; do
+        [[ -n $pid ]] || continue
+        unit_pid=$(cr_unit_main_pid)
+        if [[ $pid == "$unit_pid" ]] || cr_is_relay_pid "$pid"; then
+            if kill -s "$signal" -- "$pid" 2>/dev/null; then
+                printf 'Sent %s to previous %s process %s.\n' "$signal" "$SERVICE" "$pid"
+            fi
+        fi
+    done <<< "$pids"
+}
+cr_wait_old_stopped() {
+    local attempts=$1 attempt state remaining
+    for ((attempt=0; attempt<attempts; attempt++)); do
+        remaining=$(cr_old_pids)
+        state=$(systemctl show "$SERVICE" --property=ActiveState --value 2>/dev/null || true)
+        if [[ -z $remaining && ( -z $state || $state == inactive || $state == failed ) ]] \
+            && ! systemctl is-active --quiet "$SERVICE"; then return 0; fi
+        sleep 1
+    done
+    return 1
+}
+# Queue the stop without waiting indefinitely for an old unit's ExecStop or
+# TimeoutStopSec. The stop job suppresses its Restart policy. Gracefully stop
+# residual standalone servers too; force remaining unit members/processes only
+# after ten seconds. This runs after candidate validation and private backup.
+cr_stop_old() {
+    systemctl stop --no-block "$SERVICE" >/dev/null 2>&1 || true
+    cr_signal_old TERM
+    if ! cr_wait_old_stopped 10; then
+        systemctl kill --kill-who=all --signal=KILL "$SERVICE" >/dev/null 2>&1 || true
+        cr_signal_old KILL
+        systemctl stop --no-block "$SERVICE" >/dev/null 2>&1 || true
+        if ! cr_wait_old_stopped 5; then
+            printf 'Could not stop all previous %s processes.\n' "$SERVICE" >&2
+            return 1
+        fi
+    fi
 }
 # After stopping the dedicated unit, no listener is acceptable, including one
-# still attributed to its old MainPID. This also closes the replacement race.
+# still attributed to its old MainPID. Recheck before switching/starting; a later
+# bind failure is handled by the deployment rollback.
 cr_ports_free() {
     local occupied
     occupied=$(cr_port_inodes) || cr_die 'Cannot inspect listening sockets after stopping the service.'
-    [[ -z $occupied ]] || cr_die 'TCP or UDP 443 is still occupied; no files will be switched/start attempted while another listener remains.'
+    if [[ -n $occupied ]]; then
+        cr_report_ports || true
+        cr_die 'TCP or UDP 443 is still occupied; no files will be switched/start attempted while another listener remains.'
+    fi
 }
 # Compatibility name retained for existing usage/tests; this is now a safe
 # installation preflight, not an existence-based fresh-install gate.
@@ -300,11 +593,7 @@ cr_new_file() {
 # Backups remain root-only outside scratch space after both success and failure.
 cr_rollback() {
     local failed=0 index=0 path existed type prior
-    if ! systemctl stop "$SERVICE" >/dev/null 2>&1; then
-        # A missing/previously incomplete unit may legitimately have nothing to
-        # stop. A still-active process is an actual rollback failure.
-        if systemctl is-active --quiet "$SERVICE"; then failed=1; fi
-    fi
+    if ! cr_stop_old; then failed=1; fi
     while IFS=$'\t' read -r index existed type path; do
         if [[ $type == dir ]]; then
             [[ ! -e $path ]] || rm -rf -- "$path" || failed=1
@@ -631,7 +920,7 @@ cr_account() {
 # on loopback only, so importing it does not expose an unauthenticated LAN proxy.
 # It does not import the Apple profile's selected-domain rules; applications
 # choose which connections to send through this local SOCKS listener.
-# The caller creates the file only after protocol checks pass, with mode 0600.
+# The caller publishes the installed file after protocol checks, with mode 0600.
 cr_client_config_text() {
     # Validated domain/user and the base64 password alphabet are TOML-safe.
     cat <<EOF
@@ -807,13 +1096,9 @@ cr_deploy() {
         done
     } > "$work/sysctl"
     cr_backup
-    # Stop with the previous unit's exact ExecStop semantics. Only after its
-    # process releases 443 may its unit/drop-ins and executable be replaced.
-    if ! systemctl stop "$SERVICE"; then
-        # A genuinely new/missing unit has nothing to stop (systemctl returns
-        # exit 5). Do not mistake that normal repair state for a failure.
-        if systemctl is-active --quiet "$SERVICE"; then cr_die 'Could not stop the previous dedicated service.'; fi
-    fi
+    # Take over all old dedicated instances, including unmanaged/deleted binaries.
+    # Do this only after the candidate is validated and the prior files saved.
+    cr_stop_old || cr_die 'Previous relay processes could not be stopped; restoring the previous deployment.'
     cr_ports_free
     # Remove only dedicated drop-ins, keeping their complete private copies.
     # Generic caddy.service and any of its settings are outside this transaction.
