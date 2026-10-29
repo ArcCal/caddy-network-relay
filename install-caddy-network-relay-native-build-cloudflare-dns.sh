@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Interactive native Caddy relay build with the Cloudflare DNS plugin and ACME.
-# Debian 12+ / Ubuntu 22.04+, amd64/arm64, Bash 4+, systemd; install/upgrade/repair.
+# Debian 12+ / Ubuntu 24.04+, amd64/arm64, Bash 4+, systemd; install/upgrade/repair.
 # Keep Cloudflare DNS records DNS-only and allow inbound TCP/UDP 443.
 # Token: Zone:DNS:Edit + Zone:Zone:Read, scoped to the relay's zone.
 # No Certbot: Caddy obtains and renews certificates using its DNS plugin.
@@ -75,7 +75,7 @@ Interactively build this checkout for native amd64/arm64 with the pinned
 caddy-dns/cloudflare plugin. Configure DNS-01 certificate issuance and renewal,
 a relay user, private Apple and Rust client configurations, systemd and protocol
 self-checks. The Rust TOML is generated after the protocol checks succeed.
-Requires Debian 12+ or Ubuntu 22.04+, systemd 249+ and 5 GiB of free disk.
+Requires Debian 12+ or Ubuntu 24.04+, systemd 249+ and 5 GiB of free disk.
 
 Only two prompts: relay domain and hidden CF_API_TOKEN.
 Defaults: user iphone, one build job, bundled selected-domain device profile.
@@ -117,9 +117,9 @@ cr_host() {
     case $ID in
         debian) (( 10#$major >= 12 )) || cr_die 'Debian 12+ is required.' ;;
         ubuntu)
-            [[ $VERSION_ID == *.* ]] || cr_die 'Ubuntu 22.04+ is required.'
-            (( 10#$major > 22 || (10#$major == 22 && 10#$minor >= 4) )) || cr_die 'Ubuntu 22.04+ is required.' ;;
-        *) cr_die 'Only Debian 12+ and Ubuntu 22.04+ are supported.' ;;
+            [[ $VERSION_ID == *.* ]] || cr_die 'Ubuntu 24.04+ is required.'
+            (( 10#$major > 24 || (10#$major == 24 && 10#$minor >= 4) )) || cr_die 'Ubuntu 24.04+ is required.' ;;
+        *) cr_die 'Only Debian 12+ and Ubuntu 24.04+ are supported.' ;;
     esac
 }
 # Accept a bare ASCII DNS hostname, not a URL, IP address or wildcard. Inputs
@@ -764,6 +764,9 @@ cr_prepare() {
     )
     cr_client_config_text > "$work/exports/network-relay-rs-client.toml"
     chmod 600 "$work/exports/"*
+    # systemd-run resolves its first executable in the host namespace, before
+    # BindReadOnlyPaths exists. Start the host's env, which execs the candidate
+    # inside the unit namespace; --wait still propagates validation failures.
     systemd-run --no-ask-password --unit="$SERVICE-validate" --collect --wait --pipe --service-type=exec \
         --property="User=$SERVICE" --property="Group=$SERVICE" \
         --property="LoadCredential=CF_API_TOKEN:$work/token" --property=UMask=0077 \
@@ -771,7 +774,7 @@ cr_prepare() {
         --property="BindReadOnlyPaths=$candidate:$validation_root" \
         --setenv="HOME=/run/$SERVICE-validate" --setenv="XDG_DATA_HOME=/run/$SERVICE-validate/share" \
         --setenv="XDG_CONFIG_HOME=/run/$SERVICE-validate/config" \
-        "$validation_root/$SERVICE" validate --config "$validation_root/Caddyfile" --adapter caddyfile
+        /usr/bin/env -- "$validation_root/$SERVICE" validate --config "$validation_root/Caddyfile" --adapter caddyfile
 }
 # Upgrade and repair transaction. Existing Caddy runs throughout the build and
 # candidate validation. Only after both succeed are dedicated files backed up,
@@ -884,8 +887,8 @@ cr_noninteractive() {
     export GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/false SSH_ASKPASS=/bin/false
     export DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none
 }
-# systemd 249 is this installer's minimum supported version (Ubuntu 22.04's
-# baseline). Check the actual manager tool version rather than the OS label.
+# systemd 249 is the feature baseline for the selected credential/sandbox
+# settings. Check the actual manager tool version rather than the OS label.
 cr_require_systemd() {
     local version
     version=$(systemctl --version | awk 'NR == 1 { print $2 }')
