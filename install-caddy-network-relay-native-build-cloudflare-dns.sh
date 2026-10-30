@@ -130,6 +130,10 @@
 # If another program owns any TCP/UDP 443 socket, exit before takeover and report
 # both protocols with listener addresses and available executable/PID details.
 # Rollback restores the previous managed unit, not terminated standalone commands.
+# Root-owned unit masks and stale runtime units are repairable entries, not
+# arbitrary destination links. Keep their private backups and restore the exact
+# old active/enabled state on failure. A matching executable basename alone is
+# not proof that a standalone process belongs to this deployment.
 #
 # Run this file from a complete checkout on the target server. It performs:
 #   1. Read-only platform, safe-path/account and port checks, then two inputs.
@@ -145,6 +149,10 @@
 # bash -x or bash -v. Neither tokens nor generated passwords belong in logs.
 set +x
 set +v
+set +a
+# Bash can retain an exported outer value beneath a non-exported local. Remove
+# inherited export attributes before introducing secret-bearing local scopes.
+export -n cf_token relay_password account candidate old_password
 
 # Select trusted system utilities before resolving REPO or running checks. Keep
 # proxy/CA settings intact. Sourcing helpers leaves the caller's PATH untouched.
@@ -200,7 +208,7 @@ Usage: sudo bash ${0##*/}
 Interactively build this checkout for native amd64/arm64 with the pinned
 caddy-dns/cloudflare plugin. Configure DNS-01 certificate issuance and renewal,
 a relay user, private Apple and Rust client configurations, systemd and protocol
-self-checks. The Rust TOML is generated after the protocol checks succeed.
+self-checks. Client exports are staged privately and published after checks pass.
 Requires Debian 12+ or Ubuntu 24.04+, systemd 249+ and 5 GiB of free disk.
 
 Only two prompts: relay domain and hidden CF_API_TOKEN.
@@ -216,7 +224,8 @@ Caddy reads the DNS token from systemd credentials, not its environment.
 The root-only token source is $TOKEN_FILE and is retained for renewal.
 The service has a read-only host filesystem, private state/runtime directories,
 and only the capability needed to bind port 443.
-DNS-only A/AAAA records must point here. Open TCP/UDP 443 in the provider firewall.
+DNS-01 needs no A/AAAA records or IP match. Direct domain-based clients need
+DNS-only records routing to this server. Open TCP/UDP 443 in the provider firewall.
 No inbound port 80 is needed; automatic HTTP redirects are disabled.
 Binary: $BIN
 Configuration and private client files: $ETC
@@ -327,6 +336,10 @@ cr_check_parent_dirs() {
 cr_check_leaf() {
     local path=$1 kind=$2 owner mode metadata service_uid=0
     cr_check_parent_dirs "$path"
+    if [[ -L $path && ( $path == "$UNIT" || $path == "/run/systemd/system/$SERVICE.service" ) &&
+        $(readlink -- "$path") == /dev/null && $(stat -c %u -- "$path") == 0 ]]; then
+        return 0
+    fi
     [[ ! -L $path ]] || cr_die "Refusing an unknown installation symlink: $path."
     [[ -e $path ]] || return 0
     metadata=$(stat -Lc '%u %a' -- "$path") || cr_die "Cannot inspect $path."
@@ -404,7 +417,9 @@ cr_report_ports() {
             else
                 output=$(ss -H -aunp '( sport = :443 )' 2>/dev/null) || output=
             fi
-            if [[ -n $output ]]; then printf '%s\n' "$output" >&2; reported=1; fi
+            # ss can print control bytes from a process's untrusted comm name.
+            # Escape terminal controls without wrapping or exposing argv.
+            if [[ -n $output ]]; then printf '%s\n' "$output" | LC_ALL=C sed -n 'l 0' >&2; reported=1; fi
         fi
         if (( !reported )); then
             while IFS=$'\t' read -r item address inode; do
@@ -425,8 +440,26 @@ cr_pid_socket_inodes() {
         if [[ $target =~ ^socket:\[([0-9]+)\]$ ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; fi
     done
 }
+# Unit aliases can resolve a dedicated name to an unrelated active service.
+# Return 0 only for the exact canonical unit, 1 for an absent/inactive alias
+# that can be replaced safely, and 2 for a live or unidentified foreign unit.
+cr_unit_identity() {
+    local identity state
+    identity=$(systemctl show "$SERVICE" --property=Id --value 2>/dev/null || true)
+    [[ $identity != "$SERVICE.service" ]] || return 0
+    state=$(systemctl show "$SERVICE" --property=ActiveState --value 2>/dev/null || true)
+    if systemctl is-active --quiet "$SERVICE" ||
+        [[ -n $identity && $state != inactive && $state != failed ]]; then
+        printf 'Refusing takeover: %s resolves to foreign/unidentified unit %q (state %q).\n' "$SERVICE" "$identity" "$state" >&2
+        return 2
+    fi
+    return 1
+}
 cr_unit_main_pid() {
-    local pid
+    local pid identity_status=0
+    cr_unit_identity || identity_status=$?
+    (( identity_status != 2 )) || return 2
+    (( identity_status == 0 )) || return 0
     pid=$(systemctl show "$SERVICE" --property=MainPID --value 2>/dev/null || true)
     if [[ $pid =~ ^[1-9][0-9]*$ && $pid != 1 && $pid != "$$" && $pid != "$BASHPID" ]]; then
         printf '%s\n' "$pid"
@@ -438,7 +471,7 @@ cr_unit_main_pid() {
 # and NUL-delimited argv. A generic caddy binary qualifies only when its run
 # command explicitly uses this deployment's exact configuration path.
 cr_is_relay_pid() {
-    local pid=$1 executable argument index
+    local pid=$1 executable argument index configurations=0 selected=
     local -a arguments=()
     [[ $pid =~ ^[1-9][0-9]*$ && $pid != 1 && $pid != "$$" && $pid != "$BASHPID" ]] || return 1
     executable=$(readlink -- "/proc/$pid/exe" 2>/dev/null) || return 1
@@ -447,17 +480,32 @@ cr_is_relay_pid() {
         while IFS= read -r -d '' argument; do arguments+=("$argument"); done < "/proc/$pid/cmdline"
     } 2>/dev/null || return 1
     [[ ${arguments[1]:-} == run ]] || return 1
-    if [[ $executable == "$BIN" || ${executable##*/} == "$SERVICE" ]]; then return 0; fi
-    [[ ${executable##*/} == caddy ]] || return 1
+    # A copied same-name executable can be an unrelated workload. Require the
+    # installed path (or generic Caddy) AND the exact managed configuration.
+    [[ $executable == "$BIN" || ${executable##*/} == caddy ]] || return 1
     for ((index=2; index<${#arguments[@]}; index++)); do
-        if [[ ${arguments[index]} == "--config=$CONFIG" ]]; then return 0; fi
-        if [[ ${arguments[index]} == --config && ${arguments[index+1]:-} == "$CONFIG" ]]; then return 0; fi
+        # Cobra accepts repeated config flags (last value wins); --resume
+        # ignores that file. Ambiguous or terminated option parsing is never
+        # positive ownership evidence for signalling a standalone process.
+        case ${arguments[index]} in
+            --resume|--resume=*|--|-r|-r=*) return 1 ;;
+            --config=*) configurations=$((configurations + 1)); selected=${arguments[index]#--config=} ;;
+            --config|-c)
+                index=$((index + 1))
+                (( index < ${#arguments[@]} )) || return 1
+                configurations=$((configurations + 1)); selected=${arguments[index]} ;;
+            --adapter|--envfile|--pidfile|--pingback|-a)
+                # Skip values as values, even when one resembles --config.
+                index=$((index + 1)); (( index < ${#arguments[@]} )) || return 1 ;;
+            --adapter=*|--envfile=*|--pidfile=*|--pingback=*|--environ|--environ=*|--watch|--watch=*|-e|-w) ;;
+            *) return 1 ;;
+        esac
     done
-    return 1
+    [[ $configurations == 1 && $selected == "$CONFIG" ]]
 }
 cr_old_pids() {
     local unit_pid pid directory
-    unit_pid=$(cr_unit_main_pid)
+    unit_pid=$(cr_unit_main_pid) || return
     if [[ -n $unit_pid && -d /proc/$unit_pid ]]; then printf '%s\n' "$unit_pid"; fi
     for directory in /proc/[0-9]*; do
         pid=${directory##*/}
@@ -472,7 +520,7 @@ cr_ports() {
     local occupied pids pid owned sockets inode found item foreign=0
     occupied=$(cr_port_inodes) || cr_die 'Cannot inspect listening sockets; port availability is unknown.'
     [[ -n $occupied ]] || return 0
-    pids=$(cr_old_pids)
+    pids=$(cr_old_pids) || cr_die 'Cannot establish the old relay process identities.'
     owned=
     while IFS= read -r pid; do
         [[ -n $pid ]] || continue
@@ -495,10 +543,10 @@ cr_ports() {
 # Signal only the dedicated unit or positively identified standalone instances.
 cr_signal_old() {
     local signal=$1 pids pid unit_pid
-    pids=$(cr_old_pids)
+    pids=$(cr_old_pids) || return
     while IFS= read -r pid; do
         [[ -n $pid ]] || continue
-        unit_pid=$(cr_unit_main_pid)
+        unit_pid=$(cr_unit_main_pid) || return
         if [[ $pid == "$unit_pid" ]] || cr_is_relay_pid "$pid"; then
             if kill -s "$signal" -- "$pid" 2>/dev/null; then
                 printf 'Sent %s to previous %s process %s.\n' "$signal" "$SERVICE" "$pid"
@@ -509,7 +557,7 @@ cr_signal_old() {
 cr_wait_old_stopped() {
     local attempts=$1 attempt state remaining
     for ((attempt=0; attempt<attempts; attempt++)); do
-        remaining=$(cr_old_pids)
+        remaining=$(cr_old_pids) || return 1
         state=$(systemctl show "$SERVICE" --property=ActiveState --value 2>/dev/null || true)
         if [[ -z $remaining && ( -z $state || $state == inactive || $state == failed ) ]] \
             && ! systemctl is-active --quiet "$SERVICE"; then return 0; fi
@@ -522,12 +570,21 @@ cr_wait_old_stopped() {
 # residual standalone servers too; force remaining unit members/processes only
 # after ten seconds. This runs after candidate validation and private backup.
 cr_stop_old() {
-    systemctl stop --no-block "$SERVICE" >/dev/null 2>&1 || true
-    cr_signal_old TERM
+    local canonical=0 identity_status=0
+    if cr_unit_identity; then canonical=1; else identity_status=$?; fi
+    (( identity_status != 2 )) || return 1
+    if (( canonical )); then systemctl stop --no-block "$SERVICE" >/dev/null 2>&1 || true; fi
+    cr_signal_old TERM || return
     if ! cr_wait_old_stopped 10; then
-        systemctl kill --kill-who=all --signal=KILL "$SERVICE" >/dev/null 2>&1 || true
-        cr_signal_old KILL
-        systemctl stop --no-block "$SERVICE" >/dev/null 2>&1 || true
+        if (( canonical )); then
+            cr_unit_identity || return 1
+            systemctl kill --kill-who=all --signal=KILL "$SERVICE" >/dev/null 2>&1 || true
+        fi
+        cr_signal_old KILL || return
+        if (( canonical )); then
+            cr_unit_identity || return 1
+            systemctl stop --no-block "$SERVICE" >/dev/null 2>&1 || true
+        fi
         if ! cr_wait_old_stopped 5; then
             printf 'Could not stop all previous %s processes.\n' "$SERVICE" >&2
             return 1
@@ -548,11 +605,22 @@ cr_ports_free() {
 # Compatibility name retained for existing usage/tests; this is now a safe
 # installation preflight, not an existence-based fresh-install gate.
 cr_fresh() {
-    local path dropin entry
+    local path dropin entry identity_status=0
+    cr_unit_identity || identity_status=$?
+    (( identity_status != 2 )) || cr_die 'An unrelated active service owns the dedicated unit alias; it was not stopped.'
     cr_check_account
     for path in "$ETC" "${PROFILE%/*}" "$TOOLS" "$TOOLS/backups" "$WWW"; do cr_check_leaf "$path" rootdir; done
     for path in "$DATA" "$RUNTIME"; do cr_check_leaf "$path" statedir; done
     for path in "$BIN" "$UNIT" "$CONFIG" "$SYSCTL"; do cr_check_leaf "$path" file; done
+    cr_check_leaf "/run/systemd/system/$SERVICE.service" file
+    for path in "/etc/systemd/system/multi-user.target.wants/$SERVICE.service" "/run/systemd/system/multi-user.target.wants/$SERVICE.service"; do
+        cr_check_parent_dirs "$path"
+        if [[ -L $path ]]; then
+            [[ $(stat -c %u -- "$path") == 0 ]] || cr_die 'Dedicated enablement link is not root-owned.'
+        else
+            cr_check_leaf "$path" file
+        fi
+    done
     for path in "$TOKEN_FILE" "$PROFILE" "$CLIENT_CONFIG"; do cr_check_leaf "$path" private; done
     for dropin in "$UNIT.d" "/run/systemd/system/$SERVICE.service.d" "/usr/lib/systemd/system/$SERVICE.service.d" "/lib/systemd/system/$SERVICE.service.d"; do
         cr_check_leaf "$dropin" rootdir
@@ -594,6 +662,12 @@ cr_new_file() {
 cr_rollback() {
     local failed=0 index=0 path existed type prior
     if ! cr_stop_old; then failed=1; fi
+    # Disable the candidate BEFORE restoring saved masks/runtime links. Both
+    # enablement namespaces must be cleared without following link targets.
+    if cr_unit_identity; then
+        systemctl disable "$SERVICE" >/dev/null 2>&1 || true
+        systemctl disable --runtime "$SERVICE" >/dev/null 2>&1 || true
+    fi
     while IFS=$'\t' read -r index existed type path; do
         if [[ $type == dir ]]; then
             [[ ! -e $path ]] || rm -rf -- "$path" || failed=1
@@ -608,22 +682,27 @@ cr_rollback() {
         fi
     done < "$backup_dir/manifest"
     systemctl daemon-reload || failed=1
-    # Remove candidate enablement first. In particular, restoring an originally
-    # runtime-only enable must not leave the candidate's persistent wants link.
-    if ! systemctl disable "$SERVICE" >/dev/null 2>&1; then
-        if systemctl is-enabled --quiet "$SERVICE"; then failed=1; fi
-    fi
-    case $was_enabled in
-        enabled) systemctl enable "$SERVICE" >/dev/null 2>&1 || failed=1 ;;
-        enabled-runtime) systemctl enable --runtime "$SERVICE" >/dev/null 2>&1 || failed=1 ;;
-    esac
+    # Restoring recorded entry paths retains runtime-only enablement and masks.
+    # A successful systemctl command alone does not establish recovered state.
+    prior=$(systemctl is-enabled "$SERVICE" 2>/dev/null || true)
+    prior=${prior:-disabled}
+    [[ $prior == "$was_enabled" ]] || failed=1
     if (( was_active )); then
         if [[ -x $BIN && -f $CONFIG ]]; then
-            systemctl start "$SERVICE" || failed=1
+            # An absent old unit file may expose a vendor alias after restore.
+            # Never start that target merely because the old unit was active.
+            if cr_unit_identity; then
+                systemctl start "$SERVICE" || failed=1
+                systemctl is-active --quiet "$SERVICE" || failed=1
+            else
+                failed=1
+            fi
         else
             printf 'Warning: the previous deployment was already missing binary/config/unit files; its disk baseline was restored but it cannot be restarted.\n' >&2
             failed=1
         fi
+    elif systemctl is-active --quiet "$SERVICE"; then
+        failed=1
     fi
     (( failed == 0 ))
 }
@@ -669,20 +748,24 @@ cr_backup() {
     install -d -m 700 "$backup_dir/files"
     : > "$backup_dir/manifest"
     local paths=("$BIN" "$CONFIG" "$TOKEN_FILE" "$UNIT" "$PROFILE" "$CLIENT_CONFIG" "$SYSCTL"
+        "/run/systemd/system/$SERVICE.service"
+        "/etc/systemd/system/multi-user.target.wants/$SERVICE.service"
+        "/run/systemd/system/multi-user.target.wants/$SERVICE.service"
         "$UNIT.d" "/run/systemd/system/$SERVICE.service.d" "/usr/lib/systemd/system/$SERVICE.service.d" "/lib/systemd/system/$SERVICE.service.d")
     for path in "${paths[@]}"; do
-        canonical=$(readlink -m -- "$path")
+        # Deduplicate aliased parent directories (/lib -> /usr/lib), not leaf
+        # links: two masks or enablement links must each be saved as entries.
+        canonical=$(readlink -m -- "${path%/*}")/${path##*/}
         [[ $seen != *$'\n'"$canonical"$'\n'* ]] || continue
         seen+="$canonical"$'\n'
         type=file; [[ $path != *.service.d ]] || type=dir
         existed=0
-        if [[ -e $path ]]; then existed=1; cp -a -- "$path" "$backup_dir/files/$index"; fi
+        if [[ -e $path || -L $path ]]; then existed=1; cp -a -- "$path" "$backup_dir/files/$index"; fi
         printf '%s\t%s\t%s\t%s\n' "$index" "$existed" "$type" "$path" >> "$backup_dir/manifest"
         index=$((index + 1))
     done
     printf 'active=%s\nenabled=%s\n' "$was_active" "$was_enabled" > "$backup_dir/service-state"
     printf 'Private deployment backup: %s\n' "$backup_dir"
-    transaction_started=1
 }
 # Inspect adjacent module/replacement records in `go version -m` output. Merely
 # finding a module name is insufficient: the binary must use its patched source.
@@ -698,9 +781,19 @@ cr_check_replacement() {
 # or transport forks while adding the pinned Cloudflare provider to the build.
 cr_build() {
     local jobs=$1 version expected modules info module
+    local -a snapshot_excludes=(--exclude=.git --exclude=target --exclude=__pycache__ --exclude=.venv --exclude='relay-servers-*')
+    # This also covers later authenticated protocol checks: x/net's inherited
+    # http2debug logs header values, including the Basic proxy credential.
+    unset GODEBUG
+    # GOTMPDIR alone does not control Go's module-root test or Git/helper
+    # scratch files. Ignore inherited locations and keep both private.
+    mkdir -m 700 "$work/tmp"
+    export TMPDIR=$work/tmp GOTMPDIR=$work/tmp
     mkdir "$work/source"
-    tar -C "$REPO" --exclude=.git --exclude=target --exclude=__pycache__ --exclude=.venv \
-        --exclude='relay-servers-*' -cf - . | tar -C "$work/source" -xf -
+    # A complete checkout may itself be under TOOLS. Never copy this run's
+    # growing source snapshot back into itself or exhaust the host's disk.
+    if [[ $work == "${REPO%/}/"* ]]; then snapshot_excludes+=(--exclude="./${work#"${REPO%/}/"}"); fi
+    tar -C "$REPO" "${snapshot_excludes[@]}" -cf - . | tar -C "$work/source" -xf -
     # Use the repository's exact Go release and the official archive metadata.
     # Require one archive matching both the release and native Linux architecture.
     version=$(sed -n 's/^toolchain \(go[0-9][0-9.]*\)$/\1/p' "$work/source/go.mod")
@@ -906,14 +999,26 @@ cr_profile_args() {
 # orphaned dedicated groups may be reused; unrelated/shared identities are not.
 cr_account() {
     cr_check_account
+    # Caddy's writable HOME environment remains DATA for its certificate cache,
+    # but SSH consults the NSS passwd home. nologin does not prevent SSH -N.
+    # Move only this already-qualified identity to a root-controlled/absent
+    # login home and lock passwords; no -m/-u or recursive ownership changes.
+    cr_check_leaf /nonexistent rootdir
     if ! id -u "$SERVICE" >/dev/null 2>&1; then
         if getent group "$SERVICE" >/dev/null; then
-            useradd --system --gid "$SERVICE" --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin "$SERVICE"
+            useradd --system --gid "$SERVICE" --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$SERVICE"
         else
-            useradd --system --user-group --no-create-home --home-dir "$DATA" --shell /usr/sbin/nologin "$SERVICE"
+            useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$SERVICE"
         fi
     fi
+    usermod --home /nonexistent --lock "$SERVICE"
     cr_check_account
+    local entry home status
+    entry=$(getent passwd "$SERVICE")
+    home=${entry%:*}; home=${home##*:}
+    [[ $home == /nonexistent ]] || cr_die 'Dedicated login home was not repaired.'
+    status=$(passwd -S "$SERVICE")
+    [[ $status == "$SERVICE L "* ]] || cr_die 'Dedicated login password is not locked.'
 }
 # Export the same domain/user/password used by the server and Apple profile.
 # This TOML supports the Rust GUI importer and headless client. SOCKS listens
@@ -1038,7 +1143,7 @@ cr_prepare() {
         printf 'A new 22-character relay password was generated; update old clients using the refreshed exports.\n'
     fi
     account=$(printf '%s\n' "$relay_password" | "$work/$SERVICE" network-relay passwd --name "$device_user" --stdin)
-    [[ $account =~ ^user[[:space:]]$device_user[[:space:]]\$[A-Za-z0-9\$=,+/._-]+$ ]] || cr_die 'Unexpected password hash output.'
+    [[ $account =~ ^user[[:space:]]${device_user}[[:space:]]\$[A-Za-z0-9\$=,+/._-]+$ ]] || cr_die 'Unexpected password hash output.'
     cr_config_text > "$candidate/Caddyfile"
     chmod 640 "$candidate/Caddyfile"
     chown root:"$SERVICE" "$candidate/Caddyfile"
@@ -1070,7 +1175,10 @@ cr_prepare() {
 # atomically switched, and the unit restarted. Any later failure restores the
 # previous files plus active/enabled state. DATA and website content stay in place.
 cr_deploy() {
-    local relay_password account key current response ready=0 attempt path existed type index
+    local relay_password account key current response ready=0 attempt path existed type index identity_status=0
+    # Also clear any export attribute inherited from a caller's same-name
+    # environment variable; set +a prevents newly assigned secrets exporting.
+    export -n relay_password account
     cr_fresh
     cr_account
     install -d -o root -g "$SERVICE" -m 750 "$ETC"
@@ -1096,10 +1204,20 @@ cr_deploy() {
         done
     } > "$work/sysctl"
     cr_backup
+    # Backup I/O can take time too. A snapshot alone is not a deployment
+    # mutation: reject new conflicts without a rollback that stops the old unit.
+    cr_ports
+    cr_unit_identity || identity_status=$?
+    (( identity_status != 2 )) || cr_die 'The unit alias changed during backup; no takeover was started.'
+    transaction_started=1
     # Take over all old dedicated instances, including unmanaged/deleted binaries.
     # Do this only after the candidate is validated and the prior files saved.
     cr_stop_old || cr_die 'Previous relay processes could not be stopped; restoring the previous deployment.'
     cr_ports_free
+    rm -f -- "/run/systemd/system/$SERVICE.service" \
+        "/etc/systemd/system/multi-user.target.wants/$SERVICE.service" \
+        "/run/systemd/system/multi-user.target.wants/$SERVICE.service"
+    if [[ -L $UNIT ]]; then rm -f -- "$UNIT"; fi
     # Remove only dedicated drop-ins, keeping their complete private copies.
     # Generic caddy.service and any of its settings are outside this transaction.
     while IFS=$'\t' read -r index existed type path; do
@@ -1180,6 +1298,25 @@ cr_require_systemd() {
     [[ $version =~ ^[0-9]+$ ]] && (( 10#$version >= 249 )) \
         || cr_die 'systemd 249+ is required for private credentials and service hardening.'
 }
+# Do not follow a planted directory/lock symlink or truncate another hard link.
+# This check happens before prompts and package/build subprocesses.
+cr_acquire_lock() {
+    local directory=/run/$SERVICE-install lock
+    cr_check_parent_dirs "$directory"
+    [[ ! -L $directory ]] || cr_die 'Installer lock directory must not be a symlink.'
+    if [[ -e $directory ]]; then
+        [[ -d $directory && $(stat -c '%u:%a' -- "$directory") == 0:700 ]] || cr_die 'Unsafe installer lock directory.'
+    else
+        mkdir -m 700 -- "$directory"
+    fi
+    lock=$directory/lock
+    [[ ! -L $lock ]] || cr_die 'Installer lock must not be a symlink.'
+    if [[ -e $lock ]]; then
+        [[ -f $lock && $(stat -c '%u:%a:%h' -- "$lock") == 0:600:1 ]] || cr_die 'Unsafe installer lock file.'
+    fi
+    exec {install_lock}>>"$lock"
+    flock -n "$install_lock" || cr_die 'Another installer is running.'
+}
 # Sequence matters: check dedicated path/account safety before input, then
 # finish the build and candidate validation before switching the running unit.
 cr_main() {
@@ -1203,9 +1340,7 @@ cr_main() {
     command -v flock >/dev/null || cr_die 'flock from util-linux is required.'
     # Serialize installers before inspecting shared paths. The lock descriptor
     # remains open until process exit; its private directory persists harmlessly.
-    install -d -m 700 "/run/$SERVICE-install"
-    exec {install_lock}>"/run/$SERVICE-install/lock"
-    flock -n "$install_lock" || cr_die 'Another installer is running.'
+    cr_acquire_lock
     cr_fresh
     cr_inputs
     cr_noninteractive
@@ -1214,7 +1349,7 @@ cr_main() {
     scope=selected
     jobs=1
     printf 'Defaults: user iphone, one build job, bundled selected-domain profile.\n'
-    printf 'Set DNS-only A/AAAA records to this server; open TCP/UDP 443 in the provider firewall.\n'
+    printf 'DNS-01 needs no A/AAAA records. For direct domain-based clients, route DNS-only records here and allow TCP/UDP 443.\n'
     printf 'Installing Caddy with Cloudflare DNS-01 and automatic certificate renewal.\n'
     # The local patched transports, command entry point, unit and domain lists
     # are mandatory. This installer cannot work as a standalone downloaded file.
