@@ -25,9 +25,10 @@ Local changes:
   CONNECT's original scheme. An unwritten request stream (such as client
   stream 0, which Apple's QUIC connection group implicitly opens and never
   writes) is left open and does not hold the connection out of its idle
-  timeout, but it takes one of the connection's 16 slots like a request with
-  incomplete headers; the global slot and the deadline start at a request
-  stream's first byte. A request whose headers do not arrive in time is
+  timeout. Unwritten streams, including the lower streams a reordered burst
+  of requests opens implicitly (RFC 9000 section 3.2), are bounded only by
+  the QUIC stream limit; the connection's 16 slots, the global slot and the
+  deadline start at a request stream's first byte. A request whose headers do not arrive in time is
   rejected in both directions with H3_REQUEST_REJECTED (RFC 9114 section
   4.1.1); one whose stream ends without complete headers gets
   H3_REQUEST_INCOMPLETE.
@@ -83,6 +84,13 @@ Local changes:
   refund adapted for a reset stream whose handler never started. The reviewed
   advisories are recorded in `provenance.json`; the CI version query fails on
   any other advisory for a recorded snapshot.
+- x-net/html: security fixes backported from x/net v0.62.0 without its other
+  changes: text tokens are coalesced into a buffer instead of repeated string
+  concatenation, which was quadratic (GO-2026-6860, parse.go), and raw text is
+  rendered literally only when every namespace transition above it is at an
+  HTML integration point (GO-2026-6866, render.go). Both files are identical
+  to v0.62.0. The relay itself never parses or renders HTML; the package is
+  linked through Caddy's PKI dependencies.
 - x-net/http2: SetExtendedConnectProtocol/ExtendedConnectProtocol replace a
   go:linkname to the unexported switch; DefaultServerMaxConcurrentStreams and
   DefaultServerMaxUploadBuffer{PerConnection,PerStream} set the server

@@ -116,8 +116,8 @@ func isDNSName(s string) bool {
 	return true
 }
 
-// refusal is why a tunnel could not be opened. Each maps to a status code
-// and an RFC 9209 Proxy-Status error type.
+// refusal is why a tunnel could not be opened. Each maps to an RFC 9209
+// Proxy-Status error type and the status code section 2.3 recommends for it.
 type refusal struct {
 	status    int
 	errorType string
@@ -132,9 +132,9 @@ var (
 	refuseBadTarget   = &refusal{http.StatusBadRequest, "http_request_error", "invalid target"}
 	refuseRequest     = &refusal{http.StatusBadRequest, "http_request_error", "malformed request"}
 	refusePort        = &refusal{http.StatusForbidden, "http_request_denied", "port blocked by blocked_ports"}
-	refuseAddress     = &refusal{http.StatusForbidden, "destination_ip_prohibited", "address blocked by blocked_destinations"}
+	refuseAddress     = &refusal{http.StatusBadGateway, "destination_ip_prohibited", "address blocked by blocked_destinations"}
 	refuseDNSTimeout  = &refusal{http.StatusGatewayTimeout, "dns_timeout", "DNS lookup timed out"}
-	refuseNoAddresses = &refusal{http.StatusBadGateway, "destination_not_found", "the name has no addresses"}
+	refuseNoAddresses = &refusal{http.StatusBadGateway, "dns_error", "the name has no addresses"}
 	refuseRefused     = &refusal{http.StatusBadGateway, "connection_refused", "connection refused"}
 	refuseTimeout     = &refusal{http.StatusGatewayTimeout, "connection_timeout", "connection timed out"}
 	refuseTooMany     = &refusal{http.StatusServiceUnavailable, "connection_limit_reached", "max_tunnels reached"}
@@ -145,7 +145,7 @@ func refuseDNS(err error) *refusal {
 }
 
 func refuseUnreachable(err error) *refusal {
-	return &refusal{http.StatusBadGateway, "destination_unavailable", "unreachable: " + err.Error()}
+	return &refusal{http.StatusBadGateway, "destination_ip_unroutable", "unreachable: " + err.Error()}
 }
 
 // policy decides which destinations clients may reach. Every address a

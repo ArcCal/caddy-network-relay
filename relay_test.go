@@ -427,8 +427,8 @@ func TestRefusals(t *testing.T) {
 				status      int
 				proxyStatus string
 			}{
-				{"127.0.0.2:80", 403, "destination_ip_prohibited"},
-				{"10.1.2.3:80", 403, "destination_ip_prohibited"},
+				{"127.0.0.2:80", 502, "destination_ip_prohibited"},
+				{"10.1.2.3:80", 502, "destination_ip_prohibited"},
 				{"127.0.0.1:9", 403, "http_request_denied"},
 				{"bad_host!:80", 400, "http_request_error"},
 				{"name.invalid:80", 502, "dns_error"},
@@ -447,14 +447,6 @@ func TestRefusals(t *testing.T) {
 					// Go's HTTP/2 client refuses this authority itself.
 					continue
 				}
-				if c.status == 400 && v.name == "h3" {
-					// A malformed H3 request must reset with MESSAGE_ERROR;
-					// its optional HTTP error can be discarded by that reset.
-					if code := streamCode(err); code != h3MessageError {
-						t.Fatalf("malformed authority: %v (code %#x)", err, code)
-					}
-					continue
-				}
 				wantStatus(t, err, c.status, c.proxyStatus)
 			}
 			// A closed port refuses.
@@ -470,7 +462,7 @@ func TestRefusals(t *testing.T) {
 			if done != nil {
 				done()
 			}
-			wantStatus(t, err, 403, "destination_ip_prohibited")
+			wantStatus(t, err, 502, "destination_ip_prohibited")
 		})
 	}
 }

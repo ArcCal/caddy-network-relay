@@ -396,13 +396,14 @@ Status codes and `Proxy-Status` (RFC 9209) on refusal:
 
 | Case | Status | `error=` in `Proxy-Status` |
 |---|---|---|
-| Malformed target; CONNECT-UDP with content headers or a request body; an HTTP/1.1 CONNECT-UDP that is not a GET or has no `Upgrade` in `Connection` | 400 (optional with HTTP/3 stream reset) | `http_request_error` |
+| Invalid target (no or zero port, not a host name, an IPv6 zone) | 400 | `http_request_error` |
+| Malformed request: CONNECT-UDP with content headers or a request body, or a `:scheme` other than https; an HTTP/1.1 CONNECT-UDP that is not a GET or has no `Upgrade` in `Connection` | 400, then a stream reset in HTTP/2 and HTTP/3 (which may discard the 400) | `http_request_error` |
 | The CONNECT-UDP path does not match `udp_template` | 404 | — |
-| Unsupported extended CONNECT protocol | 501 | — |
+| Unsupported extended CONNECT protocol | 501 | none (`details="unsupported :protocol"`) |
 | Port blocked; user just removed | 403 | `http_request_denied` |
-| Address blocked | 403 | `destination_ip_prohibited` |
-| DNS lookup failed / timed out (5 seconds) | 502 / 504 | `dns_error` / `dns_timeout` |
-| Connection refused / timed out / unreachable | 502 / 504 / 502 | `connection_refused` / `connection_timeout` / `destination_unavailable` |
+| Address blocked | 502 | `destination_ip_prohibited` |
+| DNS lookup failed or found no addresses / timed out (5 seconds) | 502 / 504 | `dns_error` / `dns_timeout` |
+| Connection refused / timed out / unreachable | 502 / 504 / 502 | `connection_refused` / `connection_timeout` / `destination_ip_unroutable` |
 | Over `max_tunnels` | 503 | `connection_limit_reached` |
 
 Problems after the tunnel is up (the destination disconnects, the destination port is unreachable, the device sends malformed data) reset the stream or close the connection as RFC 9114 / 9297 / 9298 specify; for which error code is used in each case, see the [design document](docs/design.md).

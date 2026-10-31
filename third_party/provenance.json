@@ -268,7 +268,7 @@
         {
           "path": "http3/server_conn.go",
           "upstream_sha256": "a95e03f55347db9adbcb67976ac9eea15301a5d9a6948c0dcaeb45daa277a402",
-          "local_sha256": "28d7c4aaeaea40de947cb979022aff29b3684cb910d45437885a8c7534268778",
+          "local_sha256": "1f47dcae1de73f70063198c27effc07af66edb76cfea584112cf5539dbf2832d",
           "modified": true
         },
         {
@@ -1483,14 +1483,14 @@
         {
           "path": "html/parse.go",
           "upstream_sha256": "ab68a3276498d29551d38faebd93a622c4d1d908f6f1dad00bce438e74110726",
-          "local_sha256": "ab68a3276498d29551d38faebd93a622c4d1d908f6f1dad00bce438e74110726",
-          "modified": false
+          "local_sha256": "5ce8bf09eee2642e6d08ff4dcdd827fc7f51e2f943c744f901a874956056a2b2",
+          "modified": true
         },
         {
           "path": "html/render.go",
           "upstream_sha256": "c53cd811db01490a88a3932ad97e0d0622fa87a8533662fb9810bc06814c4af8",
-          "local_sha256": "c53cd811db01490a88a3932ad97e0d0622fa87a8533662fb9810bc06814c4af8",
-          "modified": false
+          "local_sha256": "04f69a7822d18a68e035204ef53de56993ffc87ba7960b85b0514c2fa0cc5d9a",
+          "modified": true
         },
         {
           "path": "html/token.go",
@@ -4486,7 +4486,9 @@
         "GO-2026-6610": "fixed: x/net v0.60.0 response Content-Length and connection-specific field handling backported to http2/transport.go",
         "GO-2026-6611": "fixed: x/net v0.60.0 shared initial-window accounting backported to http2/flow.go, server.go, transport.go and writesched.go",
         "GO-2026-6612": "not affected: the relay's closeStream returns each closed stream's unread credit once (bodyBytesCredited); x/net v0.60.0's regression test passes with only the refund moment adapted",
-        "GO-2026-6617": "fixed: x/net v0.60.0 deferred HPACK encoder table-size updates backported to http2/server.go"
+        "GO-2026-6617": "fixed: x/net v0.60.0 deferred HPACK encoder table-size updates backported to http2/server.go",
+        "GO-2026-6860": "fixed: x/net v0.62.0 text-node coalescing backported to html/parse.go",
+        "GO-2026-6866": "fixed: x/net v0.62.0 raw-text ancestor namespace check backported to html/render.go"
       }
     }
   ]

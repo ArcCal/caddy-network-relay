@@ -11,14 +11,14 @@ import (
 // 9298 §3.5), which needs the server to send SETTINGS_ENABLE_CONNECT_PROTOCOL.
 // golang.org/x/net/http2, which Caddy uses for HTTP/2, supports it but
 // keeps it off unless the environment says GODEBUG=http2xconnect=1. The
-// relay turns it on, unless GODEBUG explicitly says http2xconnect=0.
+// relay turns it on, unless GODEBUG's last http2xconnect setting is 0.
 //
 // SetExtendedConnectProtocol and the server defaults below exist only in
 // the patched x/net in third_party: a build without it (an ordinary
 // `xcaddy --with`, which ignores this module's replace directives) fails
 // to compile instead of silently losing the patches.
 func init() {
-	if !strings.Contains(os.Getenv("GODEBUG"), "http2xconnect=0") {
+	if godebug(os.Getenv("GODEBUG"), "http2xconnect") != "0" {
 		http2.SetExtendedConnectProtocol(true)
 	}
 	// Every relayed TCP connection or UDP flow is a stream; a device that
@@ -33,6 +33,14 @@ func init() {
 
 func http2ExtendedConnect() bool { return http2.ExtendedConnectProtocol() }
 
-// goH2ClientExtendedConnect: the HTTP/2 client can send extended CONNECT
-// (used by `caddy network-relay check` and the tests).
-const goH2ClientExtendedConnect = true
+// godebug returns the value GODEBUG gives a setting, "" if none: settings
+// are comma-separated name=value pairs, and the last one for a name wins.
+func godebug(env, name string) string {
+	value := ""
+	for _, setting := range strings.Split(env, ",") {
+		if n, v, ok := strings.Cut(strings.TrimSpace(setting), "="); ok && n == name {
+			value = v
+		}
+	}
+	return value
+}

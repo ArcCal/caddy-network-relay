@@ -158,7 +158,7 @@ func (r *rawH2) connectUDP(stream uint32, host, port string) string {
 func TestHTTP2ExtendedConnectAtFrameLevel(t *testing.T) {
 	port, _ := startRelay(t, nil, nil)
 	if !http2ExtendedConnect() {
-		t.Skip("extended CONNECT is off (Go 1.27+ without GODEBUG=http2xconnect=1)")
+		t.Skip("extended CONNECT is off (GODEBUG=http2xconnect=0)")
 	}
 	host, uport := echoUDP(t)
 	r := dialRawH2(t, port)

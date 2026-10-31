@@ -387,8 +387,13 @@ var handshakes = struct {
 	last   time.Time
 }{tokens: handshakeBurst}
 
-// handshakeNeedsRetry is the Transport's VerifySourceAddress.
+// handshakeNeedsRetry is the Transport's VerifySourceAddress. Clients also
+// prove their address once half the handshake slots are taken: spoofed
+// handshakes at any rate below handshakeRate could otherwise hold them.
 func handshakeNeedsRetry(net.Addr) bool {
+	if 2*len(h3Handshakes) >= cap(h3Handshakes) {
+		return true
+	}
 	now := time.Now()
 	handshakes.Lock()
 	defer handshakes.Unlock()
@@ -520,8 +525,9 @@ func (ep *endpoint) accept() {
 		}
 		u, ok := conn.Context().Value(endpointUserKey{}).(endpointUser)
 		if !ok {
+			// Only this connection is unusable; keep accepting others.
 			_ = conn.CloseWithError(quic.ApplicationErrorCode(http3.ErrCodeNoError), "")
-			return
+			continue
 		}
 		s := u.server
 		release, ok := h3Connections.acquire(conn.RemoteAddr())

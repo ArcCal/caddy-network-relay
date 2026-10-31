@@ -401,9 +401,6 @@ func (c *relayClient) openTCPH2(ctx context.Context, h *h2Conn, target string) (
 }
 
 func (c *relayClient) openUDPH2(ctx context.Context, h *h2Conn, host, port string) (packetConn, error) {
-	if !goH2ClientExtendedConnect {
-		return nil, errors.New("this build cannot send extended CONNECT over HTTP/2: build with Go 1.26 or -tags http2legacy")
-	}
 	path, err := c.udpPath(host, port)
 	if err != nil {
 		return nil, err

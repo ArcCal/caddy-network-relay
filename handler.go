@@ -154,7 +154,7 @@ func (h *Handler) Provision(ctx caddy.Context) error {
 		h.logger.Warn("network_relay has no users; it only serves the website")
 	}
 	if !http2ExtendedConnect() {
-		h.logger.Warn("UDP over HTTP/2 (extended CONNECT) is off; start Caddy with GODEBUG=http2xconnect=1 to turn it on")
+		h.logger.Warn("UDP over HTTP/2 (extended CONNECT) is off because GODEBUG sets http2xconnect=0; remove that setting to turn it on")
 	}
 	if h.BlockedDestinations != nil && len(*h.BlockedDestinations) == 0 {
 		h.logger.Warn("blocked_destinations is empty: clients can reach services on this host and its private network")
@@ -242,6 +242,12 @@ func (h *Handler) classify(r *http.Request) (requestKind, target, bool) {
 	}
 	switch {
 	case r.Method == http.MethodConnect && protocol == "":
+		// HTTP/1.1 CONNECT names its target in authority form (RFC 9112
+		// section 3.2.3). net/http falls back to the Host field for any other form,
+		// which names no target.
+		if r.ProtoMajor == 1 && (strings.HasPrefix(r.RequestURI, "/") || strings.Contains(r.RequestURI, "://")) {
+			return tcpRequest, target{}, false
+		}
 		t, ok := parseAuthority(r.Host)
 		return tcpRequest, t, ok
 	case r.Method == http.MethodConnect && protocol == connectUDP && r.ProtoMajor >= 2,
@@ -292,6 +298,13 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 			w.Header().Set("Alt-Svc", v)
 		}
 	}
+	// RFC 9931 section 6.3: data a client sends after an HTTP/1.1 connect-udp
+	// upgrade request must never be read as further requests, so any answer
+	// but the 101 (written directly to the hijacked connection) closes it.
+	// Rejected CONNECTs close too (RFC 9931 section 8), as net/http does for them.
+	if r.ProtoMajor == 1 && headerHasToken(r.Header, "Upgrade", connectUDP) {
+		w.Header().Set("Connection", "close")
+	}
 	kind, t, validTarget := h.classify(r)
 	if kind == notRelay {
 		return next.ServeHTTP(w, r)
@@ -337,6 +350,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		return caddyhttp.Error(http.StatusNotFound, nil)
 	}
 	if kind == unsupportedProtocol {
+		// RFC 9220 section 3: an unsupported :protocol gets 501; no Proxy-Status
+		// error type fits, so the detail says why (as network-relay does).
+		w.Header().Set("Proxy-Status", `network-relay; details="unsupported :protocol"`)
 		w.WriteHeader(http.StatusNotImplemented)
 		return nil
 	}
@@ -346,8 +362,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 	if kind == udpRequest && r.ProtoMajor >= 2 && r.URL.Scheme != "https" {
 		return h.refuseMalformed(w, r, refuseRequest)
 	}
+	// A target that is well formed but unusable (port 0, a name that is not
+	// a host name, an IPv6 zone) is refused with 400, as RFC 9110 section 9.3.6 asks
+	// for CONNECT; it is not a malformed message, so HTTP/2 and HTTP/3 do
+	// not reset the stream and the client gets the response.
 	if !validTarget {
-		return h.refuseMalformed(w, r, refuseBadTarget)
+		return h.refuse(w, r, refuseBadTarget)
 	}
 	if kind == udpRequest && (r.ContentLength > 0 || len(r.TransferEncoding) > 0 ||
 		len(r.Header.Values("Content-Length")) > 0 || len(r.Header.Values("Content-Type")) > 0 ||

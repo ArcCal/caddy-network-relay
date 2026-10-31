@@ -430,6 +430,21 @@ func TestHTTP3DatagramsOnOtherRequests(t *testing.T) {
 			t.Fatalf("got %v (code %#x)", err, code)
 		}
 	})
+	t.Run("finished website request drops them", func(t *testing.T) {
+		// RFC 9297 section 2.1: after the request's receive side is closed a
+		// datagram MUST be dropped silently, even if nobody read the FIN.
+		h := dialRawH3(t, port)
+		str, br, rsp := h.request([][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}})
+		if rsp.status != "200" {
+			t.Fatal(rsp.status)
+		}
+		str.Close()
+		time.Sleep(100 * time.Millisecond) // the relay receives the FIN
+		h.datagram(str, []byte("late"))
+		if _, err := readData(t, br, len(big)); err != nil {
+			t.Fatalf("download failed: %v (code %#x)", err, streamCode(err))
+		}
+	})
 	t.Run("UDP tunnel accepts them", func(t *testing.T) {
 		host, uport := echoUDP(t)
 		h := dialRawH3(t, port)
@@ -509,9 +524,6 @@ func TestUDPUnreachableClosesTheTunnel(t *testing.T) {
 	c.Close()
 	for _, v := range versions {
 		t.Run(v.name, func(t *testing.T) {
-			if v.name == "h2" && !goH2ClientExtendedConnect {
-				t.Skip("Go's HTTP/2 client cannot send extended CONNECT in this build")
-			}
 			ctx := testCtx(t)
 			p, done, err := v.openUDP(ctx, client(port), "127.0.0.1", closed)
 			if err != nil {
@@ -875,5 +887,99 @@ func TestH3ClientChecksPushFrames(t *testing.T) {
 				t.Fatalf("closed with %v, want the client's %#x", context.Cause(conn.Context()), tc.code)
 			}
 		})
+	}
+}
+
+// RFC 9931 section 8 (updating RFC 9112): a proxy MUST close the connection when it
+// rejects a CONNECT, without processing any further request on it, whether
+// or not the request asked for "close". A rejected connect-udp upgrade is
+// closed too, for the reason given in RFC 9931 section 6.3.
+func TestHTTP1RejectedTunnelRequestsCloseTheConnection(t *testing.T) {
+	port, _ := startRelay(t, nil, nil)
+	closed := "127.0.0.1:" + strconv.Itoa(freePort(t))
+	auth := "Proxy-Authorization: " + BasicAuthorization("alice", testPassword) + "\r\n"
+	smuggled := "GET / HTTP/1.1\r\nHost: relay.test\r\n\r\n"
+	for _, req := range []string{
+		// No credentials: the cover answer.
+		"CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n",
+		// Authenticated, destination refuses the connection.
+		"CONNECT " + closed + " HTTP/1.1\r\nHost: " + closed + "\r\n" + auth + "\r\n",
+		// connect-udp upgrades: without credentials, and malformed.
+		"GET / HTTP/1.1\r\nHost: relay.test\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\n\r\n",
+		"POST " + mustExpand("127.0.0.1", "53") + " HTTP/1.1\r\nHost: relay.test\r\nConnection: Upgrade\r\nUpgrade: connect-udp\r\n" + auth + "\r\n",
+	} {
+		conn := tlsDial(t, port, "http/1.1")
+		io.WriteString(conn, req+smuggled)
+		out, _ := io.ReadAll(conn)
+		conn.Close()
+		if n := strings.Count(string(out), "HTTP/1.1 "); n != 1 {
+			t.Errorf("%q: %d responses, want 1 and a closed connection:\n%s", req, n, out)
+		}
+		if strings.HasPrefix(string(out), "HTTP/1.1 101") || strings.HasPrefix(req, "CONNECT") && strings.HasPrefix(string(out), "HTTP/1.1 2") {
+			t.Errorf("%q: accepted: %s", req, out)
+		}
+	}
+}
+
+// RFC 9000 section 3.2: a frame for a client stream opens every lower-numbered one,
+// so when a burst of requests arrives out of order the server has many
+// streams it has not received a byte of yet. None of them is an incomplete
+// request: all must be answered and the connection must stay open.
+func TestHTTP3ImplicitlyOpenedStreamsDoNotCloseTheConnection(t *testing.T) {
+	port, _ := startRelay(t, nil, nil)
+	h := dialRawH3(t, port)
+	const n = 40
+	strs := make([]*quic.Stream, n)
+	for i := range strs {
+		str, err := h.conn.OpenStreamSync(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		str.SetDeadline(time.Now().Add(10 * time.Second))
+		strs[i] = str
+	}
+	get := h3Frame(0x1, qpackHeaders([][2]string{{":method", "GET"}, {":scheme", "https"}, {":authority", "relay.test"}, {":path", "/"}}))
+	// The highest stream first; the others "arrive" later.
+	for i := n - 1; i >= 0; i-- {
+		strs[i].Write(get)
+		strs[i].Close()
+		if i == n-1 {
+			time.Sleep(200 * time.Millisecond)
+		}
+	}
+	for i, str := range strs {
+		if rsp := h.readHeaders(bufio.NewReader(str)); rsp.status != "200" {
+			t.Fatalf("stream %d: status %q", i, rsp.status)
+		}
+	}
+	if err := context.Cause(h.conn.Context()); err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("connection closed: %v", err)
+	}
+}
+
+// RFC 9112 section 3.2.3: an HTTP/1.1 CONNECT names its target in authority form;
+// the Host field is not a fallback for another form.
+func TestHTTP1ConnectNeedsAnAuthorityFormTarget(t *testing.T) {
+	port, _ := startRelay(t, nil, nil)
+	target := echoTCP(t)
+	auth := "Proxy-Authorization: " + BasicAuthorization("alice", testPassword) + "\r\n"
+	for _, c := range []struct {
+		req    string
+		status int
+	}{
+		{"CONNECT /anything HTTP/1.1\r\nHost: " + target + "\r\n" + auth + "\r\n", 400},
+		{"CONNECT http://" + target + "/ HTTP/1.1\r\nHost: " + target + "\r\n" + auth + "\r\n", 400},
+		{"CONNECT " + target + " HTTP/1.1\r\nHost: " + target + "\r\n" + auth + "\r\n", 200},
+	} {
+		conn := tlsDial(t, port, "http/1.1")
+		io.WriteString(conn, c.req)
+		rsp, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+		if err != nil {
+			t.Fatalf("%q: %v", c.req, err)
+		}
+		if rsp.StatusCode != c.status {
+			t.Errorf("%q: %d, want %d", strings.SplitN(c.req, "\r\n", 2)[0], rsp.StatusCode, c.status)
+		}
+		conn.Close()
 	}
 }

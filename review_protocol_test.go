@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -110,11 +111,27 @@ func expectMalformedH3(t *testing.T, h *rawH3, fields [][2]string, fin bool) {
 	}
 }
 
-func TestMalformedH3AuthorityResetsWithAndWithoutFIN(t *testing.T) {
+// "bad_host!" is a syntactically valid reg-name (RFC 3986 section 3.2.2), so
+// the request is not malformed; the target is unusable and gets 400 with
+// Proxy-Status, as RFC 9110 section 9.3.6 asks, with or without the FIN.
+func TestInvalidH3TargetGets400WithAndWithoutFIN(t *testing.T) {
 	port, _ := startRelay(t, nil, nil)
 	for _, fin := range []bool{false, true} {
 		t.Run(fmt.Sprintf("FIN=%v", fin), func(t *testing.T) {
-			expectMalformedH3(t, dialRawH3(t, port), connectTCPFields("bad_host!:80"), fin)
+			h := dialRawH3(t, port)
+			str, err := h.conn.OpenStreamSync(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			str.SetDeadline(time.Now().Add(10 * time.Second))
+			str.Write(h3Frame(0x1, qpackHeaders(connectTCPFields("bad_host!:80"))))
+			if fin {
+				str.Close()
+			}
+			rsp := h.readHeaders(bufio.NewReader(str))
+			if rsp.status != "400" || !strings.Contains(strings.Join(rsp.fields["proxy-status"], ","), "http_request_error") {
+				t.Fatalf("got %s %v, want 400 with http_request_error", rsp.status, rsp.fields["proxy-status"])
+			}
 		})
 	}
 }

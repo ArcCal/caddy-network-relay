@@ -99,20 +99,22 @@ func (c *RawServerConn) HandleRequestStream(str *quic.Stream) {
 	// A stream the client has not written is neither a request nor late.
 	// Apple's QUIC connection group implicitly opens client stream 0 and
 	// never writes it; cancelling it fails the client's whole connection.
-	// It still takes one of this connection's header slots, so unwritten
-	// streams stay bounded as before. The global slot, the header deadline
-	// and the idle timer apply from the first byte. Peek also returns at EOF,
-	// cancellation or connection close, which the request parsing below
-	// handles as before.
+	// A frame for a higher stream also opens every lower one (RFC 9000
+	// section 3.2), so a burst of requests that arrives out of order leaves
+	// many streams unwritten for a moment. Unwritten streams are bounded by
+	// the QUIC stream limit alone; the connection's header slots, the
+	// global slot, the header deadline and the idle timer apply from the
+	// first byte. Peek also returns at EOF, cancellation or connection
+	// close, which the request parsing below handles as before.
+	_, _ = str.Peek(make([]byte, 1))
 	select {
 	case c.pendingHeaders <- struct{}{}:
 	default:
-		// No client needs this many requests without headers: close the
-		// connection rather than let it hold more slots.
+		// No client needs this many requests with incomplete headers: close
+		// the connection rather than let it hold more slots.
 		c.CloseWithError(quic.ApplicationErrorCode(ErrCodeExcessiveLoad), "too many incomplete requests")
 		return
 	}
-	_, _ = str.Peek(make([]byte, 1))
 	hstr := c.rawConn.TrackStream(str)
 	c.handleRequestStream(hstr)
 }

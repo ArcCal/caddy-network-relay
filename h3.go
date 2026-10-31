@@ -147,6 +147,10 @@ func (h h3Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !extendedConnect {
 		if str := requestStream(w); str != nil {
 			guard := &datagramGuard{}
+			// The client has finished sending once the stream's final size
+			// is known, whether or not the handler reads the body (a website
+			// does not read a GET's); datagrams after that are dropped.
+			str.QUICStream().SetReceiveFinalSizeCallback(func(int64) { guard.receiveClosed() })
 			ctx, cancel := context.WithCancel(r.Context())
 			defer cancel()
 			go guard.watch(ctx, str)

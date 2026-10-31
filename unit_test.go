@@ -736,3 +736,36 @@ func TestCheckResponse(t *testing.T) {
 		}
 	}
 }
+
+func TestGODEBUGSettingsUseTheLastValue(t *testing.T) {
+	for env, want := range map[string]string{
+		"":                                "",
+		"http2xconnect=0":                 "0",
+		"http2xconnect=0,http2xconnect=1": "1",
+		"x=1, http2xconnect=0":            "0",
+		"nothttp2xconnect=0":              "",
+		"http2xconnect=1,http2debug=2":    "1",
+	} {
+		if got := godebug(env, "http2xconnect"); got != want {
+			t.Errorf("%q: %q, want %q", env, got, want)
+		}
+	}
+}
+
+// RFC 9000 section 8.1: with half the handshake slots taken, new clients prove
+// their address with a Retry first.
+func TestHandshakesNeedRetryWhenHalfTheSlotsAreTaken(t *testing.T) {
+	held := 0
+	defer func() {
+		for ; held > 0; held-- {
+			<-h3Handshakes
+		}
+	}()
+	for 2*len(h3Handshakes) < cap(h3Handshakes) {
+		h3Handshakes <- struct{}{}
+		held++
+	}
+	if !handshakeNeedsRetry(nil) {
+		t.Fatal("no Retry with half the handshake slots taken")
+	}
+}
