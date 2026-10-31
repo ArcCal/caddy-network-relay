@@ -59,6 +59,11 @@
 # 1. Fresh-only checks rejected each existing file, directory and account, forcing
 #    manual deletion and risking certificate loss. Inspect/reuse safe resources
 #    and replace managed files transactionally; support interrupted installs.
+#    A same-named file with a bad mode/owner, a symlinked file, or a file where
+#    a directory belongs is replaced or set aside rather than stopping the run;
+#    the same-named account gets a nologin shell, no supplementary groups and a
+#    non-writable home. Symlinked dedicated directories, unsafe shared parents,
+#    privileged or shared IDs and foreign listeners/aliases still stop the run.
 # 2. systemd-run tried to execute /run/<service>-candidate/<binary> before its
 #    BindReadOnlyPaths namespace existed. It resolves the first executable in the
 #    HOST namespace. Use the host's /usr/bin/env -- entry point to exec the mapped
@@ -225,7 +230,9 @@ private client export preserves its relay password; otherwise a new 22-character
 password is generated and both client files are refreshed. Dedicated service
 files/drop-ins are backed up privately before replacement; ACME state and website
 content stay in place. Existing valid Caddy certificates are detected and reused
-without a forced certificate request. Unsafe paths or shared/login accounts are rejected.
+without a forced certificate request. Same-named files, units and processes of
+this deployment are taken over; unsafe shared parents, shared/privileged
+accounts and foreign port owners are reported and left untouched.
 Caddy reads the DNS token from systemd credentials, not its environment.
 The root-only token source is $TOKEN_FILE and is retained for renewal.
 The service has a read-only host filesystem, private state/runtime directories,
@@ -299,8 +306,8 @@ cr_check_account() {
     fi
     IFS=: read -r name ignored uid gid gecos home shell <<< "$entry"
     [[ $uid =~ ^[0-9]+$ && $gid =~ ^[0-9]+$ && $uid != 0 && $gid != 0 ]] || cr_die 'Dedicated account must not be privileged.'
-    [[ $home == "$DATA" || $home == /nonexistent ]] || cr_die 'Existing service account has an unrelated home directory.'
-    case $shell in /usr/sbin/nologin|/sbin/nologin|/bin/false|/usr/bin/false) ;; *) cr_die 'Existing service account has a login shell.' ;; esac
+    # A login shell, another home or supplementary groups on this same-named
+    # account are repaired by cr_account (usermod; no home move or chown).
     [[ -n $group_entry ]] || cr_die 'Dedicated primary group is missing.'
     IFS=: read -r name ignored primary members <<< "$group_entry"
     [[ $primary == "$gid" && -z $members && $(id -gn "$SERVICE") == "$SERVICE" ]] || cr_die 'Existing service account/group is shared or mismatched.'
@@ -309,8 +316,6 @@ cr_check_account() {
     [[ $aliases == 1 && $users == 1 ]] || cr_die 'Existing service UID/GID is shared by another account.'
     aliases=$(getent group | awk -F: -v gid="$gid" '$3 == gid {n++} END {print n+0}')
     [[ $aliases == 1 ]] || cr_die 'Existing primary GID has another group alias.'
-    groups=$(id -G "$SERVICE")
-    for item in $groups; do [[ $item == "$gid" ]] || cr_die 'Dedicated account has supplementary groups.'; done
 }
 # Kept as an alias for older callers; existing safe accounts are now accepted.
 cr_require_new_account() { cr_check_account; }
@@ -612,30 +617,56 @@ cr_ports_free() {
 }
 # Compatibility name retained for existing usage/tests; this is now a safe
 # installation preflight, not an existence-based fresh-install gate.
+# A same-named dedicated entry with the wrong type, owner or mode (including a
+# symlinked file) is replaced or repaired, never written through: files are
+# renamed over after backup, a non-directory at a directory path is set aside,
+# and a real directory gets only its own owner/mode fixed. A symlinked
+# dedicated directory, unsafe shared parents, foreign unit aliases, shared or
+# privileged accounts and foreign listeners remain genuine conflicts.
+cr_note_repair() {
+    local reason
+    if ! reason=$( (cr_check_leaf "$1" "$2") 2>&1 ); then
+        printf 'Will replace or repair same-named dedicated entry: %s\n' "${reason#Error: }"
+    fi
+}
 cr_fresh() {
-    local path dropin entry identity_status=0
+    local path dropin identity_status=0
     cr_unit_identity || identity_status=$?
     (( identity_status != 2 )) || cr_die 'An unrelated active service owns the dedicated unit alias; it was not stopped.'
     cr_check_account
-    for path in "$ETC" "${PROFILE%/*}" "$TOOLS" "$TOOLS/backups" "$WWW"; do cr_check_leaf "$path" rootdir; done
-    for path in "$DATA" "$RUNTIME"; do cr_check_leaf "$path" statedir; done
-    for path in "$BIN" "$UNIT" "$CONFIG" "$SYSCTL"; do cr_check_leaf "$path" file; done
-    cr_check_leaf "/run/systemd/system/$SERVICE.service" file
-    for path in "/etc/systemd/system/multi-user.target.wants/$SERVICE.service" "/run/systemd/system/multi-user.target.wants/$SERVICE.service"; do
+    for path in "$ETC" "${PROFILE%/*}" "$TOOLS" "$TOOLS/backups" "$WWW" "$DATA" "$RUNTIME" "$BIN" "$UNIT" \
+        "$CONFIG" "$SYSCTL" "/run/systemd/system/$SERVICE.service" "$TOKEN_FILE" "$PROFILE" "$CLIENT_CONFIG" \
+        "/etc/systemd/system/multi-user.target.wants/$SERVICE.service" \
+        "/run/systemd/system/multi-user.target.wants/$SERVICE.service"; do
         cr_check_parent_dirs "$path"
-        if [[ -L $path ]]; then
-            [[ $(stat -c %u -- "$path") == 0 ]] || cr_die 'Dedicated enablement link is not root-owned.'
-        else
-            cr_check_leaf "$path" file
-        fi
     done
-    for path in "$TOKEN_FILE" "$PROFILE" "$CLIENT_CONFIG"; do cr_check_leaf "$path" private; done
+    # DATA holds ACME accounts/keys: systemd would chown a link target too.
+    for path in "$ETC" "${PROFILE%/*}" "$TOOLS" "$TOOLS/backups" "$WWW" "$DATA"; do
+        [[ ! -L $path ]] || cr_die "Dedicated directory $path is a symlink; it was not followed or replaced. Make it a real directory, then rerun."
+    done
+    for path in "$ETC" "${PROFILE%/*}" "$TOOLS" "$TOOLS/backups" "$WWW"; do cr_note_repair "$path" rootdir; done
+    for path in "$DATA" "$RUNTIME"; do cr_note_repair "$path" statedir; done
+    for path in "$BIN" "$CONFIG" "$SYSCTL"; do cr_note_repair "$path" file; done
+    for path in "$TOKEN_FILE" "$PROFILE" "$CLIENT_CONFIG"; do cr_note_repair "$path" private; done
+    # Drop-in directories are saved whole and then removed, never followed.
     for dropin in "$UNIT.d" "/run/systemd/system/$SERVICE.service.d" "/usr/lib/systemd/system/$SERVICE.service.d" "/lib/systemd/system/$SERVICE.service.d"; do
-        cr_check_leaf "$dropin" rootdir
-        [[ -d $dropin ]] || continue
-        while IFS= read -r entry; do cr_check_leaf "$entry" file; done < <(find -P "$dropin" -mindepth 1 -maxdepth 1 -print)
+        cr_check_parent_dirs "$dropin/x"
     done
     cr_ports
+}
+cr_set_aside() {
+    local aside
+    aside=$1.replaced-$(date -u +%Y%m%d%H%M%S)-$$
+    mv -T -- "$1" "$aside"
+    printf 'Moved the conflicting same-named entry %s to %s.\n' "$1" "$aside"
+}
+# Fix only this directory's own owner/mode; never recurse or follow a link.
+cr_repair_dir() {
+    local path=$1 owner=$2 group=$3 mode=$4
+    cr_check_parent_dirs "$path"
+    [[ ! -L $path ]] || cr_die "Dedicated directory $path is a symlink; it was not followed or replaced."
+    if [[ -e $path && ! -d $path ]]; then cr_set_aside "$path"; fi
+    install -d -o "$owner" -g "$group" -m "$mode" -- "$path"
 }
 # Downloads and redirects must remain HTTPS with normal certificate checking.
 # Ignore .curlrc so local defaults cannot disable TLS verification or add requests.
@@ -680,6 +711,9 @@ cr_rollback() {
         if [[ $type == dir ]]; then
             [[ ! -e $path ]] || rm -rf -- "$path" || failed=1
             if [[ $existed == 1 ]]; then cp -a -- "$backup_dir/files/$index" "$path" || failed=1; fi
+        elif [[ $existed == 1 && -d $backup_dir/files/$index && ! -L $backup_dir/files/$index ]]; then
+            # A directory that had occupied a file path is restored as it was.
+            rm -rf -- "$path" && cp -a -- "$backup_dir/files/$index" "$path" || failed=1
         elif [[ $existed == 1 ]]; then
             prior=$(mktemp "${path%/*}/.${path##*/}.restore.XXXXXXXX") || { failed=1; continue; }
             if cp -a -- "$backup_dir/files/$index" "$prior" && mv -fT -- "$prior" "$path"; then :; else
@@ -736,10 +770,12 @@ cr_cleanup() {
 }
 # Copy into a same-filesystem temporary file, then rename. Replacing the pathname
 # never truncates the executable inode still in use by the previous process.
+# rename(2) replaces a same-named symlink itself and never writes through it.
+# A directory at a file path is set aside (callers have already saved it).
 cr_atomic_install() {
     local source=$1 destination=$2 mode=$3 group=${4:-root} temporary
     cr_check_parent_dirs "$destination"
-    [[ ! -L $destination ]] || cr_die "Refusing installation symlink: $destination."
+    if [[ -d $destination && ! -L $destination ]]; then cr_set_aside "$destination"; fi
     temporary=$(mktemp "${destination%/*}/.${destination##*/}.install.XXXXXXXX")
     if install -o root -g "$group" -m "$mode" -- "$source" "$temporary" && mv -fT -- "$temporary" "$destination"; then :; else
         rm -f -- "$temporary"
@@ -752,8 +788,7 @@ cr_backup() {
     if systemctl is-active --quiet "$SERVICE"; then was_active=1; fi
     was_enabled=$(systemctl is-enabled "$SERVICE" 2>/dev/null || true)
     was_enabled=${was_enabled:-disabled}
-    cr_check_leaf "$TOOLS/backups" rootdir
-    install -d -o root -g root -m 700 "$TOOLS/backups"
+    cr_repair_dir "$TOOLS/backups" root root 700
     backup_dir=$(mktemp -d "$TOOLS/backups/deployment-$(date -u +%Y%m%d-%H%M%S).XXXXXXXX")
     install -d -m 700 "$backup_dir/files"
     : > "$backup_dir/manifest"
@@ -1033,9 +1068,14 @@ cr_account() {
             useradd --system --user-group --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin "$SERVICE"
         fi
     fi
-    usermod --home /nonexistent --lock "$SERVICE"
+    usermod --home /nonexistent --shell /usr/sbin/nologin --groups '' --lock "$SERVICE"
     cr_check_account
-    local entry home status
+    local entry home status shell item
+    shell=$(getent passwd "$SERVICE" | cut -d: -f7)
+    case $shell in /usr/sbin/nologin|/sbin/nologin|/bin/false|/usr/bin/false) ;; *) cr_die 'Cannot disable the service account login shell.' ;; esac
+    for item in $(id -G "$SERVICE"); do
+        [[ $item == "$(id -g "$SERVICE")" ]] || cr_die 'Cannot remove supplementary groups from the service account.'
+    done
     entry=$(getent passwd "$SERVICE")
     home=${entry%:*}; home=${home##*:}
     [[ $home == /nonexistent ]] || cr_die 'Dedicated login home was not repaired.'
@@ -1090,7 +1130,10 @@ cr_generate_password() {
 # deliberately regenerating the server configuration from the current template.
 cr_recover_credentials() {
     local old_domain old_user old_password
-    [[ -f $CLIENT_CONFIG ]] || return 1
+    # A password from a linked, foreign-owned or group/other-readable export may
+    # be exposed or planted: generate a new one rather than reuse it.
+    [[ -f $CLIENT_CONFIG && ! -L $CLIENT_CONFIG && $(stat -c %u -- "$CLIENT_CONFIG") == 0 ]] || return 1
+    (( (8#$(stat -c %a -- "$CLIENT_CONFIG") & 0077) == 0 )) || return 1
     old_domain=$(sed -n 's|^uri_template = "https://\([^/]*\)/.well-known/masque/udp/{target_host}/{target_port}/"$|\1|p' "$CLIENT_CONFIG")
     old_user=$(sed -n 's/^username = "\([A-Za-z0-9_-][A-Za-z0-9_.-]*\)"$/\1/p' "$CLIENT_CONFIG")
     old_password=$(sed -n 's/^password = "\([A-Za-z0-9+/]*\)"$/\1/p' "$CLIENT_CONFIG")
@@ -1203,11 +1246,15 @@ cr_deploy() {
     export -n relay_password account
     cr_fresh
     cr_account
-    install -d -o root -g "$SERVICE" -m 750 "$ETC"
-    install -d -o root -g root -m 700 "${PROFILE%/*}"
+    cr_repair_dir "$ETC" root "$SERVICE" 750
+    cr_repair_dir "${PROFILE%/*}" root root 700
+    # StateDirectory= re-owns DATA at start; only a stale non-directory moves.
+    if [[ -e $DATA && ! -d $DATA ]]; then cr_set_aside "$DATA"; fi
     if [[ ! -e $DATA ]]; then install -d -o "$SERVICE" -g "$SERVICE" -m 700 "$DATA"; fi
+    if [[ -L $RUNTIME || ( -e $RUNTIME && ! -d $RUNTIME ) ]]; then cr_set_aside "$RUNTIME"; fi
     [[ -d ${WWW%/*} ]] || install -d -m 755 "${WWW%/*}"
-    if [[ ! -e $WWW ]]; then install -d -m 755 "$WWW"; fi
+    # Website files are kept; only the dedicated root's own owner/mode change.
+    cr_repair_dir "$WWW" root root 755
     # Only initialize an empty web directory. Existing files, including custom
     # index pages and non-index websites, are preserved exactly as supplied.
     if [[ -z $(find -P "$WWW" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
@@ -1297,8 +1344,13 @@ cr_token_valid() {
 # On reruns an empty answer keeps the retained root-only token source, which
 # cr_fresh has already checked. Read it as data only; it is reinstalled as-is.
 cr_saved_token() {
-    [[ -f $TOKEN_FILE && ! -L $TOKEN_FILE ]] || return 1
-    cr_check_leaf "$TOKEN_FILE" private
+    cr_check_parent_dirs "$TOKEN_FILE"
+    # Never read a secret through a link or from a file another account owns.
+    # A too-broad mode is only noted: the value is reinstalled root-only (0600).
+    [[ -f $TOKEN_FILE && ! -L $TOKEN_FILE && $(stat -c %u -- "$TOKEN_FILE") == 0 ]] || return 1
+    if (( (8#$(stat -c %a -- "$TOKEN_FILE") & 0077) != 0 )); then
+        printf 'The saved token was readable by other accounts; it will be reinstalled root-only.\n' >&2
+    fi
     # No helper variable: an inherited same-name export would reach children.
     # Accept only the single-line file this installer writes, as LoadCredential
     # would deliver any extra line to the DNS provider as part of the token.
@@ -1404,7 +1456,7 @@ cr_main() {
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none "${apt[@]}" update
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none "${apt[@]}" install -y --no-install-recommends ca-certificates curl git jq openssl iproute2
     cr_check_existing_certificate
-    install -d -m 700 "$TOOLS"
+    cr_repair_dir "$TOOLS" root root 700
     work=$(mktemp -d "$TOOLS/build.XXXXXXXX")
     # Install traps only after this run owns a unique scratch directory. Signal
     # exits retain their conventional codes and pass through the same cleanup.
