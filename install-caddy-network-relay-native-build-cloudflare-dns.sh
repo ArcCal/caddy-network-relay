@@ -18,7 +18,8 @@
 # - Support Debian 12+ and Ubuntu 24.04+ without an artificial upper version cap.
 #   Detect native amd64/arm64 and build the corresponding pinned server.
 # - Accept only the domain and hidden CF_API_TOKEN as terminal input. An inherited
-#   token can skip its prompt. Do not ask for email, username, build jobs, profile
+#   token can skip its prompt; on reruns an empty answer reuses the checked
+#   root-only token source. Do not ask for email, username, build jobs, profile
 #   scope, password or confirmation. Keep apt/Git/helper commands noninteractive.
 # - Use Cloudflare DNS-01. It validates TXT records and requires appropriate
 #   zone-scoped token permissions, not an A/AAAA record pointing at this machine.
@@ -123,6 +124,9 @@
 # external PEMs as that cache. Preserve Caddy's normal automatic renewal.
 # The permanent CGO-disabled unit permits only its own executable; the env
 # wrapper belongs only to the separate transient validation unit.
+# The plugin clone runs concurrently with the Go toolchain download. Caddy, not
+# this script, performs ACME at startup, and the Caddyfile needs the built
+# binary's password hash, so issuance/configuration cannot overlap the build.
 # Takeover includes old dedicated-unit processes and manually started instances.
 # Identify standalone servers by executable and run/config arguments, not by a
 # truncated process name. Send TERM, then KILL after a bounded grace period,
@@ -196,6 +200,7 @@ was_enabled=disabled
 credentials_reused=0
 certificate_available=0
 existing_certificate=
+clone_job=
 
 # Diagnostics must describe the failed step without embedding secret values.
 cr_die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
@@ -211,7 +216,8 @@ a relay user, private Apple and Rust client configurations, systemd and protocol
 self-checks. Client exports are staged privately and published after checks pass.
 Requires Debian 12+ or Ubuntu 24.04+, systemd 249+ and 5 GiB of free disk.
 
-Only two prompts: relay domain and hidden CF_API_TOKEN.
+Only two prompts: relay domain and hidden CF_API_TOKEN (Enter on a rerun keeps
+the saved token; CF_API_TOKEN may also be inherited from the environment).
 Defaults: user iphone, one build job, bundled selected-domain device profile.
 Running the installer accepts the ACME CA terms. No confirmation prompt.
 Existing dedicated files are automatically replaced from the current script. A compatible
@@ -259,9 +265,11 @@ cr_host() {
 }
 # Accept a bare ASCII DNS hostname, not a URL, IP address or wildcard. Inputs
 # are lowercased first. This also excludes Caddyfile/TOML injection characters.
+# The final label may be an IDNA A-label TLD (xn--...); an all-letter-only
+# rule wrongly rejected valid punycode TLDs. An all-numeric label stays invalid.
 cr_domain() {
     local value=$1
-    (( ${#value} <= 253 )) && [[ $value =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.])+[a-z]{2,63}$ ]]
+    (( ${#value} <= 253 )) && [[ $value =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?[.])+([a-z]{2,63}|xn--[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?)$ ]]
 }
 # Read deliberately from the controlling terminal. Later subprocesses receive
 # EOF on stdin, so only this helper and the hidden token read are interactive.
@@ -709,6 +717,8 @@ cr_rollback() {
 cr_cleanup() {
     local status=$?
     trap - EXIT
+    # Do not delete scratch space under a still-running plugin clone.
+    if [[ -n $clone_job ]]; then wait "$clone_job" 2>/dev/null || true; fi
     if (( transaction_started )); then
         if cr_rollback; then
             printf 'The candidate failed; dedicated files and prior active/enabled state were restored.\n' >&2
@@ -777,6 +787,13 @@ cr_check_replacement() {
         END { exit !found }
     ' <<< "$info"
 }
+# Pin the same reviewed DNS plugin release and commit as the repository builder.
+# No inherited checkout hook or template may run before commit verification.
+# This runs as a background job whose exit status the build waits for.
+cr_clone_plugin() {
+    GIT_TERMINAL_PROMPT=0 git -c core.hooksPath=/dev/null clone --template= --depth 1 --branch "$PLUGIN_TAG" --single-branch \
+        https://github.com/caddy-dns/cloudflare.git "$work/cloudflare-src" > "$work/plugin-clone.log" 2>&1 </dev/null
+}
 # Build in a disposable source snapshot. Never edit the checkout's module files
 # or transport forks while adding the pinned Cloudflare provider to the build.
 cr_build() {
@@ -794,6 +811,10 @@ cr_build() {
     # growing source snapshot back into itself or exhaust the host's disk.
     if [[ $work == "${REPO%/}/"* ]]; then snapshot_excludes+=(--exclude="./${work#"${REPO%/}/"}"); fi
     tar -C "$REPO" "${snapshot_excludes[@]}" -cf - . | tar -C "$work/source" -xf -
+    # The pinned plugin clone and the Go toolchain download are independent:
+    # fetch both at once. Its commit is verified before anything uses it.
+    cr_clone_plugin &
+    clone_job=$!
     # Use the repository's exact Go release and the official archive metadata.
     # Require one archive matching both the release and native Linux architecture.
     version=$(sed -n 's/^toolchain \(go[0-9][0-9.]*\)$/\1/p' "$work/source/go.mod")
@@ -804,10 +825,11 @@ cr_build() {
     cr_download "https://dl.google.com/go/$version.linux-$arch.tar.gz" "$work/go.tar.gz"
     cr_verify "$work/go.tar.gz" "$expected"
     tar --no-same-owner -C "$work" -xzf "$work/go.tar.gz"
-    # Pin the same reviewed DNS plugin release and commit as the repository builder.
-    # No inherited checkout hook or template may run before commit verification.
-    GIT_TERMINAL_PROMPT=0 git -c core.hooksPath=/dev/null clone --template= --depth 1 --branch "$PLUGIN_TAG" --single-branch \
-        https://github.com/caddy-dns/cloudflare.git "$work/cloudflare-src"
+    local clone_status=0
+    wait "$clone_job" || clone_status=$?
+    clone_job=
+    cat -- "$work/plugin-clone.log"
+    (( clone_status == 0 )) || cr_die 'Cloning the pinned Cloudflare DNS plugin failed.'
     [[ $(git -C "$work/cloudflare-src" rev-parse --verify HEAD) == "$PLUGIN_COMMIT" ]] || cr_die 'Cloudflare plugin commit does not match the reviewed release.'
     [[ -f $work/cloudflare-src/go.mod ]] || cr_die 'Incomplete Cloudflare plugin source.'
     # Ignore inherited Go configuration/workspaces and forbid automatic toolchain
@@ -1272,13 +1294,30 @@ cr_token_valid() {
 # These are the only interactive inputs. An inherited CF_API_TOKEN may supply
 # the token without prompting; otherwise read it silently from the terminal.
 # Normalize hostname case and a trailing DNS dot before validating it.
+# On reruns an empty answer keeps the retained root-only token source, which
+# cr_fresh has already checked. Read it as data only; it is reinstalled as-is.
+cr_saved_token() {
+    [[ -f $TOKEN_FILE && ! -L $TOKEN_FILE ]] || return 1
+    cr_check_leaf "$TOKEN_FILE" private
+    # No helper variable: an inherited same-name export would reach children.
+    # Accept only the single-line file this installer writes, as LoadCredential
+    # would deliver any extra line to the DNS provider as part of the token.
+    awk 'NR == 1 && /^[A-Za-z0-9_-]+$/ { token = $0 } END { if (NR == 1 && token != "") print token }' "$TOKEN_FILE"
+}
 cr_inputs() {
     cr_ask 'Relay domain'; domain=${REPLY,,}; domain=${domain%.}
     cr_domain "$domain" || cr_die 'Invalid DNS hostname; omit scheme, port and wildcard.'
     printf 'Use a zone-scoped Cloudflare token with Zone:DNS:Edit and Zone:Zone:Read.\n'
     if [[ -z $cf_token ]]; then
-        read -r -s -p 'CF_API_TOKEN (hidden): ' cf_token </dev/tty || cr_die 'Could not read token.'
+        if [[ -f $TOKEN_FILE && ! -L $TOKEN_FILE ]]; then
+            read -r -s -p 'CF_API_TOKEN (hidden; Enter keeps the saved token): ' cf_token </dev/tty || cr_die 'Could not read token.'
+        else
+            read -r -s -p 'CF_API_TOKEN (hidden): ' cf_token </dev/tty || cr_die 'Could not read token.'
+        fi
         printf '\n'
+        if [[ -z $cf_token ]]; then
+            cf_token=$(cr_saved_token) || cr_die 'No safe saved token exists; enter a Cloudflare API Token.'
+        fi
     fi
     cr_token_valid "$cf_token" || cr_die 'Expected a Cloudflare API Token.'
 }
