@@ -249,19 +249,20 @@ func (a *App) Stop() error {
 func (a *App) stopLocked(exiting bool) {
 	for _, s := range a.servers {
 		s.ports.Store(nil)
+		if exiting && s.h3 != nil {
+			closeAllTunnels()
+			// Transport.Close drops connections without notifying peers.
+			// Send HTTP/3 connection closes while the endpoint can still write.
+			_ = s.h3.Close()
+		}
 		for _, ep := range s.endpoints {
 			ep.release(s.h3)
 		}
 		s.endpoints = nil
-		if s.h3 == nil {
+		if s.h3 == nil || exiting {
 			continue
 		}
-		if exiting {
-			closeAllTunnels()
-			_ = s.h3.Close()
-		} else {
-			go s.h3.Shutdown(context.Background())
-		}
+		go s.h3.Shutdown(context.Background())
 	}
 }
 
