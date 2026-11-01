@@ -23,6 +23,7 @@ type liveTunnel struct {
 	acct   account
 	owner  *Handler
 	cancel context.CancelCauseFunc
+	done   chan struct{} // closed after forwarding and transport cleanup finish
 }
 
 // registry tracks the provisioned handlers and the open tunnels of the
@@ -58,7 +59,7 @@ func registerHandler(h *Handler) {
 // accepts their account, and closes the others.
 func unregisterHandler(h *Handler) {
 	registry.Lock()
-	defer registry.Unlock()
+	var revoked []<-chan struct{}
 	delete(registry.handlers, h)
 	for t := range registry.tunnels {
 		if t.owner != h {
@@ -73,7 +74,17 @@ func unregisterHandler(h *Handler) {
 		}
 		if t.owner == nil {
 			t.cancel(errRevoked)
+			if t.done != nil {
+				revoked = append(revoked, t.done)
+			}
 		}
+	}
+	registry.Unlock()
+	// Cancellation only wakes the pumps. Finish revocation before the
+	// configuration load returns, without holding the registry lock that
+	// removeTunnel needs or waiting for retained tunnels.
+	for _, done := range revoked {
+		<-done
 	}
 }
 
@@ -151,7 +162,12 @@ func sameRelayConfig(a, b *Handler) bool {
 
 func removeTunnel(t *liveTunnel) {
 	registry.Lock()
-	delete(registry.tunnels, t)
+	if _, ok := registry.tunnels[t]; ok {
+		delete(registry.tunnels, t)
+		if t.done != nil {
+			close(t.done)
+		}
+	}
 	registry.Unlock()
 }
 

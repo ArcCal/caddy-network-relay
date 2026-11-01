@@ -402,7 +402,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyht
 		defer expiry.Stop()
 	}
 
-	lt := &liveTunnel{acct: acct, owner: h, cancel: cancel}
+	lt := &liveTunnel{acct: acct, owner: h, cancel: cancel, done: make(chan struct{})}
 	if !addTunnel(lt) {
 		return h.refuse(w, r, &refusal{http.StatusForbidden, "http_request_denied", errRevoked.Error()})
 	}

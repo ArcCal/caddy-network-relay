@@ -130,10 +130,23 @@ func (a *App) addServer(srv *caddyhttp.Server) *relayServer {
 	srv.RegisterConnContext(func(ctx context.Context, _ net.Conn) context.Context { return withConnState(ctx) })
 	// Caddy waits for open requests when it exits; tunnels would keep it
 	// waiting forever.
+	listenerClosed := make(chan struct{})
+	notifyListenerClosed := sync.OnceFunc(func() { close(listenerClosed) })
 	srv.RegisterOnShutdown(func() {
+		// net/http invokes this after closing its listeners.
+		notifyListenerClosed()
 		if caddy.Exiting() {
 			closeAllTunnels()
 		}
+	})
+	srv.RegisterOnStop(func(context.Context) error {
+		// Caddy starts Shutdown asynchronously. Do not finish a reload
+		// while its old TCP listener can still accept new connections.
+		// A server with no TCP listeners needs no notification.
+		if len(srv.Listeners()) > 0 {
+			<-listenerClosed
+		}
+		return nil
 	})
 	a.servers = append(a.servers, s)
 	return s
