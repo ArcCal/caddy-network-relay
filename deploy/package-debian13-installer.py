@@ -29,7 +29,8 @@ def package(output):
     # Preserve local replacements, licenses and embedded resources. This is
     # the actual repository's Caddy build, not a vanilla xcaddy module build.
     files.update(str(p.relative_to(ROOT)) for p in (ROOT / 'third_party').rglob('*')
-                 if p.is_file() and '.git' not in p.parts)
+                 if p.is_file() and not {'.git', '__pycache__'}.intersection(p.parts)
+                 and p.suffix not in {'.pyc', '.pyo'})
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode='w') as archive:
         for relative in sorted(files):

@@ -4,6 +4,7 @@
 # Does not modify an existing Caddy or Rust network-relay installation.
 set +x
 set -Eeuo pipefail
+unset CDPATH
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 usage() {
@@ -179,7 +180,7 @@ PY
     say '==> Building Caddy with the bundled network_relay and shared library patches'
     (
         cd "$SRC"
-        env GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 GOMAXPROCS=2 \
+        env GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 GOMAXPROCS=2 GOWORK=off GOOS=linux GOARCH=amd64 \
             GOPATH="$CACHE/gopath" GOMODCACHE="$CACHE/gomod" GOCACHE="$CACHE/gocache" \
             "$GO" build -p 1 -buildvcs=false -tags http2legacy -trimpath -ldflags '-s -w' -o "$CACHE/caddy.new" ./cmd/caddy
     ) || die 'Build failed; no service or account has been installed. See the build output.'

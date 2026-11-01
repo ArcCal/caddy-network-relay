@@ -18,6 +18,7 @@
 #
 # Everything it writes is listed in docs/deploy.md.
 set -Eeuo pipefail
+unset CDPATH
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
 GO_VERSION=1.26.10
@@ -193,7 +194,7 @@ mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
 ((mem_kb == 0 || mem_kb > 1800000)) || jobs=(-p 1)
 (
     cd "$SRC"
-    env GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 \
+    env GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 GOWORK=off GOOS=linux GOARCH="$GOARCH" \
         GOPATH="$CACHE/gopath" GOMODCACHE="$CACHE/gomod" GOCACHE="$CACHE/gocache" \
         "$GO" build "${jobs[@]}" -tags http2legacy -trimpath -ldflags '-s -w' -o "$CACHE/caddy.new" ./cmd/caddy
 ) || die 'Build failed (the reason is above). If memory is short, add swap first; if it is a network problem, check that proxy.golang.org is reachable.'

@@ -129,6 +129,9 @@ class SelectiveInstallTest(unittest.TestCase):
         self.assertIn('"handler":"network_relay"', a.stdout)
         self.assertIn('authenticated HTTP/2 TCP and UDP checks passed', result.stdout)
 
+    def test_native_build_ignores_ambient_cross_target_and_workspace(self):
+        self.fresh(CDPATH='.', GOOS='darwin', GOARCH='arm64', GOWORK='/missing-workspace', CHECK_NATIVE_BUILD_ENV='1')
+
     def test_http3_failure_is_diagnostic(self):
         result = self.fresh(FAKE_H3_FAILS='1')
         self.assertIn('HTTP/2 TCP', result.stdout)

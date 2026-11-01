@@ -41,7 +41,7 @@ jobs:
       - run: python3 third_party/test_upstream.py
       - run: RELAY_STRESS_MB=16 go test -race -count=1 -timeout 40m ./...
       - run: shellcheck -S warning -e SC1111,SC1091 deploy/install.sh
-      - run: python3 deploy/test_install.py -v
+      - run: python3 -m unittest discover -s deploy -v
 
   go127:
     name: test (Go 1.27)

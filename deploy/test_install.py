@@ -99,6 +99,9 @@ exec "$REAL_CADDY" "$@"
 
 FAKE_GO = r'''#!/bin/sh
 # go build ... -o OUT ./cmd/caddy
+if [ -n "$CHECK_NATIVE_BUILD_ENV" ]; then
+  [ "$GOOS" = linux ] && [ "$GOARCH" = amd64 ] && [ "$GOWORK" = off ] || exit 93
+fi
 echo "go $*" >> "$LOG"
 while [ $# -gt 0 ]; do
   if [ "$1" = -o ]; then cp "$FAKE_CADDY_SCRIPT" "$2"; chmod 755 "$2"; fi
@@ -115,6 +118,10 @@ def setUpModule():
 
 
 class InstallTest(unittest.TestCase):
+    def test_native_build_ignores_ambient_cross_target_and_workspace(self):
+        self.install('--domain', 'relay.example.com', '--no-gfwlist',
+                     CDPATH='.', GOOS='darwin', GOARCH='arm64', GOWORK='/missing-workspace', CHECK_NATIVE_BUILD_ENV='1')
+
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, self.dir)
@@ -156,7 +163,7 @@ class InstallTest(unittest.TestCase):
 
     def install(self, *args, ok=True, **env):
         e = dict(self.env, **env)
-        r = subprocess.run(['bash', str(INSTALL), *args], env=e, capture_output=True, text=True, timeout=120)
+        r = subprocess.run(['bash', str(INSTALL.relative_to(SRC)), *args], cwd=SRC, env=e, capture_output=True, text=True, timeout=120)
         if ok is not None and (r.returncode == 0) != ok:
             self.fail(f'exit {r.returncode}\nstdout:\n{r.stdout}\nstderr:\n{r.stderr}')
         return r

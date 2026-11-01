@@ -54,6 +54,7 @@ class TokenInputTests(unittest.TestCase):
         return subprocess.run(['bash', '-c', 'source "$1"; shift; ' + command, 'test', str(self.script),
                                str(self.token), SAVED], input=data, capture_output=True, text=True, timeout=30)
 
+    @unittest.skipUnless(os.geteuid() == 0, 'requires a root-owned saved token')
     def test_enter_reuses_the_checked_saved_token(self):
         result = self.inputs('relay.example.com\n\n', SAVED)
         self.assertEqual(result.returncode, 0, result.stderr)
