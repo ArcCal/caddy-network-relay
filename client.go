@@ -85,10 +85,13 @@ func (c *h1Client) closeWrite() bool {
 }
 
 func (c *h1Client) abort(abortReason) {
-	if tc, ok := netConn(c.conn).(*net.TCPConn); ok {
+	conn := netConn(c.conn)
+	if tc, ok := conn.(*net.TCPConn); ok {
 		_ = tc.SetLinger(0)
 	}
-	c.conn.Close()
+	// TLS Close sends close_notify, which can make a failed tunnel look
+	// complete before the TCP reset arrives. Abort the transport directly.
+	conn.Close()
 }
 
 func (c *h1Client) interrupt(why abortReason) { c.abort(why) }
