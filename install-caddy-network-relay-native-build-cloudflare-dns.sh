@@ -1496,12 +1496,88 @@ cr_acquire_lock() {
 # changes nothing and is not driven into the OOM killer. MemAvailable already
 # counts reclaimable cache.
 # Re-measure after toolchain/dependency changes: deploy/measure-build-memory.py.
+# A memory-limited cgroup (a container, or a systemd scope or service with
+# MemoryMax) caps the build below what the host reports, so its headroom
+# counts too: arguments are /proc/meminfo, /proc/self/cgroup and
+# /proc/self/mountinfo.
 cr_check_build_memory() {
-    local available
+    local available swap headroom
     available=$(awk '/^(MemAvailable|SwapFree):/ {n += $2} END {print n+0}' "$1") ||
         cr_die 'Cannot read available memory.'
+    swap=$(awk '/^SwapFree:/ {n = $2} END {print n+0}' "$1")
+    headroom=$(cr_cgroup_headroom "${2:-/proc/self/cgroup}" "${3:-/proc/self/mountinfo}" "$swap")
+    if [[ $headroom =~ ^[0-9]+$ ]] && (( headroom < available )); then available=$headroom; fi
     [[ $available =~ ^[0-9]+$ ]] && (( available >= 640 * 1024 )) ||
-        cr_die 'The build needs about 640 MiB of available memory plus free swap; add swap or use a larger host.'
+        cr_die 'The build needs about 640 MiB of available memory plus free swap, also within any memory limit on this container or service; add swap or use a larger host.'
+}
+# The least memory, in KiB, that any memory-limited cgroup of this process
+# (cgroup v2 memory.max, v1 memory.limit_in_bytes) and its ancestors still
+# allow: the limit minus usage, plus reclaimable inactive file cache, plus
+# the swap that level and the host (KiB, third argument) still allow.
+# Prints nothing when no level is limited.
+cr_cgroup_headroom() {
+    local cgroups=$1 mountinfo=$2 host_swap=$3 smallest='' hierarchy controllers relative type root mount dir
+    local limit usage inactive swap swap_used level
+    while IFS=: read -r hierarchy controllers relative; do
+        if [[ $hierarchy == 0 && -z $controllers ]]; then type=cgroup2
+        elif [[ ,$controllers, == *,memory,* ]]; then type=cgroup
+        else continue
+        fi
+        while read -r root mount; do
+            [[ $root == / || $relative == "$root" || $relative == "$root"/* ]] || continue
+            dir=$mount${relative#"${root%/}"}
+            dir=${dir%/}
+            while [[ -d $dir ]]; do
+                level=''
+                if [[ $type == cgroup2 && -r $dir/memory.max ]]; then
+                    limit=$(< "$dir/memory.max")
+                    if [[ $limit =~ ^[0-9]+$ ]]; then
+                        usage=$(< "$dir/memory.current")
+                        inactive=$(awk '$1 == "inactive_file" {print $2}' "$dir/memory.stat" 2>/dev/null)
+                        swap=$(cat -- "$dir/memory.swap.max" 2>/dev/null || echo max)
+                        swap_used=$(cat -- "$dir/memory.swap.current" 2>/dev/null || echo 0)
+                        level=$(( (limit - usage + ${inactive:-0}) / 1024 ))
+                        if [[ $swap =~ ^[0-9]+$ ]]; then
+                            swap=$(( (swap - swap_used) / 1024 ))
+                            (( swap < host_swap )) || swap=$host_swap
+                        else
+                            swap=$host_swap
+                        fi
+                        (( level < 0 )) && level=0
+                        (( swap < 0 )) && swap=0
+                        level=$(( level + swap ))
+                    fi
+                elif [[ $type == cgroup && -r $dir/memory.limit_in_bytes ]]; then
+                    limit=$(< "$dir/memory.limit_in_bytes")
+                    # cgroup v1 reports "unlimited" as a value near 2^63.
+                    if [[ $limit =~ ^[0-9]+$ ]] && (( ${#limit} < 19 )); then
+                        usage=$(< "$dir/memory.usage_in_bytes")
+                        inactive=$(awk '$1 == "total_inactive_file" {print $2}' "$dir/memory.stat" 2>/dev/null)
+                        level=$(( (limit - usage + ${inactive:-0}) / 1024 ))
+                        (( level < 0 )) && level=0
+                        level=$(( level + host_swap ))
+                        # memory.memsw.* bounds memory and swap together.
+                        swap=$(cat -- "$dir/memory.memsw.limit_in_bytes" 2>/dev/null || echo '')
+                        if [[ $swap =~ ^[0-9]+$ ]] && (( ${#swap} < 19 )); then
+                            swap_used=$(< "$dir/memory.memsw.usage_in_bytes")
+                            swap=$(( (swap - swap_used + ${inactive:-0}) / 1024 ))
+                            (( swap < 0 )) && swap=0
+                            (( swap < level )) && level=$swap
+                        fi
+                    fi
+                fi
+                if [[ -n $level ]] && { [[ -z $smallest ]] || (( level < smallest )); }; then smallest=$level; fi
+                [[ $dir == "${mount%/}" || $dir == "$mount" ]] && break
+                dir=${dir%/*}
+            done
+        done < <(awk -v type="$type" '{
+            for (i = 7; i <= NF; i++) if ($i == "-") {
+                if ($(i + 1) == type && (type == "cgroup2" || $(i + 3) ~ /(^|,)memory(,|$)/)) print $4, $5
+                break
+            }
+        }' "$mountinfo")
+    done < "$cgroups"
+    [[ -z $smallest ]] || printf '%s\n' "$smallest"
 }
 # Sequence matters: check dedicated path/account safety before input, then
 # finish the build and candidate validation before switching the running unit.

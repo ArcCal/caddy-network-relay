@@ -648,12 +648,24 @@ func TestReloadKeepsHTTP3(t *testing.T) {
 	defer done()
 	defer old.Close()
 
-	busy, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+	// The new listener's UDP port is taken, but its TCP port must be free,
+	// or the reload fails on TCP instead of HTTP/3. Find a port whose TCP
+	// side was free, hold its UDP side, and release TCP just before loading.
+	var busy net.PacketConn
+	var busyPort int
+	for attempt := 0; busy == nil; attempt++ {
+		if attempt == 50 {
+			t.Fatal("no port with free TCP and UDP sides")
+		}
+		tcp, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		busyPort = tcp.Addr().(*net.TCPAddr).Port
+		busy, _ = net.ListenPacket("udp", "127.0.0.1:"+strconv.Itoa(busyPort))
+		tcp.Close()
 	}
 	defer busy.Close()
-	busyPort := busy.LocalAddr().(*net.UDPAddr).Port
 	bad := relayConfig(port, nil, map[string]any{"listen": []string{
 		"127.0.0.1:" + strconv.Itoa(port), "127.0.0.1:" + strconv.Itoa(busyPort)}})
 	if err := caddy.Load(bad, true); err == nil || !strings.Contains(err.Error(), "HTTP/3") {
