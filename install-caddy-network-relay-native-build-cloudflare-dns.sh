@@ -1495,6 +1495,7 @@ cr_acquire_lock() {
 # memory plus free swap before packages or compilation, so an undersized host
 # changes nothing and is not driven into the OOM killer. MemAvailable already
 # counts reclaimable cache.
+# Re-measure after toolchain/dependency changes: deploy/measure-build-memory.py.
 cr_check_build_memory() {
     local available
     available=$(awk '/^(MemAvailable|SwapFree):/ {n += $2} END {print n+0}' "$1") ||
