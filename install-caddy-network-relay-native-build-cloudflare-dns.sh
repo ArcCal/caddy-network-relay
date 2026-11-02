@@ -227,7 +227,8 @@ Interactively build this checkout for native amd64/arm64 with the pinned
 caddy-dns/cloudflare plugin. Configure DNS-01 certificate issuance and renewal,
 a relay user, private Apple and Rust client configurations, systemd and protocol
 self-checks. Client exports are staged privately and published after checks pass.
-Requires Debian 12+ or Ubuntu 24.04+, systemd 249+ and 5 GiB of free disk.
+Requires Debian 12+ or Ubuntu 24.04+, systemd 249+, 5 GiB of free disk and
+640 MiB of available memory plus swap.
 
 Only two prompts: relay domain and hidden CF_API_TOKEN (Enter on a rerun keeps
 the saved token; CF_API_TOKEN may also be inherited from the environment).
@@ -1489,6 +1490,18 @@ cr_acquire_lock() {
     exec {install_lock}>>"$lock"
     flock -n "$install_lock" || cr_die 'Another installer is running.'
 }
+# The -p 1 Go build was measured in memory-capped cgroups without swap: it was
+# OOM-killed at 384 MiB and completed at 512 MiB. Require 640 MiB of available
+# memory plus free swap before packages or compilation, so an undersized host
+# changes nothing and is not driven into the OOM killer. MemAvailable already
+# counts reclaimable cache.
+cr_check_build_memory() {
+    local available
+    available=$(awk '/^(MemAvailable|SwapFree):/ {n += $2} END {print n+0}' "$1") ||
+        cr_die 'Cannot read available memory.'
+    [[ $available =~ ^[0-9]+$ ]] && (( available >= 640 * 1024 )) ||
+        cr_die 'The build needs about 640 MiB of available memory plus free swap; add swap or use a larger host.'
+}
 # Sequence matters: check dedicated path/account safety before input, then
 # finish the build and candidate validation before switching the running unit.
 cr_main() {
@@ -1530,6 +1543,7 @@ cr_main() {
     for path in "${required[@]}"; do [[ -f $REPO/$path ]] || cr_die "Complete checkout required; missing $path."; done
     free_kib=$(df -Pk /opt | awk 'NR==2 {print $4}')
     [[ $free_kib =~ ^[0-9]+$ ]] && (( free_kib >= 5*1024*1024 )) || cr_die 'At least 5 GiB free under /opt is required.'
+    cr_check_build_memory /proc/meminfo
     # Bound apt lock waits, retry downloads and retain existing local conffiles.
     # Install only build/deployment prerequisites; no firewall package is added.
     local apt=(apt-get -o DPkg::Lock::Timeout=1800 -o Acquire::Retries=3
