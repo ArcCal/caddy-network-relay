@@ -209,9 +209,6 @@ transaction_started=0
 backup_dir=
 was_active=0
 was_enabled=disabled
-credentials_reused=0
-certificate_available=0
-existing_certificate=
 clone_job=
 account_home_pending=0
 
@@ -257,16 +254,16 @@ Service logs: journalctl -u $SERVICE
 EOF
 }
 # Detect the host rather than cross-compiling. The Go build and downloaded
-# toolchain use arch; triple records the corresponding native GNU target.
+# toolchain use arch.
 # Only the package-manager/systemd combinations supported here are accepted.
 cr_host() {
     [[ $(uname -s) == Linux ]] || cr_die 'Run this on the Linux server.'
     case $(uname -m) in
-        x86_64) arch=amd64; triple=x86_64-unknown-linux-gnu ;;
-        aarch64|arm64) arch=arm64; triple=aarch64-unknown-linux-gnu ;;
+        x86_64) arch=amd64 ;;
+        aarch64|arm64) arch=arm64 ;;
         *) cr_die 'Only x86_64/amd64 and aarch64/arm64 are supported.' ;;
     esac
-    local ID= VERSION_ID= major minor
+    local ID='' VERSION_ID='' major minor
     # shellcheck source=/dev/null
     . /etc/os-release
     [[ $VERSION_ID =~ ^[0-9]+([.][0-9]+)?$ ]] || cr_die 'A released Debian/Ubuntu version is required.'
@@ -300,12 +297,12 @@ cr_ask() {
 # have no login shell, group aliases, extra members or supplementary groups.
 # Never "fix" an unsafe existing identity: it may belong to another workload.
 cr_check_account() {
-    local entry name ignored uid gid gecos home shell members aliases group_entry primary users
+    local entry name uid gid home shell members aliases group_entry primary users
     entry=$(getent passwd "$SERVICE" || true)
     group_entry=$(getent group "$SERVICE" || true)
     if [[ -z $entry ]]; then
         if [[ -n $group_entry ]]; then
-            IFS=: read -r name ignored gid members <<< "$group_entry"
+            IFS=: read -r name _ gid members <<< "$group_entry"
             [[ $gid =~ ^[0-9]+$ && $gid != 0 && -z $members ]] || cr_die 'Existing dedicated group is not safe to reuse.'
             aliases=$(getent group | awk -F: -v gid="$gid" '$3 == gid {n++} END {print n+0}')
             users=$(getent passwd | awk -F: -v gid="$gid" '$4 == gid {n++} END {print n+0}')
@@ -313,12 +310,12 @@ cr_check_account() {
         fi
         return
     fi
-    IFS=: read -r name ignored uid gid gecos home shell <<< "$entry"
+    IFS=: read -r name _ uid gid _ home shell <<< "$entry"
     [[ $uid =~ ^[0-9]+$ && $gid =~ ^[0-9]+$ && $uid != 0 && $gid != 0 ]] || cr_die 'Dedicated account must not be privileged.'
     # A login shell, another home or supplementary groups on this same-named
     # account are repaired by cr_account (usermod; no home move or chown).
     [[ -n $group_entry ]] || cr_die 'Dedicated primary group is missing.'
-    IFS=: read -r name ignored primary members <<< "$group_entry"
+    IFS=: read -r name _ primary members <<< "$group_entry"
     [[ $primary == "$gid" && -z $members && $(id -gn "$SERVICE") == "$SERVICE" ]] || cr_die 'Existing service account/group is shared or mismatched.'
     aliases=$(getent passwd | awk -F: -v uid="$uid" '$3 == uid {n++} END {print n+0}')
     users=$(getent passwd | awk -F: -v gid="$gid" '$4 == gid {n++} END {print n+0}')
@@ -390,7 +387,7 @@ cr_port_inodes() {
 # Convert Linux's little-endian socket-table addresses for diagnostics when ss
 # is unavailable. Supported amd64/arm64 hosts use this kernel representation.
 cr_endpoint_text() {
-    local address=${1%:*} reordered= part index result=
+    local address=${1%:*} reordered='' part index result=''
     if [[ $address =~ ^[a-fA-F0-9]{8}$ ]]; then
         printf '%d.%d.%d.%d:443' "0x${address:6:2}" "0x${address:4:2}" "0x${address:2:2}" "0x${address:0:2}"
     elif [[ $address =~ ^[a-fA-F0-9]{32}$ ]]; then
@@ -845,7 +842,7 @@ cr_backup() {
         canonical=$(readlink -m -- "${path%/*}")/${path##*/}
         [[ $seen != *$'\n'"$canonical"$'\n'* ]] || continue
         seen+="$canonical"$'\n'
-        type=file; [[ $path != *.service.d ]] || type=dir
+        type='file'; [[ $path != *.service.d ]] || type='dir'
         existed=0
         if [[ -e $path || -L $path ]]; then existed=1; cp -a -- "$path" "$backup_dir/files/$index"; fi
         printf '%s\t%s\t%s\t%s\n' "$index" "$existed" "$type" "$path" >> "$backup_dir/manifest"
@@ -1199,7 +1196,6 @@ cr_recover_credentials() {
     [[ $old_domain == "$domain" && $old_user == "$device_user" && ${#old_password} == 22 ]] || return 1
     [[ $old_password =~ [A-Z] && $old_password =~ [a-z] && $old_password =~ [0-9] && $old_password =~ [+/] ]] || return 1
     relay_password=$old_password
-    credentials_reused=1
 }
 # Inspect CertMagic's normal storage layout before building or replacing files.
 # A valid certificate is left exactly where Caddy expects it, with its existing
@@ -1224,14 +1220,13 @@ cr_certificate_valid() {
 }
 cr_check_existing_certificate() {
     local store=$DATA/.local/share/caddy/certificates issuer certificate key resolved data_resolved
-    certificate_available=0
-    existing_certificate=
     [[ -d $store && ! -L $store ]] || { printf 'No reusable Caddy certificate cache found for %s; Caddy will manage DNS-01 issuance.\n' "$domain"; return 0; }
     data_resolved=$(readlink -f -- "$DATA") || cr_die 'Cannot resolve dedicated certificate state.'
     # With no email/CA override, Caddy 2.11's default issuer is Let's Encrypt.
     # A staging/custom issuer entry does not establish reusable state for this
     # script-generated automation policy (DefaultIssuers adds ZeroSSL only with
     # an email address). Keep certificate detection consistent with that policy.
+    # shellcheck disable=SC2043  # one issuer by design; see the comment above
     for issuer in acme-v02.api.letsencrypt.org-directory; do
         certificate=$store/$issuer/$domain/$domain.crt
         key=${certificate%.crt}.key
@@ -1239,8 +1234,6 @@ cr_check_existing_certificate() {
         resolved=$(readlink -f -- "$certificate" 2>/dev/null || true)
         [[ $resolved == "$data_resolved/"* ]] || continue
         if cr_certificate_valid "$certificate" "$key"; then
-            certificate_available=1
-            existing_certificate=$certificate
             printf 'Valid retained certificate cache found for %s; Caddy can reuse it and renew normally when due.\n' "$domain"
             return 0
         fi
@@ -1259,7 +1252,6 @@ cr_prepare() {
     printf '%s' "$cf_token" > "$work/token"
     chmod 600 "$work/token"
     unset cf_token
-    credentials_reused=0
     if cr_recover_credentials; then
         printf 'Reusing the existing private client password; server files will follow the current script.\n'
     else
@@ -1299,7 +1291,7 @@ cr_prepare() {
 # atomically switched, and the unit restarted. Any later failure restores the
 # previous files plus active/enabled state. DATA and website content stay in place.
 cr_deploy() {
-    local relay_password account key current response ready=0 attempt path existed type index identity_status=0
+    local relay_password account key current ready=0 attempt path existed type index identity_status=0
     # Also clear any export attribute inherited from a caller's same-name
     # environment variable; set +a prevents newly assigned secrets exporting.
     export -n relay_password account
