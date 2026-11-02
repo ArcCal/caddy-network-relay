@@ -169,8 +169,10 @@ class SameNameRepairTests(unittest.TestCase):
                      'creates and deletes a temporary local account; set CR_TEST_ACCOUNTS=1 in a disposable host')
 class AccountRepairTests(unittest.TestCase):
     def test_account_in_use_is_repaired_and_its_home_change_deferred(self):
-        # Older installers gave the account home DATA; usermod refuses a home
-        # change while the running old relay uses the account.
+        # Older installers gave the account home DATA. Some shadow-utils
+        # versions refuse a home change while the running old relay uses the
+        # account, and the change waits until it stops; others make it at
+        # once. Either way the run must not abort and the account is repaired.
         name = f'crbusy{os.getpid() % 100000}'
         subprocess.run(['useradd', '--system', '--user-group', '--shell', '/bin/bash', '--home-dir',
                         f'/var/lib/{name}', '--groups', 'adm', name], check=True)
@@ -179,15 +181,19 @@ class AccountRepairTests(unittest.TestCase):
         try:
             result = subprocess.run(['bash', '-c', command, 'test', str(SCRIPT), name], capture_output=True,
                                     text=True, timeout=60)
-            self.assertIn('ok pending=1', result.stdout, result.stderr)
+            self.assertRegex(result.stdout, r'ok pending=[01]\n', result.stderr)
+            deferred = 'ok pending=1' in result.stdout
             entry = subprocess.run(['getent', 'passwd', name], capture_output=True, text=True).stdout.strip()
-            self.assertTrue(entry.endswith(':/usr/sbin/nologin'), entry)
+            home = f'/var/lib/{name}' if deferred else '/nonexistent'
+            self.assertTrue(entry.endswith(f':{home}:/usr/sbin/nologin'), entry)
             self.assertEqual(subprocess.run(['id', '-Gn', name], capture_output=True, text=True).stdout.split(), [name])
             process.kill()
             process.wait()
             result = subprocess.run(['bash', '-c', command, 'test', str(SCRIPT), name], capture_output=True,
                                     text=True, timeout=60)
             self.assertIn('ok pending=0', result.stdout, result.stderr)
+            entry = subprocess.run(['getent', 'passwd', name], capture_output=True, text=True).stdout.strip()
+            self.assertTrue(entry.endswith(':/nonexistent:/usr/sbin/nologin'), entry)
         finally:
             if process.poll() is None:
                 process.kill()
