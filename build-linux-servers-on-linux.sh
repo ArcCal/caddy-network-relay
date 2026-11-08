@@ -2,6 +2,137 @@
 # Build Network Relay servers for both Linux architectures from latest sources.
 # Sourcing defines portable helper functions without inspecting or changing a host.
 
+# BEGIN SHARED BUILD CHILD RUNNER
+
+relay_build_group_active() {
+    ps -A -o pgid= -o stat= | awk -v group="$1" '
+        $1 == group && $2 !~ /^Z/ { active = 1 }
+        END { exit !active }'
+}
+
+relay_build_terminal_group() {
+    PYTHONDONTWRITEBYTECODE=1 python3 - "$1" <<'PY'
+import os
+import signal
+import sys
+
+signal.signal(signal.SIGTTOU, signal.SIG_IGN)
+try:
+    fd = os.open('/dev/tty', os.O_RDWR)
+    try:
+        if sys.argv[1] == 'get':
+            print(os.tcgetpgrp(fd))
+        else:
+            os.tcsetpgrp(fd, int(sys.argv[1]))
+    finally:
+        os.close(fd)
+except OSError:
+    sys.exit(1)
+PY
+}
+
+relay_stop_build_child() {
+    local child=${1:-} group=${2:-} wait_cleanup=${3:-0} child_signal=${4-TERM} attempt
+    [[ $child =~ ^[1-9][0-9]*$ ]] || return 0
+    if [[ $group == "$child" ]]; then
+        if [[ -n $child_signal ]]; then kill -"$child_signal" -- "-$group" 2>/dev/null || true; fi
+        # A terminal reader can have stopped before foreground ownership moved.
+        # Let it handle the pending signal and finish any installer rollback.
+        kill -CONT -- "-$group" 2>/dev/null || true
+        if (( wait_cleanup )); then
+            # Installers may be restoring a live deployment. Do not kill their
+            # rollback or delete their source while that cleanup is running.
+            while relay_build_group_active "$group"; do sleep 0.1; done
+            return 0
+        fi
+        for ((attempt = 0; attempt < 10; attempt++)); do
+            relay_build_group_active "$group" || return 0
+            sleep 0.1
+        done
+        kill -KILL -- "-$group" 2>/dev/null || true
+    else
+        if [[ -n $child_signal ]]; then kill -"$child_signal" "$child" 2>/dev/null || true; fi
+        kill -CONT "$child" 2>/dev/null || true
+    fi
+}
+
+relay_run_build_child() {
+    local relay_child_pid='' relay_child_group='' relay_child_status=0 relay_child_interrupted=0
+    local relay_child_monitor=0 relay_child_actual relay_child_int relay_child_term relay_child_hup relay_child_wait=0
+    local relay_child_tty='' relay_child_parent_group relay_child_final_signal=TERM
+    if [[ ${1:-} == --wait-for-cleanup ]]; then relay_child_wait=1; shift; fi
+    [[ $# -gt 0 ]] || return 2
+    if ! command -v ps >/dev/null || ! ps -A -o pgid= -o stat= >/dev/null 2>&1; then
+        printf 'Build process cleanup requires ps (procps on Linux).\n' >&2
+        return 125
+    fi
+    if { : </dev/tty; } 2>/dev/null; then
+        if ! command -v python3 >/dev/null; then
+            printf 'Interactive build process cleanup requires Python 3.\n' >&2
+            return 125
+        fi
+        relay_child_tty=$(relay_build_terminal_group get) || return 125
+        relay_child_parent_group=$(ps -o pgid= -p "$$") || return 125
+        relay_child_parent_group=${relay_child_parent_group//[[:space:]]/}
+        # A deliberately backgrounded build must not take the user's terminal.
+        [[ $relay_child_tty == "$relay_child_parent_group" ]] || relay_child_tty=''
+    fi
+    relay_child_int=$(trap -p INT)
+    relay_child_term=$(trap -p TERM)
+    relay_child_hup=$(trap -p HUP)
+    case $- in *m*) relay_child_monitor=1 ;; esac
+    trap 'relay_child_interrupted=130; trap "" INT TERM HUP; relay_stop_build_child "$relay_child_pid" "$relay_child_group" "$relay_child_wait"' INT
+    trap 'relay_child_interrupted=143; trap "" INT TERM HUP; relay_stop_build_child "$relay_child_pid" "$relay_child_group" "$relay_child_wait"' TERM
+    trap 'relay_child_interrupted=129; trap "" INT TERM HUP; relay_stop_build_child "$relay_child_pid" "$relay_child_group" "$relay_child_wait"' HUP
+    # Job control creates a group distinct from the caller. Disable it inside
+    # the runner so cargo, rustc and their children stay in that owned group.
+    set -m
+    (
+        set +m
+        trap - EXIT INT TERM HUP
+        "$@"
+    ) &
+    relay_child_pid=$! relay_child_group=$!
+    (( relay_child_monitor )) || set +m
+    relay_child_actual=$(ps -o pgid= -p "$relay_child_pid" 2>/dev/null) || relay_child_actual=''
+    relay_child_actual=${relay_child_actual//[[:space:]]/}
+    if [[ -n $relay_child_actual && $relay_child_actual != "$relay_child_pid" ]]; then
+        # Never send a group signal unless this is the group we just created.
+        relay_child_group=''
+        relay_child_interrupted=125
+        relay_stop_build_child "$relay_child_pid" ''
+    fi
+    if (( relay_child_interrupted )); then
+        relay_stop_build_child "$relay_child_pid" "$relay_child_group" "$relay_child_wait"
+    fi
+    if [[ -n $relay_child_tty && -n $relay_child_group && $relay_child_interrupted == 0 ]]; then
+        if ! relay_build_terminal_group "$relay_child_group" && relay_build_group_active "$relay_child_group"; then
+            relay_child_interrupted=125
+            relay_stop_build_child "$relay_child_pid" "$relay_child_group" "$relay_child_wait"
+        fi
+        kill -CONT -- "-$relay_child_group" 2>/dev/null || true
+    fi
+    if wait "$relay_child_pid"; then relay_child_status=0; else relay_child_status=$?; fi
+    # A command can exit before a helper it spawned. Stop those helpers before
+    # its caller removes sources/caches, and reap our direct child after signals.
+    if (( relay_child_wait && !relay_child_interrupted )) &&
+       [[ $relay_child_status == 129 || $relay_child_status == 130 || $relay_child_status == 143 ]]; then
+        # A terminal signal already reached the foreground group. Do not send
+        # a second signal while a surviving installer is restoring deployment.
+        relay_child_final_signal=''
+    fi
+    relay_stop_build_child "$relay_child_pid" "$relay_child_group" "$relay_child_wait" "$relay_child_final_signal"
+    wait "$relay_child_pid" 2>/dev/null || true
+    [[ -z $relay_child_tty ]] || relay_build_terminal_group "$relay_child_tty" || true
+    trap - INT TERM HUP
+    [[ -z $relay_child_int ]] || eval "$relay_child_int"
+    [[ -z $relay_child_term ]] || eval "$relay_child_term"
+    [[ -z $relay_child_hup ]] || eval "$relay_child_hup"
+    if (( relay_child_interrupted )); then return "$relay_child_interrupted"; fi
+    return "$relay_child_status"
+}
+# END SHARED BUILD CHILD RUNNER
+
 lr_usage() {
     cat <<'HELP'
 Usage: bash build-linux-servers-on-linux.sh [--repo DIR] [--output DIR] [--jobs N]
@@ -15,11 +146,12 @@ Supported hosts: Debian 13 or Ubuntu 26.04, on x64 or arm64.
 Rust binaries use static musl via Zig; Go uses CGO_ENABLED=0.
 All four files are named SOFTWARE-linux-ARCH and inspected for architecture
 and static linking. Native executables also run version/module smoke checks.
+Parallelism is reduced to available RAM plus cgroup-usable free swap; below
+1 GiB the build stops with guidance before downloading sources or toolchains.
 
-  --repo DIR       persistent caddy-network-relay checkout (default:
-                   ~/caddy-network-relay or CADDY_NETWORK_RELAY_SRC).
-                   Existing main checkouts run pull --ff-only origin main;
-                   missing checkouts are cloned.
+  --repo DIR       legacy option, accepted but no longer used as build input.
+                   Complete latest main sources always use a new
+                   /tmp/YYYYMMDD-HHMMSS.RANDOM directory.
   --output DIR     new or empty artifact directory (default: ./relay-servers-*)
   --jobs N         Cargo and Go parallelism (default: 2)
   Dependencies    install missing build prerequisites automatically (default).
@@ -29,9 +161,9 @@ and static linking. Native executables also run version/module smoke checks.
                    require existing build tools and Rust targets; install none
   --check          inspect host/tools without network access or filesystem changes
 
-The newest committed script handles each build. Local commits are refused;
-uncommitted files are preserved and never used as build inputs. The Caddy
-snapshot pins the fetched checkout commit. The Rust server uses a fresh
+The newest committed script handles each build. Local checkout files and
+CADDY_NETWORK_RELAY_SRC are never used as build inputs. The Caddy
+snapshot pins the freshly downloaded main commit. The Rust server uses a fresh
 network-relay main clone; caddy-dns/cloudflare uses its pinned v0.2.4 release.
 Fetched commits are fixed for this
 run and recorded in MANIFEST.txt. Credentials must allow both private repos.
@@ -40,10 +172,11 @@ Rust defaults to 1.99.1; Go defaults to go1.27.3+auto (honors module requirement
 
 Any failed source, build, verification or checksum step fails the run.
 Successful runs retain four binaries, logs, MANIFEST.txt and SHA256SUMS;
-only their private work directory is removed. Failed runs retain .work.
-Afterwards every folder in the checkout and the artifacts is mode 777.
+source checkouts and compiler work/caches are removed on success, failure
+and normal signals. Existing installed tools are reused without deletion.
+Afterwards every artifact folder is mode 777.
 Network steps are retried. Debian 13 keeps /tmp in memory; when it is too small,
-temporary files go to ~/.cache instead. Free disk space is checked first.
+compiler temporary files go to ~/.cache instead; source stays in /tmp. Free disk space is checked first.
 No server installation or service configuration is performed.
 HELP
 }
@@ -58,6 +191,26 @@ lr_open_dirs() {
         [[ -n $dir && -d $dir && ! -L $dir ]] || continue
         find "$dir" -type d -exec chmod 777 {} + 2>/dev/null || true
     done
+}
+lr_remove_work() {
+    local directory result=0
+    for directory in "$@"; do
+        [[ -n $directory ]] || continue
+        # Module caches contain read-only directories. Only this run's owned
+        # workspaces are made writable, never an existing user cache/toolchain.
+        if [[ -d $directory && ! -L $directory ]]; then
+            find -P "$directory" -type d -exec chmod u+w -- {} + || result=1
+        fi
+        rm -rf -- "$directory" || result=1
+    done
+    return "$result"
+}
+lr_cleanup() {
+    local status=$?
+    if (( status )); then printf 'Build incomplete (exit %s). Artifacts/logs: %s\n' "$status" "$output" >&2; fi
+    if (( output_owned )); then lr_open_dirs "$output"; rm -f -- "$output/.work"; fi
+    lr_remove_work "${work:-}" "$stage" || status=1
+    exit "$status"
 }
 lr_value() { [[ $# -ge 2 && -n $2 && $2 != --* ]] || lr_die "Pass a value to $1."; }
 lr_physical_dir() { REPLY=$(cd -P -- "$1" && printf '%s/' "$PWD"); REPLY=${REPLY%/}; }
@@ -82,11 +235,11 @@ lr_host() {
 }
 lr_check_tools() {
     local missing=0 tool targets triple
-    for tool in git curl cc pkg-config file sha256sum rustup rustc cargo go zig cargo-zigbuild readelf; do
+    for tool in ps git curl cc pkg-config file sha256sum rustup rustc cargo go zig cargo-zigbuild readelf; do
         if command -v "$tool" >/dev/null; then printf '  %s: available\n' "$tool";
         else printf '  %s: missing\n' "$tool" >&2; missing=1; fi
     done
-    if command -v rustup >/dev/null; then
+    if [[ -z ${existing_toolchain_bin:-} ]] && command -v rustup >/dev/null; then
         if ! rustup which --toolchain "${RUSTUP_TOOLCHAIN:-1.99.1}" rustc >/dev/null 2>&1; then
             printf '  Rust toolchain %s: missing\n' "${RUSTUP_TOOLCHAIN:-1.99.1}" >&2
             missing=1
@@ -110,11 +263,11 @@ lr_install_system() {
     # apt retries interrupted downloads itself.
     "${apt_command[@]}" -o Acquire::Retries=3 update
     "${apt_command[@]}" -o Acquire::Retries=3 install -y --no-install-recommends \
-        build-essential pkg-config ca-certificates curl git file golang-go binutils python3-venv
+        build-essential pkg-config ca-certificates curl git file golang-go binutils python3-venv procps
 }
 lr_ensure_system() {
     local tool missing=0 needs_python=0
-    for tool in git curl cc pkg-config file sha256sum go readelf; do
+    for tool in ps git curl cc pkg-config file sha256sum go readelf; do
         if ! command -v "$tool" >/dev/null; then
             printf 'Missing system prerequisite: %s\n' "$tool"
             missing=1
@@ -131,7 +284,7 @@ lr_ensure_system() {
     (( missing )) || return 0
     (( install_deps )) || lr_die 'Missing system prerequisites and --no-install-deps was selected.'
     lr_install_system
-    for tool in git curl cc pkg-config file sha256sum go readelf; do
+    for tool in ps git curl cc pkg-config file sha256sum go readelf; do
         command -v "$tool" >/dev/null || lr_die "System package installation did not provide $tool."
     done
     [[ -s /etc/ssl/certs/ca-certificates.crt ]] || lr_die 'System CA certificates are unavailable.'
@@ -140,6 +293,7 @@ lr_ensure_system() {
     fi
 }
 lr_install_rustup() {
+    [[ -z ${existing_toolchain_bin:-} ]] || return 0
     local installer
     if ! command -v rustup >/dev/null; then
         (( install_deps )) || lr_die 'Missing rustup; use --install-deps.'
@@ -157,9 +311,9 @@ lr_remote_git() {
     # A signed-in gh session can read private sources without global Git changes.
     # Existing credential helpers remain available before this fallback helper.
     if command -v gh >/dev/null; then
-        GIT_TERMINAL_PROMPT=0 git -c 'credential.helper=!gh auth git-credential' "$@"
+        GIT_TERMINAL_PROMPT=0 git -c protocol.file.allow=never -c 'credential.helper=!gh auth git-credential' "$@"
     else
-        GIT_TERMINAL_PROMPT=0 git "$@"
+        GIT_TERMINAL_PROMPT=0 git -c protocol.file.allow=never "$@"
     fi
 }
 lr_token_git() {
@@ -169,7 +323,7 @@ lr_token_git() {
     GIT_TERMINAL_PROMPT=0 GIT_CONFIG_COUNT=2 \
         GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
         GIT_CONFIG_KEY_1=http.https://github.com/.extraheader \
-        GIT_CONFIG_VALUE_1="Authorization: Basic $header" git "$@"
+        GIT_CONFIG_VALUE_1="Authorization: Basic $header" git -c protocol.file.allow=never "$@"
 }
 # Run a network command up to three times, 5 and then 15 seconds apart.
 lr_retry() {
@@ -208,110 +362,20 @@ lr_github() {
     printf 'Trying once more with CADDY_NETWORK_RELAY_TOKEN.\n' >&2
     lr_token_git "$@"
 }
-# Print local edits that an update to $2 would overwrite, one per line.
-lr_blocking_changes() {
-    local incoming line path
-    incoming=$(git -C "$1" -c core.quotePath=false diff --name-only HEAD "$2" --) || return 0
-    git -C "$1" -c core.quotePath=false status --porcelain --untracked-files=all |
-        while IFS= read -r line; do
-            path=${line:3}
-            path=${path##* -> }
-            if grep -Fxq -- "$path" <<< "$incoming"; then printf '  %s\n' "$path"; fi
-        done
-}
+# Always fetch a complete main checkout into this run's private source directory.
 lr_update_checkout() {
-    local actual_root remote selected_branch fetched has_repo=0 ahead behind blocked script fresh
-    printf -v script '%q' "$0"
-    printf -v fresh '%q' "$HOME/caddy-network-relay-build"
-    while [[ $checkout == */ && $checkout != / ]]; do checkout=${checkout%/}; done
-    if [[ -e $checkout || -L $checkout ]]; then
-        if [[ -d $checkout && -e $checkout/.git ]]; then has_repo=1;
-        elif [[ ! -d $checkout || -L $checkout ]] || ! lr_empty_dir "$checkout"; then
-            lr_explain "$checkout already exists, but it is not a Git copy of ArcCal/caddy-network-relay." \
-                'Nothing in it was changed. Rename or move that folder, or build in a new folder:' \
-                "  bash $script --repo $fresh"
-        fi
+    printf '==> Cloning latest complete ArcCal/caddy-network-relay main\n'
+    if ! lr_github clone --branch main -- https://github.com/ArcCal/caddy-network-relay.git "$checkout"; then
+        lr_access_help ArcCal/caddy-network-relay CADDY_NETWORK_RELAY_TOKEN
+        lr_die 'Could not download latest source; no local checkout is used.'
     fi
-    if (( has_repo )); then
-        lr_physical_dir "$checkout"; checkout=$REPLY
-        actual_root=$(git -C "$checkout" rev-parse --show-toplevel && printf '.') || lr_die 'Cannot inspect checkout root.'
-        actual_root=${actual_root%.}; actual_root=${actual_root%$'\n'}
-        [[ $actual_root == "$checkout" ]] ||
-            lr_explain "$checkout is inside the Git repository $actual_root; select the top folder of the copy." \
-                'Nothing was changed. Pass that folder with --repo DIR, or build in a new folder:' \
-                "  bash $script --repo $fresh"
-        remote=$(git -C "$checkout" config --get remote.origin.url) || remote='no origin'
-        # GitHub owner and repository names are case-insensitive.
-        case $(printf '%s' "$remote" | tr '[:upper:]' '[:lower:]') in
-            https://github.com/arccal/caddy-network-relay|https://github.com/arccal/caddy-network-relay.git|git@github.com:arccal/caddy-network-relay.git|ssh://git@github.com/arccal/caddy-network-relay.git) ;;
-            *) lr_explain "$checkout is a Git copy of $remote, not of ArcCal/caddy-network-relay." \
-                   'Nothing was changed. Choose the right folder with --repo DIR, or build in a new folder:' \
-                   "  bash $script --repo $fresh" ;;
-        esac
-        selected_branch=$(git -C "$checkout" symbolic-ref --short -q HEAD) || selected_branch=
-        if [[ $selected_branch != main ]]; then
-            lr_explain "$checkout is ${selected_branch:+on branch \"$selected_branch\", }not on the main branch, which the build uses." \
-                'Your branch and files were left unchanged. Switch back to main and run this script again:' \
-                "  git -C $(printf '%q' "$checkout") switch main" \
-                'or leave this copy as it is and build in a new folder:' \
-                "  bash $script --repo $fresh"
-        fi
-        printf '==> Updating existing checkout with pull --ff-only\n'
-        if ! lr_github -C "$checkout" fetch origin main; then
-            lr_access_help ArcCal/caddy-network-relay CADDY_NETWORK_RELAY_TOKEN
-            lr_die 'Could not check for updates; no local files were changed.'
-        fi
-        fetched=$(git -C "$checkout" rev-parse --verify FETCH_HEAD) || lr_die 'Cannot identify fetched commit.'
-        ahead=$(git -C "$checkout" rev-list --count "$fetched..HEAD") || lr_die 'Cannot compare the checkout with GitHub.'
-        if (( ahead )); then
-            lr_explain "Your copy at $checkout has $ahead commit(s) that are not on GitHub's main branch" \
-                "(your own commits, or main was rewritten on GitHub). The build always uses GitHub's main," \
-                'and updating could lose or mix in that work, so nothing was changed.' \
-                'Build in a new folder instead; this copy stays exactly as it is:' \
-                "  bash $script --repo $fresh"
-        fi
-        behind=$(git -C "$checkout" rev-list --count "HEAD..$fetched") || lr_die 'Cannot compare the checkout with GitHub.'
-        if (( behind )); then
-            blocked=$(lr_blocking_changes "$checkout" "$fetched")
-            if [[ -n $blocked ]]; then
-                lr_explain "These files in $checkout were changed on this computer, and the update changes them too:" \
-                    "$blocked" \
-                    'Updating would overwrite your changes, so nothing was changed. Either build in a new folder' \
-                    '(this copy stays exactly as it is):' \
-                    "  bash $script --repo $fresh" \
-                    'or set your changes aside, run this script, and then bring them back:' \
-                    "  git -C $(printf '%q' "$checkout") stash push --include-untracked" \
-                    "  bash $script" \
-                    "  git -C $(printf '%q' "$checkout") stash pop"
-            fi
-            if ! lr_remote_git -C "$checkout" pull --ff-only origin main ||
-                { [[ -n ${CADDY_NETWORK_RELAY_TOKEN:-} ]] && lr_token_git -C "$checkout" pull --ff-only origin main; }; then
-                lr_explain "Git could not update $checkout (its message is above). Your files were left as they were." \
-                    'Run this script again in a few minutes, or build in a new folder:' \
-                    "  bash $script --repo $fresh"
-            fi
-            fetched=$(git -C "$checkout" rev-parse --verify FETCH_HEAD) || lr_die 'Cannot identify fetched commit.'
-        else
-            printf 'Already up to date.\n'
-        fi
-        if [[ -n $(git -C "$checkout" status --porcelain) ]]; then
-            printf 'Your uncommitted changes in %s were kept; the build does not use them.\n' "$checkout"
-        fi
-    else
-        printf '==> Cloning ArcCal/caddy-network-relay\n'
-        if ! lr_github clone --depth 1 --single-branch --branch main -- https://github.com/ArcCal/caddy-network-relay.git "$checkout"; then
-            lr_access_help ArcCal/caddy-network-relay CADDY_NETWORK_RELAY_TOKEN
-            lr_die 'Could not download the source code; nothing was changed.'
-        fi
-        lr_physical_dir "$checkout"; checkout=$REPLY
-        fetched=$(git -C "$checkout" rev-parse --verify refs/remotes/origin/main) || lr_die 'Cannot identify cloned commit.'
-    fi
-    root_commit=$(git -C "$checkout" rev-parse --verify HEAD) || lr_die 'Cannot identify checkout commit.'
-    [[ $root_commit == "$fetched" ]] || lr_die 'Local commits differ from fetched main; no local files were reset.'
+    root_commit=$(git -C "$checkout" rev-parse --verify HEAD) || lr_die 'Cannot identify cloned commit.'
+    [[ $root_commit == "$(git -C "$checkout" rev-parse --verify refs/remotes/origin/main)" ]] ||
+        lr_die 'Cloned source is not GitHub main.'
 }
 lr_clone_repo() {
     local name=$1 destination=$2 token_name=$3 token header
-    if lr_retry lr_remote_git clone --depth 1 --branch main --single-branch -- "https://github.com/ArcCal/$name.git" "$destination"; then return 0; fi
+    if lr_retry lr_remote_git -c protocol.file.allow=never clone --branch main -- "https://github.com/ArcCal/$name.git" "$destination"; then return 0; fi
     token=${!token_name:-}
     [[ -n $token ]] || { lr_access_help "ArcCal/$name" "$token_name"; return 1; }
     header=$(printf 'x-access-token:%s' "$token" | base64 | tr -d '\n')
@@ -321,7 +385,7 @@ lr_clone_repo() {
         GIT_CONFIG_KEY_0=credential.helper GIT_CONFIG_VALUE_0='' \
         GIT_CONFIG_KEY_1=http.https://github.com/.extraheader \
         GIT_CONFIG_VALUE_1="Authorization: Basic $header" \
-        git clone --depth 1 --branch main --single-branch -- "https://github.com/ArcCal/$name.git" "$destination" ||
+        git -c protocol.file.allow=never clone --branch main -- "https://github.com/ArcCal/$name.git" "$destination" ||
         { lr_access_help "ArcCal/$name" "$token_name"; return 1; }
 }
 # Rust comes from static.rust-lang.org; explain a download that keeps failing.
@@ -333,6 +397,7 @@ lr_rust_help() {
     return 1
 }
 lr_prepare_rust() {
+    if [[ -n ${existing_toolchain_bin:-} ]]; then rustc --version; return; fi
     lr_retry rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal || lr_rust_help
     lr_retry rustup target add --toolchain "$RUSTUP_TOOLCHAIN" x86_64-unknown-linux-musl aarch64-unknown-linux-musl || lr_rust_help
     rustc --version
@@ -354,14 +419,16 @@ lr_prepare_cross_tools() {
     zig version
     cargo-zigbuild --version
 }
+lr_step() { set -euo pipefail; "$@"; }
 lr_run() {
     local name=$1 status
     shift
     printf '==> %s\n' "$name"
     set +e
-    ( set -euo pipefail; "$@" ) > "$output/logs/$name.log" 2>&1
+    relay_run_build_child lr_step "$@" > "$output/logs/$name.log" 2>&1
     status=$?
     set -e
+    if (( status >= 128 )); then exit "$status"; fi
     if (( status )); then
         printf '    FAILED (exit %s); log: %s/logs/%s.log\n' "$status" "$output" "$name" >&2
         tail -n 20 "$output/logs/$name.log" >&2
@@ -479,40 +546,128 @@ lr_mount_of() {
     df -Pk -- "$dir" | awk 'NR == 2 { print $6 }'
 }
 lr_gib() { awk -v k="$1" 'BEGIN { printf "%.1f", k / 1048576 }'; }
-# Choose where temporary build files go before any long step starts, and check
-# that the build tools fit in the home folder. Debian 13 keeps /tmp in memory,
-# which can be too small, so the home folder's cache is the fallback.
+# Compiler caches need disk space, not a RAM-backed /tmp on a small VPS.
 lr_work_parent() {
-    local work_gib=3 tools_gib=1 candidate need home_free tmp_free
-    # A first build also installs the Rust toolchain and Go and fills their caches.
-    if ! compgen -G "${RUSTUP_HOME:-$HOME/.rustup}/toolchains/${RUSTUP_TOOLCHAIN:-1.99.1}-*" >/dev/null; then
-        tools_gib=5
+    local candidate need=8
+    if command -v rustup >/dev/null; then
+        local compiler
+        compiler=$(rustup which --toolchain "${RUSTUP_TOOLCHAIN:-1.99.1}" rustc 2>/dev/null) || compiler=
+        if [[ -n $compiler && -d ${compiler%/*}/../lib/rustlib/x86_64-unknown-linux-musl/lib &&
+              -d ${compiler%/*}/../lib/rustlib/aarch64-unknown-linux-musl/lib ]]; then need=4; fi
     fi
-    home_free=$(lr_free_kib "$HOME")
-    for candidate in /tmp "$HOME/.cache"; do
-        need=$work_gib
-        if [[ $(lr_mount_of "$candidate") == "$(lr_mount_of "$HOME")" ]]; then need=$((need + tools_gib)); fi
-        if (( $(lr_free_kib "$candidate") >= need * 1048576 && home_free >= tools_gib * 1048576 )); then
+    for candidate in /tmp /var/tmp "$HOME/.cache" "$HOME"; do
+        [[ -d $candidate ]] || continue
+        case $(stat -f -c %T "$candidate") in tmpfs|ramfs) continue ;; esac
+        if (( $(lr_free_kib "$candidate") >= need * 1048576 )); then
             REPLY=$candidate
             return 0
         fi
     done
-    tmp_free=$(lr_free_kib /tmp)
-    lr_explain 'There is not enough free disk space to build.' \
-        "The build needs about $work_gib GB for temporary files and $tools_gib GB for its tools, but only" \
-        "$(lr_gib "$tmp_free") GB is free in /tmp and $(lr_gib "$home_free") GB in your home folder." \
-        'Free up space (for example by deleting old build output folders) or use a larger disk,' \
-        'then run this script again.'
+    lr_explain "The build needs about $need GiB of free disk space for its private compiler workspace." \
+        'Source stays in /tmp; compiler work on a small RAM-backed /tmp is avoided.' \
+        'Free disk space or use a larger disk, then run this script again.'
+}
+lr_cgroup_headroom() {
+    local cgroups=$1 mountinfo=$2 host_ram=$3 host_swap=$4
+    local hierarchy controllers relative type root mount dir limit usage inactive ram swap used level smallest=''
+    [[ -r $cgroups && -r $mountinfo ]] || return 1
+    while IFS=: read -r hierarchy controllers relative; do
+        if [[ $hierarchy == 0 && -z $controllers ]]; then type=cgroup2
+        elif [[ ,$controllers, == *,memory,* ]]; then type=cgroup
+        else continue
+        fi
+        while read -r root mount; do
+            root=$(printf '%b' "$root"); mount=$(printf '%b' "$mount")
+            if [[ $root == / || $relative == "$root" || $relative == "$root"/* ]]; then
+                dir=$mount${relative#"${root%/}"}
+            else
+                # A cgroup namespace can report a relative process path while
+                # mountinfo still exposes its host-side root (including /..).
+                dir=$mount$relative
+            fi
+            dir=${dir%/}
+            [[ -d $dir ]] || dir=${mount%/}
+            while [[ -d $dir ]]; do
+                ram=$host_ram; swap=$host_swap; inactive=0
+                if [[ $type == cgroup2 && -r $dir/memory.max ]]; then
+                    limit=$(< "$dir/memory.max")
+                    if [[ $limit =~ ^[0-9]+$ ]] && (( ${#limit} < 19 )); then
+                        usage=$(cat -- "$dir/memory.current") || return 1
+                        [[ $usage =~ ^[0-9]+$ ]] || return 1
+                        inactive=$(awk '$1 == "inactive_file" {print $2}' "$dir/memory.stat" 2>/dev/null)
+                        ram=$(( (limit - usage + ${inactive:-0}) / 1024 ))
+                    fi
+                    limit=$(cat -- "$dir/memory.swap.max" 2>/dev/null || printf max)
+                    if [[ $limit =~ ^[0-9]+$ ]] && (( ${#limit} < 19 )); then
+                        used=$(cat -- "$dir/memory.swap.current") || return 1
+                        [[ $used =~ ^[0-9]+$ ]] || return 1
+                        swap=$(( (limit - used) / 1024 ))
+                    fi
+                elif [[ $type == cgroup && -r $dir/memory.limit_in_bytes ]]; then
+                    limit=$(< "$dir/memory.limit_in_bytes")
+                    inactive=$(awk '$1 == "total_inactive_file" {print $2}' "$dir/memory.stat" 2>/dev/null)
+                    if [[ $limit =~ ^[0-9]+$ ]] && (( ${#limit} < 19 )); then
+                        usage=$(cat -- "$dir/memory.usage_in_bytes") || return 1
+                        [[ $usage =~ ^[0-9]+$ ]] || return 1
+                        ram=$(( (limit - usage + ${inactive:-0}) / 1024 ))
+                    fi
+                fi
+                (( ram >= 0 )) || ram=0
+                (( swap >= 0 )) || swap=0
+                (( ram <= host_ram )) || ram=$host_ram
+                (( swap <= host_swap )) || swap=$host_swap
+                level=$((ram + swap))
+                if [[ $type == cgroup ]]; then
+                    limit=$(cat -- "$dir/memory.memsw.limit_in_bytes" 2>/dev/null || true)
+                    if [[ $limit =~ ^[0-9]+$ ]] && (( ${#limit} < 19 )); then
+                        used=$(cat -- "$dir/memory.memsw.usage_in_bytes") || return 1
+                        [[ $used =~ ^[0-9]+$ ]] || return 1
+                        used=$(( (limit - used + ${inactive:-0}) / 1024 ))
+                        (( used >= 0 )) || used=0
+                        (( level <= used )) || level=$used
+                    fi
+                fi
+                if [[ -z $smallest ]] || (( level < smallest )); then smallest=$level; fi
+                [[ $dir != "${mount%/}" ]] || break
+                dir=${dir%/*}
+            done
+        done < <(awk -v type="$type" '{
+            for (i = 7; i <= NF; i++) if ($i == "-") {
+                if ($(i + 1) == type && (type == "cgroup2" || $(i + 3) ~ /(^|,)memory(,|$)/)) print $4, $5
+                break
+            }
+        }' "$mountinfo")
+    done < "$cgroups"
+    [[ -z $smallest ]] || printf '%s\n' "$smallest"
+    return 0
+}
+
+
+lr_memory_jobs() {
+    local available swap headroom allowed
+    available=$(awk '/^(MemAvailable|SwapFree):/ {n += $2} END {print n+0}' "${1:-/proc/meminfo}") || lr_die 'Cannot inspect build memory.'
+    swap=$(awk '/^SwapFree:/ {n = $2} END {print n+0}' "${1:-/proc/meminfo}")
+    headroom=$(lr_cgroup_headroom "${2:-/proc/self/cgroup}" "${3:-/proc/self/mountinfo}" "$((available - swap))" "$swap") || lr_die 'Cannot inspect cgroup build memory limits.'
+    if [[ $headroom =~ ^[0-9]+$ ]] && (( headroom < available )); then available=$headroom; fi
+    if [[ ! $available =~ ^[0-9]+$ ]] || (( available < 1048576 )); then
+        lr_die 'The Rust/Caddy build needs at least 1 GiB available RAM plus usable free swap within any cgroup limit. Add or increase swap on disk (not /tmp tmpfs), or raise the memory limit.'
+    fi
+    allowed=$((available / 1048576))
+    if (( jobs > allowed )); then
+        printf 'Reducing build parallelism from %s to %s for available RAM and usable swap.\n' "$jobs" "$allowed"
+        jobs=$allowed
+    fi
 }
 lr_main() {
-    checkout=${CADDY_NETWORK_RELAY_SRC:-"$HOME/caddy-network-relay"}
+    unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+    checkout=
     # 2: install missing prerequisites; 1: additionally refresh apt; 0: opt out.
     output=; jobs=2; install_deps=2
-    local check_only=0
+    local check_only=0 interactive_python_missing=0
     while (( $# )); do
         case $1 in
             -h|--help) lr_usage; return ;;
-            --repo) lr_value "$@"; checkout=$2; shift 2 ;;
+            --repo) lr_value "$@"; printf '%s\n' '--repo is retained for compatibility; latest sources always use /tmp.' >&2; shift 2 ;;
             --output) lr_value "$@"; output=$2; shift 2 ;;
             --jobs) lr_value "$@"; jobs=$2; shift 2 ;;
             --install-deps) install_deps=1; shift ;;
@@ -530,31 +685,45 @@ lr_main() {
         lr_check_tools
         return
     fi
+    lr_memory_jobs /proc/meminfo /proc/self/cgroup /proc/self/mountinfo
     (( install_deps != 1 )) || lr_install_system
-    if ! command -v git >/dev/null; then
-        (( install_deps )) || lr_die 'Missing git and --no-install-deps was selected.'
+    if { : </dev/tty; } 2>/dev/null && ! command -v python3 >/dev/null; then
+        interactive_python_missing=1
+    fi
+    if ! command -v git >/dev/null || ! command -v ps >/dev/null || (( interactive_python_missing )); then
+        (( install_deps )) || lr_die 'Missing Git, ps, or interactive Python 3; --no-install-deps was selected.'
         lr_install_system
     fi
-    trap 'lr_open_dirs "$checkout"' EXIT
-    lr_update_checkout
     lr_work_parent
-    mkdir -p -- "$REPLY" || lr_die "Cannot create $REPLY."
-    stage=$(mktemp -d "$REPLY/relay-servers.XXXXXX") || lr_die 'Cannot create private workspace.'
-    if [[ $REPLY != /tmp ]]; then
-        # Compilers and Go also write temporary files; keep them off the small /tmp.
-        mkdir -- "$stage/tmp"
-        export TMPDIR="$stage/tmp"
-        printf 'Temporary build files go to %s because /tmp is too small.\n' "$stage"
-    fi
-    trap 'status=$?; if (( status )); then printf "Update failed (exit %s). Work: %s\n" "$status" "$stage" >&2; fi; lr_open_dirs "$checkout" "$stage"' EXIT
+    local build_parent=$REPLY
+    stage=$(mktemp -d "/tmp/$(date +%Y%m%d-%H%M%S).XXXXXX") || lr_die 'Cannot create private source directory in /tmp.'
+    checkout=$stage/caddy-network-relay-src
+    trap 'status=$?; rm -rf -- "${stage:?}"; exit "$status"' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    trap 'exit 129' HUP
+    if relay_run_build_child lr_update_checkout; then :; else exit "$?"; fi
+    root_commit=$(git -C "$checkout" rev-parse --verify HEAD) || lr_die 'Cannot identify cloned commit.'
+    printf '%s\n' "$build_parent" > "$stage/.build-parent"
     printf '%s\n' "$root_commit" > "$stage/.owner"
     git -C "$checkout" show "$root_commit:build-linux-servers-on-linux.sh" > "$stage/driver.sh" || lr_die 'Cannot load newest committed script.'
     [[ -s $stage/driver.sh ]] || lr_die 'Newest build script is empty.'
-    exec "$BASH" "$stage/driver.sh" --build-updated "$checkout" "$stage" "$output" "$root_commit" "$jobs" "$install_deps" --deps-policy-v2
+    exec "$BASH" -c '
+        relay_fresh_stage=$3
+        relay_fresh_cleanup() {
+            local status=$?
+            find -P "$relay_fresh_stage" -type d -exec chmod u+w -- {} +
+            rm -rf -- "$relay_fresh_stage"
+            exit "$status"
+        }
+        trap relay_fresh_cleanup EXIT
+        source "$0" "$@"
+    ' "$stage/driver.sh" --build-updated "$checkout" "$stage" "$output" "$root_commit" "$jobs" "$install_deps" --deps-policy-v2
 }
 
 # Sourcing provides the portable build helpers without inspecting or changing a host.
 [[ ${BASH_SOURCE[0]} == "$0" ]] || return 0
+set +x
 set -euo pipefail
 unset CDPATH
 # Parse the complete conditional before pull can replace the running input file.
@@ -562,12 +731,16 @@ if [[ ${1:-} != --build-updated ]]; then lr_main "$@"; exit; fi
 [[ $# == 8 && ${8:-} == --deps-policy-v2 ]] || lr_die 'Invalid internal build invocation.'
 checkout=$2; stage=$3; output=$4; root_commit=$5; jobs=$6; install_deps=$7
 [[ $root_commit =~ ^[0-9a-f]{40}$ && $jobs =~ ^[1-9][0-9]*$ && ( $install_deps == 0 || $install_deps == 1 || $install_deps == 2 ) ]] || lr_die 'Invalid build options.'
-[[ ${stage##*/} == relay-servers.* && -d $stage && ! -L $stage && -f $stage/.owner && ! -L $stage/.owner &&
+[[ ${stage%/*} == /tmp && ${stage##*/} =~ ^[0-9]{8}-[0-9]{6}\.[[:alnum:]]+$ && -d $stage && ! -L $stage && -f $stage/.owner && ! -L $stage/.owner &&
    $(cat "$stage/.owner") == "$root_commit" ]] || lr_die 'Invalid private workspace.'
-trap 'status=$?; if (( status )); then printf "Build incomplete (exit %s). Work: %s; artifacts/logs: %s\n" "$status" "$stage" "$output" >&2; fi; lr_open_dirs "$checkout" "$output" "$stage"' EXIT
+work=
+output_owned=0
+trap lr_cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+trap 'exit 129' HUP
 lr_host
+lr_memory_jobs /proc/meminfo /proc/self/cgroup /proc/self/mountinfo
 printf 'Build host: %s; targets: linux-amd64, linux-arm64 (static)\n' "$platform"
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 while [[ $output == */ && $output != / ]]; do output=${output%/}; done
@@ -588,15 +761,41 @@ else
 fi
 lr_physical_dir "$output"; output=$REPLY
 [[ $output/ != "$stage/"* && $stage/ != "$output/"* ]] || lr_die 'Output and work directories cannot overlap.'
-work=$stage
-repo="$work/network-relay-src"
-caddy_src="$work/caddy-network-relay-src"
-cloudflare_src="$work/cloudflare-src"
+work=$(mktemp -d "$(cat "$stage/.build-parent")/relay-servers.XXXXXX") || lr_die 'Cannot create compiler workspace.'
+mkdir -- "$work/tmp"
+export TMPDIR="$work/tmp" GOTMPDIR="$work/tmp"
+if [[ ${work%/*} != /tmp ]]; then
+    printf 'Compiler temporary files go to %s because /tmp is too small.\n' "$work"
+fi
+repo="$stage/network-relay-src"
+caddy_src="$checkout"
+cloudflare_src="$stage/cloudflare-src"
+output_owned=1
 mkdir -- "$output/logs"
 ln -s -- "$work" "$output/.work"
-printf 'Artifacts: %s\nPersistent checkout: %s\nWork directory: %s\n' "$output" "$checkout" "$work"
+printf 'Artifacts: %s\nFresh source checkout: %s\nWork directory: %s\n' "$output" "$checkout" "$work"
 failures=0
 export RUSTUP_TOOLCHAIN=${RUSTUP_TOOLCHAIN:-1.99.1}
+existing_toolchain_bin=
+if command -v rustup >/dev/null; then
+    existing_rustc=$(rustup which --toolchain "$RUSTUP_TOOLCHAIN" rustc 2>/dev/null) || existing_rustc=
+    if [[ -n $existing_rustc ]]; then
+        existing_toolchain_bin=${existing_rustc%/*}
+        for triple in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            [[ -d $existing_toolchain_bin/../lib/rustlib/$triple/lib ]] || existing_toolchain_bin=
+        done
+    fi
+fi
+export CARGO_HOME="$work/cargo" RUSTUP_HOME="$work/rustup"
+export GOPATH="$work/gopath" GOMODCACHE="$work/gopath/pkg/mod" GOCACHE="$work/gocache"
+export XDG_CACHE_HOME="$work/cache" PIP_CACHE_DIR="$work/pip-cache"
+export ZIG_GLOBAL_CACHE_DIR="$work/zig-global-cache" ZIG_LOCAL_CACHE_DIR="$work/zig-local-cache"
+export PATH="${existing_toolchain_bin:+$existing_toolchain_bin:}$CARGO_HOME/bin:$PATH"
+export TEST_TELEMETRY_DIR="$work/go-telemetry"
+export GOMAXPROCS="$jobs"
+export RUSTC_WRAPPER='' RUSTC_WORKSPACE_WRAPPER=''
+unset GOCACHEPROG GOROOT RUSTC RUSTDOC CARGO_BUILD_RUSTC CARGO_BUILD_RUSTDOC
+export GOENV=off
 if (( install_deps )); then
     export GOTOOLCHAIN=${GOTOOLCHAIN:-go1.27.3+auto}
 else
@@ -612,13 +811,12 @@ fi
 (( failures == 0 )) || lr_die 'Build prerequisites are unavailable.'
 for tool in rustup rustc cargo; do command -v "$tool" >/dev/null || lr_die "Missing required tool after bootstrap: $tool"; done
 lr_snapshot() {
-    git clone --no-hardlinks --no-checkout -- "$checkout" "$caddy_src"
-    git -C "$caddy_src" checkout --detach "$root_commit"
+    [[ $(git -C "$caddy_src" rev-parse --verify HEAD) == "$root_commit" ]]
 }
 lr_run source-caddy-network-relay lr_snapshot
 lr_run source-network-relay lr_clone_repo network-relay "$repo" NETWORK_RELAY_TOKEN
 lr_clone_cloudflare() {
-    lr_retry env GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch "$LR_CLOUDFLARE_DNS_TAG" --single-branch -- \
+    lr_retry env GIT_TERMINAL_PROMPT=0 git -c protocol.file.allow=never clone --branch "$LR_CLOUDFLARE_DNS_TAG" -- \
         https://github.com/caddy-dns/cloudflare.git "$cloudflare_src"
     [[ $(git -C "$cloudflare_src" rev-parse --verify HEAD) == "$LR_CLOUDFLARE_DNS_COMMIT" ]] ||
         lr_die "caddy-dns/cloudflare $LR_CLOUDFLARE_DNS_TAG is not the reviewed commit."
@@ -686,5 +884,5 @@ lr_checksums() (
 lr_run checksums lr_checksums
 (( failures == 0 )) || lr_die 'Checksum generation or verification failed.'
 rm -f -- "$output/.work"
-rm -rf -- "${work:?}"
+lr_remove_work "$work"
 printf '\nBoth servers built for amd64 and arm64.\nBoth architectures inspected; native executables also smoke-tested.\nArtifacts: %s\n' "$output"

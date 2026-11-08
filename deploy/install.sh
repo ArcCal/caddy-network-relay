@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # Installs or upgrades Caddy with the network_relay plugin on Debian 12 or
-# newer and Ubuntu 22.04 or newer (x86_64 or arm64), from the source
-# directory this script is in.
+# newer and Ubuntu 22.04 or newer (x86_64 or arm64), from a fresh complete main checkout in /tmp.
 #
 # First install:
 #     sudo bash deploy/install.sh --domain relay.example.com [--user iphone] [--email you@example.com]
-# Upgrade (rebuild from this source; users, passwords and Caddyfile stay):
+# Upgrade (rebuild latest main; users, passwords and Caddyfile stay):
 #     sudo bash deploy/install.sh
 #
 # Options:
@@ -47,6 +46,15 @@ die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
 run_apt() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=1800 -o Acquire::Retries=3 "$@"; }
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
+CADDY_SOURCE_WORK='' CADDY_BUILD_WORK=''
+if [[ ${1:-} == --fresh-source-run ]]; then
+    [[ $# -ge 3 ]] || die 'Invalid fresh-source invocation.'
+    # shellcheck source=deploy/fresh-source.sh
+    source "$SRC/deploy/fresh-source.sh"
+    caddy_accept_source "$SRC" "$2" "$3" || die 'Invalid private source workspace.'
+    shift 3
+fi
+build_args=("$@")
 DOMAIN='' RELAY_USER='' EMAIL='' GFWLIST=1 REPLACE_OLD=0 DNS_CHECK=1
 while (($#)); do
     case $1 in
@@ -63,6 +71,11 @@ done
 
 # ---- checks that change nothing ----
 [[ $EUID == 0 || -n $ROOT ]] || die 'Run this as root: sudo -i first, then run this script.'
+if [[ -z $CADDY_SOURCE_WORK ]]; then
+    # shellcheck source=deploy/fresh-source.sh
+    source "$SRC/deploy/fresh-source.sh"
+    caddy_latest_entry deploy/install.sh "${build_args[@]}" || die 'Downloading latest build source failed.'
+fi
 grep -q '^module github.com/arccal/caddy-network-relay$' "$SRC/go.mod" 2>/dev/null \
     || die "Source not found: run bash deploy/install.sh from inside the unzipped caddy-network-relay directory."
 # Debian 12 or newer, Ubuntu 22.04 or newer: anything with systemd, apt and
@@ -143,7 +156,9 @@ fi
 # ---- install ----
 say "==> Installing dependencies"
 run_apt update -qq
-run_apt install -y -qq ca-certificates curl python3 iproute2 >/dev/null
+run_apt install -y -qq ca-certificates curl git procps python3 iproute2 >/dev/null
+mkdir -p "$CACHE"
+caddy_new_build_work "$CACHE" || die 'Cannot create private compiler workspace.'
 
 old_stopped=0
 old_enabled=0
@@ -151,20 +166,22 @@ if ((REPLACE_OLD)) && systemctl is-enabled --quiet network-relay 2>/dev/null; th
     old_enabled=1
 fi
 
-say "==> Preparing Go $GO_VERSION (only used for building, installed in $OPT/go)"
-GO=$OPT/go/bin/go
+say "==> Preparing Go $GO_VERSION (only used in this build)"
+GO=$CADDY_BUILD_WORK/go/bin/go
 if [[ -n ${RELAY_TEST_GO:-} ]]; then
     GO=$RELAY_TEST_GO
-elif [[ ! -x $GO || $("$GO" env GOVERSION 2>/dev/null) != "go$GO_VERSION" ]]; then
+elif [[ -x $OPT/go/bin/go && $("$OPT/go/bin/go" env GOVERSION 2>/dev/null) == "go$GO_VERSION" ]]; then
+    GO=$OPT/go/bin/go
+else
     # The official toolchain, from the Go module proxy (which the build
     # needs anyway), checked against the hash in Go's checksum database.
     module=golang.org/toolchain@v0.0.1-go$GO_VERSION.linux-$GOARCH
-    mkdir -p "$CACHE" "$OPT"
-    zip=$CACHE/go-toolchain.zip
-    curl -fsSL --retry 3 --retry-delay 5 --max-time 900 -o "$zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go$GO_VERSION.linux-$GOARCH.zip" \
+    mkdir -p "$CACHE"
+    zip=$CADDY_BUILD_WORK/go-toolchain.zip
+    caddy_run_build curl -fsSL --retry 3 --retry-delay 5 --max-time 900 -o "$zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go$GO_VERSION.linux-$GOARCH.zip" \
         || die 'Downloading Go failed: this machine must be able to reach proxy.golang.org.'
-    rm -rf "$OPT/go.new"
-    python3 - "$zip" "$OPT/go.new" "$module" "${GO_SUMS[$GOARCH]}" <<'PY' || die 'Verifying the Go toolchain failed: the download is incomplete or has been tampered with.'
+    rm -rf "$CADDY_BUILD_WORK/go.new"
+    caddy_run_build python3 - "$zip" "$CADDY_BUILD_WORK/go.new" "$module" "${GO_SUMS[$GOARCH]}" <<'PY' || die 'Verifying the Go toolchain failed: the download is incomplete or has been tampered with.'
 import base64, hashlib, os, sys, zipfile
 path, dest, prefix, want = sys.argv[1:]
 z = zipfile.ZipFile(path)
@@ -183,21 +200,16 @@ for info in z.infolist():
         f.write(z.read(info))
     os.chmod(target, (info.external_attr >> 16) & 0o777 or 0o644)
 PY
-    rm -rf "$OPT/go" "$zip"
-    mv "$OPT/go.new" "$OPT/go"
+    rm -f "$zip"
+    mv "$CADDY_BUILD_WORK/go.new" "$CADDY_BUILD_WORK/go"
 fi
 
 say "==> Building Caddy with the network_relay plugin (takes several minutes on machines with little memory)"
 mkdir -p "$CACHE"
-jobs=()
-mem_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null || echo 0)
-((mem_kb == 0 || mem_kb > 1800000)) || jobs=(-p 1)
-(
-    cd "$SRC"
-    env GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 GOWORK=off GOOS=linux GOARCH="$GOARCH" \
-        GOPATH="$CACHE/gopath" GOMODCACHE="$CACHE/gomod" GOCACHE="$CACHE/gocache" \
-        "$GO" build "${jobs[@]}" -tags http2legacy -trimpath -ldflags '-s -w' -o "$CACHE/caddy.new" ./cmd/caddy
-) || die 'Build failed (the reason is above). If memory is short, add swap first; if it is a network problem, check that proxy.golang.org is reachable.'
+jobs=(-p "$CADDY_BUILD_JOBS")
+caddy_run_build caddy_build_in_source "$SRC" env GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 GOMAXPROCS="$CADDY_BUILD_JOBS" GOWORK=off GOOS=linux GOARCH="$GOARCH" \
+        GOPATH="$CADDY_BUILD_WORK/gopath" GOMODCACHE="$CADDY_BUILD_WORK/gomod" GOCACHE="$CADDY_BUILD_WORK/gocache" \
+        "$GO" build "${jobs[@]}" -tags http2legacy -trimpath -ldflags '-s -w' -o "$CACHE/caddy.new" ./cmd/caddy || die 'Build failed (the reason is above). If memory is short, add swap first; if it is a network problem, check that proxy.golang.org is reachable.'
 # Read the whole list before searching it: with pipefail, "| grep -q" can fail
 # when grep exits at the match and the writer then dies of SIGPIPE.
 modules=$("$CACHE/caddy.new" list-modules 2>/dev/null || true)
@@ -234,10 +246,13 @@ fi
 started=0
 generated_profiles=()
 undo_fresh() {
-    if (($? != 0 && !UPGRADE && !started)); then
+    local status=$?
+    if ((status != 0 && !UPGRADE && !started)); then
         rm -f "$CADDYFILE"
         for f in "${generated_profiles[@]}"; do rm -f "$f"; done
     fi
+    if declare -F caddy_source_cleanup >/dev/null; then caddy_source_cleanup || status=1; fi
+    return "$status"
 }
 trap undo_fresh EXIT
 if ((!UPGRADE)); then

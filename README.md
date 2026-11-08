@@ -14,8 +14,14 @@ A [Caddy](https://caddyserver.com/) plugin that turns your server into a proxy f
 [standalone installer](caddy-network-relay-install-debian13.sh) and its
 [SHA-256 checksum](caddy-network-relay-install-debian13.sh.sha256), then follow the
 [deployment guide](docs/debian13-selective-install.md). The script includes the private
-source tree, builds on the VPS, and uses the Rust installer's base list, gfwlist,
+bootstrap source tree, fetches latest complete `main` for a source build, and uses the Rust installer's base list, gfwlist,
 eighteen service lists and domain-cleaning pipeline.
+
+All source-build entry points fetch complete latest `main` into a private
+`/tmp/YYYYMMDD-HHMMSS.RANDOM/` directory. Git credentials, signed-in `gh`, or
+`CADDY_NETWORK_RELAY_TOKEN` must allow access to this private repository. New
+source, compiler work and build caches are removed when the run ends; runtime
+configuration, certificates, backups and generated artifacts are preserved.
 
 > This project has not yet been verified with real traffic from an actual iPhone/Mac (for the automated tests and protocol interoperability tests, see the [design document](docs/design.md#6-testing)).
 
@@ -341,13 +347,17 @@ To build static Linux x64 and arm64 binaries of both this server and the Rust
 bash build-linux-servers-on-linux.sh
 ```
 
-It keeps its checkout in `~/caddy-network-relay` (change it with `--repo`),
-installs missing prerequisites, and writes the four binaries, logs,
+Every run downloads complete latest `main` sources to a private
+`/tmp/YYYYMMDD-HHMMSS.RANDOM/` directory. Local checkouts, `--repo` and
+`CADDY_NETWORK_RELAY_SRC` are not build inputs. It installs missing
+prerequisites and writes the four binaries, logs,
 `MANIFEST.txt` and `SHA256SUMS` to a new `relay-servers-*` folder. The Caddy
 binaries include the Cloudflare DNS plugin. Run it with `--help` for all
-options. When it ends, successfully or not, every folder in the checkout and
-the results is mode 777, so other users and file synchronization tools such as
-Syncthing can use them.
+options. Private source, compiler work and new build caches are removed on
+success, failure and normal signals. Compiler work uses disk rather than a
+small RAM-backed `/tmp`; effective RAM, cgroup limits and usable free swap
+bound parallelism. Results remain shareable with mode-777 directories. Existing
+user checkouts, tools and caches are not deleted.
 
 ### Caddyfile
 

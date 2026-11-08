@@ -11,10 +11,16 @@
 | `/var/lib/caddy/` | The `caddy` user's home directory; Caddy's certificates and ACME account are in `.local/share/caddy/` |
 | `/var/www/relay/index.html` | The default website (not overwritten if it already exists). It can be replaced with any static website |
 | `/etc/sysctl.d/60-caddy-network-relay.conf` | Persists UDP receive and send buffer limits of at least 7.5 MB (quic-go's recommendation), preserving higher existing runtime values across reboots |
-| `/opt/caddy-network-relay/go/` | The Go used for building, from proxy.golang.org, verified against the hash in Go's checksum database (sum.golang.org); the hash is hard-coded in the script |
-| `/var/cache/caddy-network-relay/` | Build cache, dependency modules, a backup from before each run (`backup.TIME/`), and the output of the latest self-check and configuration check |
+| `/var/cache/caddy-network-relay/` | Generated candidate binary, deployment backups and check output; new compiler caches are private and removed |
 
-It also: runs `apt-get install ca-certificates curl python3 iproute2`; creates the system user `caddy`; allows TCP 80, TCP 443 and UDP 443 when ufw is active; and with `--replace-network-relay` runs `systemctl disable --now network-relay`.
+It also: runs `apt-get install ca-certificates curl git python3 iproute2`; creates the system user `caddy`; allows TCP 80, TCP 443 and UDP 443 when ufw is active; and with `--replace-network-relay` runs `systemctl disable --now network-relay`.
+
+Each source build fetches complete latest `main` into a private timestamped
+`/tmp` directory. Git credentials, signed-in `gh`, or
+`CADDY_NETWORK_RELAY_TOKEN` must allow access. Compiler work uses a private disk
+directory on low-RAM hosts. Newly downloaded Go tools and module/build caches
+are removed with the source on success, failure and normal signals; an existing
+verified Go toolchain may be reused read-only. Existing user files are preserved.
 
 ## The script's checks and rollback
 

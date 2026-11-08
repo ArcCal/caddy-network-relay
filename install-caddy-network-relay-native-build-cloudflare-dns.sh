@@ -151,7 +151,8 @@
 # old active/enabled state on failure. A matching executable basename alone is
 # not proof that a standalone process belongs to this deployment.
 #
-# Run this file from a complete checkout on the target server. It performs:
+# Run this launcher from a complete checkout on the target server. Builds use
+# fresh complete main sources in a private timestamped /tmp directory. It performs:
 #   1. Read-only platform, safe-path/account and port checks, then two inputs.
 #   2. Noninteractive package installation and a verified native Go build.
 #   3. Candidate preparation/validation while the previous service keeps running.
@@ -220,7 +221,7 @@ cr_usage() {
 Usage: sudo bash ${0##*/}
        bash ${0##*/} --plan
 
-Interactively build this checkout for native amd64/arm64 with the pinned
+Interactively build latest complete main sources for native amd64/arm64 with the pinned
 caddy-dns/cloudflare plugin. Configure DNS-01 certificate issuance and renewal,
 a relay user, private Apple and Rust client configurations, systemd and protocol
 self-checks. Client exports are staged privately and published after checks pass.
@@ -799,10 +800,12 @@ cr_cleanup() {
         fi
         (( status != 0 )) || status=1
     fi
+    [[ -z $work ]] || find -P "$work" -type d -exec chmod u+w -- {} +
     if [[ -n $work ]] && ! rm -rf -- "$work"; then
         printf 'Warning: could not remove private scratch directory %s.\n' "$work" >&2
         (( status != 0 )) || status=1
     fi
+    if declare -F caddy_source_cleanup >/dev/null; then caddy_source_cleanup || status=1; fi
     if (( status )); then printf 'Deployment incomplete (exit %s). Private backup: %s\n' "$status" "${backup_dir:-not needed before file replacement}" >&2; fi
     exit "$status"
 }
@@ -867,26 +870,21 @@ cr_check_replacement() {
 cr_clone_plugin() {
     # exec makes $! the git process itself, so cleanup can stop a stalled
     # clone; the low-speed limit ends a connection that stops transferring.
-    GIT_TERMINAL_PROMPT=0 exec git -c core.hooksPath=/dev/null -c http.lowSpeedLimit=1 -c http.lowSpeedTime=120 clone --template= --depth 1 --branch "$PLUGIN_TAG" --single-branch \
-        https://github.com/caddy-dns/cloudflare.git "$work/cloudflare-src" > "$work/plugin-clone.log" 2>&1 </dev/null
+    GIT_TERMINAL_PROMPT=0 exec git -c protocol.file.allow=never -c core.hooksPath=/dev/null -c http.lowSpeedLimit=1 -c http.lowSpeedTime=120 clone --template= --branch "$PLUGIN_TAG" \
+        https://github.com/caddy-dns/cloudflare.git "${CADDY_SOURCE_WORK:-$work}/cloudflare-src" > "$work/plugin-clone.log" 2>&1 </dev/null
 }
 # Build in a disposable source snapshot. Never edit the checkout's module files
 # or transport forks while adding the pinned Cloudflare provider to the build.
 cr_build() {
     local jobs=$1 version expected modules info module
-    local -a snapshot_excludes=(--exclude=.git --exclude=target --exclude=__pycache__ --exclude=.venv --exclude='relay-servers-*')
     # This also covers later authenticated protocol checks: x/net's inherited
     # http2debug logs header values, including the Basic proxy credential.
-    unset GODEBUG
+    unset GODEBUG GOCACHEPROG
+    export TEST_TELEMETRY_DIR=$work/go-telemetry
     # GOTMPDIR alone does not control Go's module-root test or Git/helper
     # scratch files. Ignore inherited locations and keep both private.
-    mkdir -m 700 "$work/tmp"
-    export TMPDIR=$work/tmp GOTMPDIR=$work/tmp
-    mkdir "$work/source"
-    # A complete checkout may itself be under TOOLS. Never copy this run's
-    # growing source snapshot back into itself or exhaust the host's disk.
-    if [[ $work == "${REPO%/}/"* ]]; then snapshot_excludes+=(--exclude="./${work#"${REPO%/}/"}"); fi
-    tar -C "$REPO" "${snapshot_excludes[@]}" -cf - . | tar -C "$work/source" -xf -
+    ln -s -- "$REPO" "$work/source"
+    ln -s -- "$CADDY_SOURCE_WORK/cloudflare-src" "$work/cloudflare-src"
     # The pinned plugin clone and the Go toolchain download are independent:
     # fetch both at once. Its commit is verified before anything uses it.
     cr_clone_plugin &
@@ -1497,7 +1495,7 @@ cr_check_build_memory() {
     available=$(awk '/^(MemAvailable|SwapFree):/ {n += $2} END {print n+0}' "$1") ||
         cr_die 'Cannot read available memory.'
     swap=$(awk '/^SwapFree:/ {n = $2} END {print n+0}' "$1")
-    headroom=$(cr_cgroup_headroom "${2:-/proc/self/cgroup}" "${3:-/proc/self/mountinfo}" "$swap")
+    headroom=$(cr_cgroup_headroom "${2:-/proc/self/cgroup}" "${3:-/proc/self/mountinfo}" "$((available - swap))" "$swap") || cr_die 'Cannot inspect cgroup build memory limits.'
     if [[ $headroom =~ ^[0-9]+$ ]] && (( headroom < available )); then available=$headroom; fi
     [[ $available =~ ^[0-9]+$ ]] && (( available >= 640 * 1024 )) ||
         cr_die 'The build needs about 640 MiB of available memory plus free swap, also within any memory limit on this container or service; add swap or use a larger host.'
@@ -1508,58 +1506,67 @@ cr_check_build_memory() {
 # the swap that level and the host (KiB, third argument) still allow.
 # Prints nothing when no level is limited.
 cr_cgroup_headroom() {
-    local cgroups=$1 mountinfo=$2 host_swap=$3 smallest='' hierarchy controllers relative type root mount dir
-    local limit usage inactive swap swap_used level
+    local cgroups=$1 mountinfo=$2 host_ram=$3 host_swap=$4
+    local hierarchy controllers relative type root mount dir limit usage inactive ram swap used level smallest=''
+    [[ -r $cgroups && -r $mountinfo ]] || return 1
     while IFS=: read -r hierarchy controllers relative; do
         if [[ $hierarchy == 0 && -z $controllers ]]; then type=cgroup2
         elif [[ ,$controllers, == *,memory,* ]]; then type=cgroup
         else continue
         fi
         while read -r root mount; do
-            [[ $root == / || $relative == "$root" || $relative == "$root"/* ]] || continue
-            dir=$mount${relative#"${root%/}"}
+            root=$(printf '%b' "$root"); mount=$(printf '%b' "$mount")
+            if [[ $root == / || $relative == "$root" || $relative == "$root"/* ]]; then
+                dir=$mount${relative#"${root%/}"}
+            else
+                # A cgroup namespace can report a relative process path while
+                # mountinfo still exposes its host-side root (including /..).
+                dir=$mount$relative
+            fi
             dir=${dir%/}
+            [[ -d $dir ]] || dir=${mount%/}
             while [[ -d $dir ]]; do
-                level=''
+                ram=$host_ram; swap=$host_swap; inactive=0
                 if [[ $type == cgroup2 && -r $dir/memory.max ]]; then
                     limit=$(< "$dir/memory.max")
-                    if [[ $limit =~ ^[0-9]+$ ]]; then
-                        usage=$(< "$dir/memory.current")
+                    if [[ $limit =~ ^[0-9]+$ ]] && (( ${#limit} < 19 )); then
+                        usage=$(cat -- "$dir/memory.current") || return 1
+                        [[ $usage =~ ^[0-9]+$ ]] || return 1
                         inactive=$(awk '$1 == "inactive_file" {print $2}' "$dir/memory.stat" 2>/dev/null)
-                        swap=$(cat -- "$dir/memory.swap.max" 2>/dev/null || echo max)
-                        swap_used=$(cat -- "$dir/memory.swap.current" 2>/dev/null || echo 0)
-                        level=$(( (limit - usage + ${inactive:-0}) / 1024 ))
-                        if [[ $swap =~ ^[0-9]+$ ]]; then
-                            swap=$(( (swap - swap_used) / 1024 ))
-                            (( swap < host_swap )) || swap=$host_swap
-                        else
-                            swap=$host_swap
-                        fi
-                        (( level < 0 )) && level=0
-                        (( swap < 0 )) && swap=0
-                        level=$(( level + swap ))
+                        ram=$(( (limit - usage + ${inactive:-0}) / 1024 ))
+                    fi
+                    limit=$(cat -- "$dir/memory.swap.max" 2>/dev/null || printf max)
+                    if [[ $limit =~ ^[0-9]+$ ]] && (( ${#limit} < 19 )); then
+                        used=$(cat -- "$dir/memory.swap.current") || return 1
+                        [[ $used =~ ^[0-9]+$ ]] || return 1
+                        swap=$(( (limit - used) / 1024 ))
                     fi
                 elif [[ $type == cgroup && -r $dir/memory.limit_in_bytes ]]; then
                     limit=$(< "$dir/memory.limit_in_bytes")
-                    # cgroup v1 reports "unlimited" as a value near 2^63.
+                    inactive=$(awk '$1 == "total_inactive_file" {print $2}' "$dir/memory.stat" 2>/dev/null)
                     if [[ $limit =~ ^[0-9]+$ ]] && (( ${#limit} < 19 )); then
-                        usage=$(< "$dir/memory.usage_in_bytes")
-                        inactive=$(awk '$1 == "total_inactive_file" {print $2}' "$dir/memory.stat" 2>/dev/null)
-                        level=$(( (limit - usage + ${inactive:-0}) / 1024 ))
-                        (( level < 0 )) && level=0
-                        level=$(( level + host_swap ))
-                        # memory.memsw.* bounds memory and swap together.
-                        swap=$(cat -- "$dir/memory.memsw.limit_in_bytes" 2>/dev/null || echo '')
-                        if [[ $swap =~ ^[0-9]+$ ]] && (( ${#swap} < 19 )); then
-                            swap_used=$(< "$dir/memory.memsw.usage_in_bytes")
-                            swap=$(( (swap - swap_used + ${inactive:-0}) / 1024 ))
-                            (( swap < 0 )) && swap=0
-                            (( swap < level )) && level=$swap
-                        fi
+                        usage=$(cat -- "$dir/memory.usage_in_bytes") || return 1
+                        [[ $usage =~ ^[0-9]+$ ]] || return 1
+                        ram=$(( (limit - usage + ${inactive:-0}) / 1024 ))
                     fi
                 fi
-                if [[ -n $level ]] && { [[ -z $smallest ]] || (( level < smallest )); }; then smallest=$level; fi
-                [[ $dir == "${mount%/}" || $dir == "$mount" ]] && break
+                (( ram >= 0 )) || ram=0
+                (( swap >= 0 )) || swap=0
+                (( ram <= host_ram )) || ram=$host_ram
+                (( swap <= host_swap )) || swap=$host_swap
+                level=$((ram + swap))
+                if [[ $type == cgroup ]]; then
+                    limit=$(cat -- "$dir/memory.memsw.limit_in_bytes" 2>/dev/null || true)
+                    if [[ $limit =~ ^[0-9]+$ ]] && (( ${#limit} < 19 )); then
+                        used=$(cat -- "$dir/memory.memsw.usage_in_bytes") || return 1
+                        [[ $used =~ ^[0-9]+$ ]] || return 1
+                        used=$(( (limit - used + ${inactive:-0}) / 1024 ))
+                        (( used >= 0 )) || used=0
+                        (( level <= used )) || level=$used
+                    fi
+                fi
+                if [[ -z $smallest ]] || (( level < smallest )); then smallest=$level; fi
+                [[ $dir != "${mount%/}" ]] || break
                 dir=${dir%/*}
             done
         done < <(awk -v type="$type" '{
@@ -1570,10 +1577,24 @@ cr_cgroup_headroom() {
         }' "$mountinfo")
     done < "$cgroups"
     [[ -z $smallest ]] || printf '%s\n' "$smallest"
+    return 0
 }
+
+
 # Sequence matters: check dedicated path/account safety before input, then
 # finish the build and candidate validation before switching the running unit.
 cr_main() {
+    local cf_token=${CF_API_TOKEN:-} jobs path
+    export -n cf_token
+    unset CF_API_TOKEN
+    CADDY_SOURCE_WORK='' CADDY_BUILD_WORK=''
+    if [[ ${1:-} == --fresh-source-run ]]; then
+        [[ $# -ge 3 ]] || cr_die 'Invalid fresh-source invocation.'
+        # shellcheck source=deploy/fresh-source.sh
+        source "$REPO/deploy/fresh-source.sh"
+        caddy_accept_source "$REPO" "$2" "$3" || cr_die 'Invalid private source workspace.'
+        shift 3
+    fi
     case ${1:-} in
         -h|--help) cr_usage; return ;;
         --plan) [[ $# == 1 ]] || cr_die 'Unexpected extra arguments.'; cr_host
@@ -1583,10 +1604,14 @@ cr_main() {
     esac
     cr_host
     [[ $EUID == 0 && -d /run/systemd/system ]] || cr_die 'Run as root on a server booted with systemd.'
+    if [[ -z $CADDY_SOURCE_WORK ]]; then
+        # shellcheck source=deploy/fresh-source.sh
+        source "$REPO/deploy/fresh-source.sh"
+        caddy_latest_entry install-caddy-network-relay-native-build-cloudflare-dns.sh "$@" || cr_die 'Downloading latest build source failed.'
+    fi
     # Remove the exported token name before subsequent deployment commands. The
     # dynamically scoped shell-local copy is available to cr_inputs/cr_deploy,
     # not their environment.
-    local cf_token=${CF_API_TOKEN:-} jobs path free_kib
     unset CF_API_TOKEN
     export -n cf_token
     cr_require_systemd
@@ -1607,27 +1632,31 @@ cr_main() {
     printf 'Installing Caddy with Cloudflare DNS-01 and automatic certificate renewal.\n'
     # The local patched transports, command entry point, unit and domain lists
     # are mandatory. This installer cannot work as a standalone downloaded file.
-    local required=(go.mod go.sum cmd/caddy/main.go third_party/quic-go/go.mod third_party/x-net/go.mod
+    local required=(deploy/fresh-source.sh go.mod go.sum cmd/caddy/main.go third_party/quic-go/go.mod third_party/x-net/go.mod
         deploy/caddy.service deploy/domains/google-ai-social.txt deploy/domains/global-services.txt)
     for path in "${required[@]}"; do [[ -f $REPO/$path ]] || cr_die "Complete checkout required; missing $path."; done
-    free_kib=$(df -Pk /opt | awk 'NR==2 {print $4}')
-    [[ $free_kib =~ ^[0-9]+$ ]] && (( free_kib >= 5*1024*1024 )) || cr_die 'At least 5 GiB free under /opt is required.'
+    caddy_build_parent /opt $((5*1024*1024)) || cr_die 'At least 5 GiB on disk is required for compilation.'
+    local work_parent=$REPLY
     cr_check_build_memory /proc/meminfo
     # Bound apt lock waits, retry downloads and retain existing local conffiles.
     # Install only build/deployment prerequisites; no firewall package is added.
     local apt=(apt-get -o DPkg::Lock::Timeout=1800 -o Acquire::Retries=3
         -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none cr_apt "${apt[@]:1}" update
-    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none cr_apt "${apt[@]:1}" install -y --no-install-recommends ca-certificates curl git jq openssl iproute2
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none cr_apt "${apt[@]:1}" install -y --no-install-recommends ca-certificates curl git procps jq openssl iproute2
     cr_check_existing_certificate
     install -d -m 700 "$TOOLS"
-    work=$(mktemp -d "$TOOLS/build.XXXXXXXX")
+    work=$(mktemp -d "$work_parent/build.$(date +%Y%m%d-%H%M%S).XXXXXXXX")
     # Install traps only after this run owns a unique scratch directory. Signal
     # exits retain their conventional codes and pass through the same cleanup.
     trap cr_cleanup EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    cr_build "$jobs"
+    trap 'exit 129' HUP
+    mkdir -m 700 "$work/tmp"
+    export TMPDIR=$work/tmp GOTMPDIR=$work/tmp TEST_TELEMETRY_DIR=$work/go-telemetry
+    unset GODEBUG GOCACHEPROG
+    caddy_run_build cr_build "$jobs"
     cr_deploy
 }
 

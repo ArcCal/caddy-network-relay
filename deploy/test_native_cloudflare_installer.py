@@ -286,7 +286,7 @@ class ConcurrentCloneTests(unittest.TestCase):
 class BuildMemoryTests(unittest.TestCase):
     """The build was measured under memory caps; see cr_check_build_memory."""
 
-    def check(self, available, swap, cgroups='', groups=None):
+    def check(self, available, swap, cgroups='', groups=None, mount_root='/'):
         """`groups` maps a cgroup directory, relative to a fake mount, to its
         files; `cgroups` is /proc/self/cgroup. No cgroups by default, so the
         machine running the tests does not matter."""
@@ -299,16 +299,26 @@ class BuildMemoryTests(unittest.TestCase):
             for kind, options in (('cgroup2', 'rw'), ('cgroup', 'rw,memory')):
                 mount = base / kind
                 mount.mkdir()
-                mounts.append(f'30 25 0:26 / {mount} rw,nosuid - {kind} {kind} {options}\n')
+                mounts.append(f'30 25 0:26 {mount_root} {mount} rw,nosuid - {kind} {kind} {options}\n')
             (base / 'mountinfo').write_text(''.join(mounts))
             for relative, files in (groups or {}).items():
                 folder = base / relative
                 folder.mkdir(parents=True, exist_ok=True)
+                if 'memory.swap.max' in files:
+                    files = {'memory.swap.current': 0, **files}
                 for name, value in files.items():
                     (folder / name).write_text(f'{value}\n')
             return subprocess.run(['bash', '-c', 'source "$1"; cr_check_build_memory "$2" "$3" "$4" && echo accepted',
                                    'test', str(SCRIPT), str(meminfo), str(base / 'self-cgroup'), str(base / 'mountinfo')],
                                   capture_output=True, text=True, timeout=30)
+
+    def test_unlimited_ram_does_not_allow_swap_forbidden_by_cgroup(self):
+        groups = {'cgroup2/child': {'memory.max': 'max', 'memory.swap.max': 0}}
+        self.assertNotEqual(self.check(320 * 1024, 2 << 20, '0::/child\n', groups).returncode, 0)
+
+    def test_namespaced_mount_root_keeps_memory_quota(self):
+        groups = {'cgroup2/child': {'memory.max': 320 << 20, 'memory.current': 0, 'memory.stat': 'inactive_file 0'}}
+        self.assertNotEqual(self.check(4000000, 0, '0::/child\n', groups, mount_root='/..').returncode, 0)
 
     def test_too_little_memory_is_refused_with_advice(self):
         result = self.check(655360 - 1, 0)

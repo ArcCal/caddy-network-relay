@@ -12,7 +12,7 @@ import textwrap
 
 ROOT = Path(__file__).resolve().parent.parent
 DEPLOY_FILES = (
-    'deploy/install-debian13-selective.sh', 'deploy/selective-profile.py',
+    'deploy/install-debian13-selective.sh', 'deploy/fresh-source.sh', 'deploy/run-build-child.sh', 'deploy/selective-profile.py',
     'deploy/global-profile.py', 'deploy/caddy.service',
     'deploy/domains/google-ai-social.txt', 'deploy/domains/public-suffix-icann.dat',
     'deploy/domains/LICENSE.domain-list-community',
@@ -53,7 +53,7 @@ if [[ ${1:-} != --help && ${1:-} != -h && ${1:-} != --extract && $EUID != 0 ]]; 
     echo 'Run this installer with sudo bash.' >&2
     exit 1
 fi
-bundle_dir=$(mktemp -d "${TMPDIR:-/tmp}/caddy-network-relay-installer.XXXXXXXX")
+bundle_dir=$(mktemp -d "/tmp/$(date +%Y%m%d-%H%M%S).XXXXXXXX")
 trap 'rm -rf -- "$bundle_dir"' EXIT
 base64 --decode >"$bundle_dir/source.tar.gz" <<'CADDY_NETWORK_RELAY_SOURCE_BUNDLE'
 ''' + payload + '''

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fresh Debian 13 x86_64 installation. Builds the bundled Caddy sources,
+# Fresh Debian 13 x86_64 installation. Builds latest main Caddy sources,
 # combines the Rust installer's domain lists, and emits one HTTP/2-only profile.
 # Does not modify an existing Caddy or Rust network-relay installation.
 set +x
@@ -36,6 +36,15 @@ value() { [[ $# == 2 && -n $2 && $2 != --* ]] || die "Missing value for $1."; }
 apt_install() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=1800 -o Acquire::Retries=3 "$@"; }
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
+CADDY_SOURCE_WORK='' CADDY_BUILD_WORK=''
+if [[ ${1:-} == --fresh-source-run ]]; then
+    [[ $# -ge 3 ]] || die 'Invalid fresh-source invocation.'
+    # shellcheck source=deploy/fresh-source.sh
+    source "$SRC/deploy/fresh-source.sh"
+    caddy_accept_source "$SRC" "$2" "$3" || die 'Invalid private source workspace.'
+    shift 3
+fi
+build_args=("$@")
 ROOT=${RELAY_TEST_ROOT:-}
 ETC=$ROOT/etc/caddy
 SECRETS=$ETC/relay
@@ -64,6 +73,11 @@ while (($#)); do
 done
 
 [[ $EUID == 0 || -n $ROOT ]] || die 'Run this script with sudo or as root.'
+if [[ -z $BINARY && -z $CADDY_SOURCE_WORK ]]; then
+    # shellcheck source=deploy/fresh-source.sh
+    source "$SRC/deploy/fresh-source.sh"
+    caddy_latest_entry deploy/install-debian13-selective.sh "${build_args[@]}" || die 'Downloading latest build source failed.'
+fi
 # The operating system's platform description, or a test fixture.
 # shellcheck source=/dev/null
 . "${RELAY_TEST_OS_RELEASE:-/etc/os-release}"
@@ -114,7 +128,11 @@ if ((DNS_CHECK)); then
     [[ -z $public_ip || " $dns_ips " == *" $public_ip "* ]] || die 'The relay A record does not point to this VPS. For Cloudflare, use DNS only (grey cloud).'
 fi
 
-install -d -m 755 "$CACHE" "$OPT"
+if [[ -z $BINARY ]]; then
+    install -d -m 755 "$CACHE"
+    caddy_new_build_work "$CACHE" || die 'Cannot create private compiler workspace.'
+fi
+install -d -m 755 "$CACHE"
 say '==> Combining the Rust installer domain lists (all enabled sources must succeed)'
 python3 "$SRC/deploy/selective-profile.py" domains --host "$DOMAIN" --out "$CACHE/selected-domains.json" "${DOMAIN_ARGS[@]}"
 install -m 644 "$SRC/deploy/selective-source.json" "$CACHE/install-source.json"
@@ -140,16 +158,18 @@ PY
 else
     GO_VERSION=1.26.10
     GO_SUM='h1:5VAGHlY8yl8pTPVSNIez3SNMy6fWabs+QMR25f3oMT0='
-    GO=$OPT/go/bin/go
+    GO=$CADDY_BUILD_WORK/go/bin/go
     if [[ -n ${RELAY_TEST_GO:-} ]]; then
         GO=$RELAY_TEST_GO
-    elif [[ ! -x $GO || $("$GO" env GOVERSION 2>/dev/null) != "go$GO_VERSION" ]]; then
+    elif [[ -x $OPT/go/bin/go && $("$OPT/go/bin/go" env GOVERSION 2>/dev/null) == "go$GO_VERSION" ]]; then
+        GO=$OPT/go/bin/go
+    else
         say "==> Downloading and verifying Go $GO_VERSION"
         module=golang.org/toolchain@v0.0.1-go$GO_VERSION.linux-amd64
-        zip=$CACHE/go-toolchain.zip
-        curl -fsSL --retry 3 --retry-delay 5 --max-time 900 -o "$zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go$GO_VERSION.linux-amd64.zip"
-        rm -rf "$OPT/go.new"
-        python3 - "$zip" "$OPT/go.new" "$module" "$GO_SUM" <<'PY'
+        zip=$CADDY_BUILD_WORK/go-toolchain.zip
+        caddy_run_build curl -fsSL --retry 3 --retry-delay 5 --max-time 900 -o "$zip" "https://proxy.golang.org/golang.org/toolchain/@v/v0.0.1-go$GO_VERSION.linux-amd64.zip"
+        rm -rf "$CADDY_BUILD_WORK/go.new"
+        caddy_run_build python3 - "$zip" "$CADDY_BUILD_WORK/go.new" "$module" "$GO_SUM" <<'PY'
 import base64
 import hashlib
 import os
@@ -174,16 +194,13 @@ with zipfile.ZipFile(path) as archive:
             f.write(archive.read(info))
         os.chmod(target, (info.external_attr >> 16) & 0o777 or 0o644)
 PY
-        rm -rf "$OPT/go" "$zip"
-        mv "$OPT/go.new" "$OPT/go"
+        rm -f "$zip"
+        mv "$CADDY_BUILD_WORK/go.new" "$CADDY_BUILD_WORK/go"
     fi
-    say '==> Building Caddy with the bundled network_relay and shared library patches'
-    (
-        cd "$SRC"
-        env GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 GOMAXPROCS=2 GOWORK=off GOOS=linux GOARCH=amd64 \
-            GOPATH="$CACHE/gopath" GOMODCACHE="$CACHE/gomod" GOCACHE="$CACHE/gocache" \
-            "$GO" build -p 1 -buildvcs=false -tags http2legacy -trimpath -ldflags '-s -w' -o "$CACHE/caddy.new" ./cmd/caddy
-    ) || die 'Build failed; no service or account has been installed. See the build output.'
+    say '==> Building Caddy with latest network_relay and shared library patches'
+    caddy_run_build caddy_build_in_source "$SRC" env GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 GOMAXPROCS="$CADDY_BUILD_JOBS" GOWORK=off GOOS=linux GOARCH=amd64 \
+            GOPATH="$CADDY_BUILD_WORK/gopath" GOMODCACHE="$CADDY_BUILD_WORK/gomod" GOCACHE="$CADDY_BUILD_WORK/gocache" \
+            "$GO" build -p 1 -buildvcs=false -tags http2legacy -trimpath -ldflags '-s -w' -o "$CACHE/caddy.new" ./cmd/caddy || die 'Build failed; no service or account has been installed. See the build output.'
 fi
 modules=$("$CACHE/caddy.new" list-modules 2>/dev/null)
 grep -qx 'http.handlers.network_relay' <<<"$modules" || die 'The binary has no network_relay module.'
@@ -207,6 +224,7 @@ cleanup() {
         ((config_written == 0)) || rm -f -- "$CADDYFILE"
         ((profile_written == 0)) || rm -f -- "$profile"
     fi
+    if declare -F caddy_source_cleanup >/dev/null; then caddy_source_cleanup || status=1; fi
     return "$status"
 }
 trap cleanup EXIT

@@ -20,8 +20,12 @@ import unittest
 SRC = Path(__file__).resolve().parent.parent
 INSTALL = SRC / 'deploy/install.sh'
 REAL_CADDY = None
+SOURCE_FIXTURE = None
 
 STUBS = {
+    'git': 'for arg in "$@"; do shift; [ "$arg" != protocol.file.allow=never ] || arg=protocol.file.allow=always; set -- "$@" "$arg"; done; exec "$REAL_GIT" -c "url.file://$SOURCE_FIXTURE.insteadOf=https://github.com/ArcCal/caddy-network-relay.git" "$@"',
+    'stat': 'case "$*" in "-f -c %T "*) echo ext2/ext3 ;; *) exec "$REAL_STAT" "$@" ;; esac',
+    'df': 'printf "Filesystem 1024-blocks Used Available Capacity Mounted\\nfixture 30000000 0 30000000 0%%%% /\\n"',
     'apt-get': 'exit 0',
     'dpkg': '[ -n "$FAKE_APT_CADDY" ] && exit 0; exit 1',
     'systemctl': r'''
@@ -98,7 +102,9 @@ exec "$REAL_CADDY" "$@"
 '''
 
 FAKE_GO = r'''#!/bin/sh
-# go build ... -o OUT ./cmd/caddy
+# go build ... -o OUT ./cmd/caddy; the source must be a fresh checkout.
+case "$PWD" in /tmp/????????-??????.*/source) ;; *) exit 94 ;; esac
+[ -z "${GOCACHEPROG:-}" ] || exit 95
 if [ -n "$CHECK_NATIVE_BUILD_ENV" ]; then
   [ "$GOOS" = linux ] && [ "$GOARCH" = amd64 ] && [ "$GOWORK" = off ] || exit 93
 fi
@@ -110,17 +116,40 @@ done
 '''
 
 
+def source_fixture():
+    global SOURCE_FIXTURE
+    if SOURCE_FIXTURE is None or not Path(SOURCE_FIXTURE.name).exists():
+        SOURCE_FIXTURE = tempfile.TemporaryDirectory(prefix='caddy-source-fixture-')
+        unittest.addModuleCleanup(SOURCE_FIXTURE.cleanup)
+        source = Path(SOURCE_FIXTURE.name) / 'source'
+        shutil.copytree(SRC, source, ignore=shutil.ignore_patterns('.git', '__pycache__', '*.pyc'))
+        subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'init', '--template=', '-q', '-b', 'main', str(source)], check=True)
+        subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
+        environment = os.environ | {'GIT_AUTHOR_NAME': 'Anonymous', 'GIT_AUTHOR_EMAIL': 'anonymous@example.invalid',
+                                     'GIT_COMMITTER_NAME': 'Anonymous', 'GIT_COMMITTER_EMAIL': 'anonymous@example.invalid'}
+        subprocess.run(['git', '-C', str(source), '-c', 'core.hooksPath=/dev/null', '-c', 'commit.gpgsign=false',
+                        'commit', '-qm', 'Source fixture'], env=environment, check=True)
+    return str(Path(SOURCE_FIXTURE.name) / 'source')
+
+
 def setUpModule():
     global REAL_CADDY
-    out = Path(tempfile.mkdtemp()) / 'caddy'
-    subprocess.run(['go', 'build', '-tags', 'http2legacy', '-o', str(out), './cmd/caddy'], cwd=SRC, check=True)
-    REAL_CADDY = out
+    supplied = os.environ.get('CADDY_REAL_BINARY')
+    if supplied:
+        REAL_CADDY = Path(supplied).resolve(strict=True)
+    else:
+        temporary = tempfile.TemporaryDirectory(prefix='caddy-installer-test-build-')
+        unittest.addModuleCleanup(temporary.cleanup)
+        out = Path(temporary.name) / 'caddy'
+        subprocess.run(['go', 'build', '-tags', 'http2legacy', '-o', str(out), './cmd/caddy'], cwd=SRC, check=True)
+        REAL_CADDY = out
 
 
 class InstallTest(unittest.TestCase):
     def test_native_build_ignores_ambient_cross_target_and_workspace(self):
         self.install('--domain', 'relay.example.com', '--no-gfwlist',
-                     CDPATH='.', GOOS='darwin', GOARCH='arm64', GOWORK='/missing-workspace', CHECK_NATIVE_BUILD_ENV='1')
+                     CDPATH='.', GOOS='darwin', GOARCH='arm64', GOWORK='/missing-workspace',
+                     GOCACHEPROG='/missing-cache-program', CHECK_NATIVE_BUILD_ENV='1')
 
     def setUp(self):
         self.dir = Path(tempfile.mkdtemp())
@@ -146,6 +175,8 @@ class InstallTest(unittest.TestCase):
         fake_go.chmod(0o755)
         self.env = {
             'PATH': f'{bin_dir}:{os.environ["PATH"]}',
+            'SOURCE_FIXTURE': source_fixture(),
+            'REAL_GIT': shutil.which('git'), 'REAL_STAT': shutil.which('stat'),
             'HOME': str(self.dir),
             'RELAY_TEST_ROOT': str(self.root),
             'RELAY_TEST_GO': str(fake_go),

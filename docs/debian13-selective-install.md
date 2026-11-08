@@ -3,13 +3,19 @@
 This installer deploys Caddy Network Relay on a fresh Debian 13 x86_64 VPS.
 The single uploadable Bash file includes the private repository's source,
 local Go library replacements, deployment tools and bundled domain data.
-The VPS does not need a GitHub token. It downloads the verified Go toolchain,
-public Go dependencies, gfwlist and the eighteen public service lists.
+A source build requires GitHub access to this private repository through Git
+credentials, a signed-in `gh`, or `CADDY_NETWORK_RELAY_TOKEN`. Each run downloads
+complete latest `main` to `/tmp/YYYYMMDD-HHMMSS.RANDOM/`. It also downloads the
+verified Go toolchain, public Go dependencies, gfwlist and public service lists.
+A supplied `--binary` and `--extract` keep their existing behavior and do not
+fetch build source.
 
 The deployment additions do not change the relay protocol implementation or
-any other application's source. The source versions are recorded in
-`deploy/selective-source.json`; this artifact is a snapshot, not an automatic
-download of future `main` commits. Repackage after a server update.
+any other application's source. Bundled domain-data provenance remains in
+`deploy/selective-source.json`. The embedded snapshot supports extraction and
+prebuilt-binary deployment; default compilation uses freshly downloaded main.
+Source, private compiler work and newly downloaded toolchains/caches are cleaned
+on success, failure and normal signals. Existing tools and caches are preserved.
 
 ## Preparation and installation
 
@@ -142,7 +148,7 @@ relay.example.com --user iphone`; it prompts for the account password.
 | `/var/lib/caddy/` | Caddy-managed certificates and ACME state |
 | `/var/www/relay/index.html` | Default ordinary website |
 | `/var/cache/caddy-network-relay/` | Build cache, normalized domains and check logs |
-| `/opt/caddy-network-relay/go/` | Verified build toolchain |
+| Private compiler workspace | Verified build toolchain and caches; removed after the run |
 | `/etc/sysctl.d/60-caddy-network-relay.conf` | UDP buffer limits, retaining higher values |
 
 Domain gathering and profile validation precede account/service installation.
