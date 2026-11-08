@@ -31,7 +31,7 @@ def main():
             local = root / ("quic-go" if module.endswith("quic-go") else "x-net")
             selected = json.loads(subprocess.check_output(
                 ["go", "list", "-m", "-json", module], cwd=root.parent, text=True))
-            if (selected.get("Version") != version or
+            if (selected.get("Version") != snapshot.get("selected_version", version) or
                     Path(selected.get("Replace", {}).get("Dir", "")).resolve() != local.resolve()):
                 raise RuntimeError(f"main module does not use the recorded snapshot: {module}")
             files = {f["path"]: f for f in snapshot["files"]}

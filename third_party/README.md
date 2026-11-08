@@ -11,6 +11,13 @@ Original LICENSE/PATENTS files are retained. Only source files and required
 embedded data are included; upstream tests are not shipped. `provenance.json`
 records the original module sums and per-file original/source hashes.
 
+Caddy v2.11.9 selects x/net v0.60.0 in the module graph. Its local replacement
+remains the reviewed v0.59.0 snapshot with the security backports listed
+below. `selected_version` records that graph requirement separately from the
+snapshot's original `version`; upstream hash and vulnerability checks continue
+to use the original source version. A future graph change still fails validation
+until its selected version and compatibility have been reviewed.
+
 Local changes:
 
 - quic-go: on a path-size rejection of an application DATAGRAM, wake bounded

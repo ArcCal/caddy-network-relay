@@ -326,8 +326,8 @@ Needs Go 1.26 (the exact version is in `go.mod`; with `GOTOOLCHAIN=auto` it is d
 go build -tags http2legacy -o caddy ./cmd/caddy
 ```
 
-`cmd/caddy` includes Caddy's standard modules and this plugin. Build from this
-repository root: the `go.mod` replacements select the reviewed transport sources
+`cmd/caddy` includes Caddy v2.11.9's standard modules and this plugin. Build from
+this repository root: the `go.mod` replacements select the reviewed transport sources
 in `third_party`. Go ignores a dependency's replacements, so an ordinary xcaddy
 `--with` build does **not** include these fixes. Custom builds must apply both
 replacements in their main module. The patched x/net HTTP/2 implementation is

@@ -4489,7 +4489,8 @@
         "GO-2026-6617": "fixed: x/net v0.60.0 deferred HPACK encoder table-size updates backported to http2/server.go",
         "GO-2026-6860": "fixed: x/net v0.62.0 text-node coalescing backported to html/parse.go",
         "GO-2026-6866": "fixed: x/net v0.62.0 raw-text ancestor namespace check backported to html/render.go"
-      }
+      },
+      "selected_version": "v0.60.0"
     }
   ]
 }
