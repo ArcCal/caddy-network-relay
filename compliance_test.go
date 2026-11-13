@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -481,30 +482,97 @@ func (h *rawH3) udpRoundTrip(str *quic.Stream, payload []byte) []byte {
 	return nil
 }
 
-// RFC 9298 §5: a client may send datagrams before the response; the relay
-// buffers them while it authenticates.
+// RFC 9298 section 5 allows optimistic datagrams before the response.
+// Wait for authentication to start: a fixed sleep does not establish that
+// HTTP/3 registered the stream, and RFC 9297 section 2.1 permits dropping
+// datagrams received before registration.
 func TestHTTP3EarlyDatagrams(t *testing.T) {
-	port, _ := startRelay(t, nil, nil)
-	host, uport := echoUDP(t)
+	secret := RandomPassword()
+	port, _ := startRelay(t, map[string]any{
+		"users": []map[string]string{{"name": "alice", "password_hash": HashPassword(secret)}},
+	}, nil)
+	var auth *authenticator
+	registry.Lock()
+	for handler := range registry.handlers {
+		if handler.RelayID == "test-relay-"+strconv.Itoa(port) {
+			auth = handler.auth
+		}
+	}
+	registry.Unlock()
+	if auth == nil {
+		t.Fatal("test relay authenticator not found")
+	}
+	// The immutable authenticator remains untouched. Occupy the normal
+	// hashing slots so that the fresh credential must wait for admission.
+	// A random secret prevents process-wide cache hits from earlier tests.
+	release := sync.OnceFunc(fillSlots(auth))
+	defer release()
+	origin, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer origin.Close()
+	host, uport, err := net.SplitHostPort(origin.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
 	h := dialRawH3(t, port)
 	str, err := h.conn.OpenStreamSync(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A fresh credential header, so the relay has to run Argon2id first.
 	fields := connectUDPFields(host, uport)
-	str.Write(h3Frame(0x1, qpackHeaders(fields)))
-	// Let quic-go register the stream first: a datagram that arrives before
-	// that is dropped, which RFC 9297 §2.1 allows. Authentication (tens of
-	// milliseconds of Argon2id) is still running when this one arrives.
-	time.Sleep(5 * time.Millisecond)
+	for i := range fields {
+		if fields[i][0] == "authorization" {
+			fields[i][1] = BasicAuthorization("alice", secret)
+		}
+	}
+	if _, err := str.Write(h3Frame(0x1, qpackHeaders(fields))); err != nil {
+		t.Fatal(err)
+	}
+	registrationDeadline := time.Now().Add(3 * time.Second)
+	for {
+		auth.mu.Lock()
+		_, registered := auth.inflight[headerID(BasicAuthorization("alice", secret))]
+		auth.mu.Unlock()
+		if registered {
+			break
+		}
+		if time.Now().After(registrationDeadline) {
+			t.Fatal("authentication did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
 	h.datagram(str, append([]byte{0}, "early bird"...))
+	// The target must see nothing while authentication is held. This also
+	// keeps the response pending while the optimistic datagram is sent.
+	buf := make([]byte, 64)
+	if err := origin.SetReadDeadline(time.Now().Add(100 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := origin.ReadFrom(buf); err == nil {
+		t.Fatal("datagram forwarded before authentication")
+	} else if timeout, ok := err.(net.Error); !ok || !timeout.Timeout() {
+		t.Fatal(err)
+	}
+	release()
 	br := bufio.NewReader(str)
 	if rsp := h.readHeaders(br); rsp.status != "200" {
 		t.Fatal(rsp.status)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
+	deadline, _ := ctx.Deadline()
+	if err := origin.SetReadDeadline(deadline); err != nil {
+		t.Fatal(err)
+	}
+	n, from, err := origin.ReadFrom(buf)
+	if err != nil || string(buf[:n]) != "early bird" {
+		t.Fatalf("early target datagram: %q, %v", buf[:n], err)
+	}
+	if _, err := origin.WriteTo(buf[:n], from); err != nil {
+		t.Fatal(err)
+	}
 	d, err := h.conn.ReceiveDatagram(ctx)
 	if err != nil {
 		t.Fatalf("the early datagram was not relayed: %v", err)
