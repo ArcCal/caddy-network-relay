@@ -1,0 +1,142 @@
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package tls
+
+import (
+	"encoding/binary"
+	"errors"
+)
+
+// RelayTLSKeyUsagePolicy identifies the reviewed RFC 9846 sender policy.
+// Relay builds reference this constant so an unpatched standard library cannot
+// silently produce a server without the sender limits.
+const RelayTLSKeyUsagePolicy = "rfc9846-v1"
+
+const (
+	// Leave a conservative margin below the 2^24.5 full-size AES-GCM
+	// records allowed by RFC 9846, Section 5.5. Count every protected record,
+	// including short records, so no plaintext-size estimate is needed.
+	relayAESGCMRecordLimit uint64 = 1 << 24
+	relayMaxKeyUpdateEpoch uint64 = (1 << 48) - 1
+)
+
+var errRelayKeyUsage = errors.New("tls: sending traffic key usage limit reached")
+
+// beforeRecordLocked runs before encrypting any record. The caller holds out.
+// A separate internal write path permits one old-key KeyUpdate or closing alert
+// without recursively initiating another update.
+func (c *Conn) beforeRecordLocked(typ recordType, allowKeyUpdate bool) error {
+	if c.quic != nil || c.vers != VersionTLS13 || c.out.cipher == nil || typ == recordTypeChangeCipherSpec {
+		return nil
+	}
+	limit := c.relayRecordLimit()
+	seq := binary.BigEndian.Uint64(c.out.seq[:])
+	if seq >= limit {
+		// No old-key record remains. Do not try to encrypt even an alert.
+		return c.closeForKeyUsageLocked(false)
+	}
+	if !allowKeyUpdate || seq < limit-1 {
+		return nil
+	}
+	// Reserve the last permitted old-key record for KeyUpdate or closure.
+	// Never send KeyUpdate during a handshake or beyond the sender epoch cap.
+	if !c.isHandshakeComplete.Load() || c.out.keyUpdateEpoch >= relayMaxKeyUpdateEpoch {
+		return c.closeForKeyUsageLocked(true)
+	}
+	return c.sendKeyUpdateLocked()
+}
+
+// relayRecordLimit leaves room to avoid the sequence-wrap panic for ChaCha.
+func (c *Conn) relayRecordLimit() uint64 {
+	if c.cipherSuite == TLS_AES_128_GCM_SHA256 || c.cipherSuite == TLS_AES_256_GCM_SHA384 {
+		return relayAESGCMRecordLimit
+	}
+	return ^uint64(0)
+}
+
+// beforeHandshakeRecordsLocked reserves enough records for this entire write.
+// RFC 9846, Section 5.1 forbids inserting a key change inside a fragmented
+// handshake message. This also safely handles coalesced complete messages.
+func (c *Conn) beforeHandshakeRecordsLocked(size int) error {
+	if size == 0 || c.quic != nil || c.vers != VersionTLS13 || c.out.cipher == nil {
+		return nil
+	}
+	if err := c.beforeRecordLocked(recordTypeHandshake, false); err != nil {
+		return err
+	}
+	limit := c.relayRecordLimit()
+	records := uint64((size-1)/maxPlaintext + 1)
+	seq := binary.BigEndian.Uint64(c.out.seq[:])
+	if records > limit-1 {
+		return c.closeForKeyUsageLocked(true)
+	}
+	if records <= limit-1-seq {
+		return nil
+	}
+	if !c.isHandshakeComplete.Load() || c.out.keyUpdateEpoch >= relayMaxKeyUpdateEpoch {
+		return c.closeForKeyUsageLocked(true)
+	}
+	return c.sendKeyUpdateLocked()
+}
+
+// sendKeyUpdateLocked sends an unrequested update using the old sending key,
+// and installs the next secret only after that record was written successfully.
+// It never acquires the incoming lock or waits for a peer update.
+func (c *Conn) sendKeyUpdateLocked() error {
+	if c.out.err != nil {
+		return c.out.err
+	}
+	if c.out.keyUpdateEpoch >= relayMaxKeyUpdateEpoch {
+		return errRelayKeyUsage
+	}
+	suite := cipherSuiteTLS13ByID(c.cipherSuite)
+	if suite == nil {
+		return c.out.setErrorLocked(errors.New("tls: internal error: missing TLS 1.3 cipher suite"))
+	}
+	msg, err := (&keyUpdateMsg{}).marshal()
+	if err != nil {
+		return c.out.setErrorLocked(err)
+	}
+	// Flush older records first, then write KeyUpdate itself to the transport.
+	// Buffer acceptance alone is not a successful old-key KeyUpdate write.
+	buffering := c.buffering
+	if buffering {
+		if _, err := c.flush(); err != nil {
+			return c.out.setErrorLocked(err)
+		}
+		c.buffering = false
+	}
+	defer func() { c.buffering = buffering }()
+	if _, err := c.writeRecordLockedInternal(recordTypeHandshake, msg, false); err != nil {
+		// A failed or partial record write permanently poisons the direction;
+		// retaining the old secret must not permit retrying a damaged stream.
+		return c.out.setErrorLocked(err)
+	}
+	c.setWriteTrafficSecret(suite, QUICEncryptionLevelInitial, suite.nextTrafficSecret(c.out.trafficSecret))
+	c.out.keyUpdateEpoch++
+	return nil
+}
+
+// closeForKeyUsageLocked closes only when a valid sending key cannot be
+// refreshed. sendAlert is false when even one further old-key record is unsafe.
+func (c *Conn) closeForKeyUsageLocked(sendAlert bool) error {
+	err := errRelayKeyUsage
+	if sendAlert {
+		if c.buffering {
+			if _, flushErr := c.flush(); flushErr != nil {
+				_ = c.conn.Close()
+				return c.out.setErrorLocked(flushErr)
+			}
+			c.buffering = false
+		}
+		_, writeErr := c.writeRecordLockedInternal(recordTypeAlert, []byte{alertLevelWarning, byte(alertCloseNotify)}, false)
+		c.closeNotifySent = true
+		c.closeNotifyErr = writeErr
+		if writeErr != nil {
+			err = writeErr
+		}
+	}
+	_ = c.conn.Close()
+	return c.out.setErrorLocked(err)
+}

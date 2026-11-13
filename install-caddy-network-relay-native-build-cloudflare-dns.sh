@@ -874,9 +874,21 @@ cr_clone_plugin() {
         https://github.com/caddy-dns/cloudflare.git "${CADDY_SOURCE_WORK:-$work}/cloudflare-src" > "$work/plugin-clone.log" 2>&1 </dev/null
 }
 # Build in a disposable source snapshot. Never edit the checkout's module files
-# or transport forks while adding the pinned Cloudflare provider to the build.
+# or reviewed forks while adding the pinned Cloudflare provider to the build.
+cr_go_version() {
+    local version
+    version=$(sed -n 's/^toolchain //p' "$1") || return
+    # Go removes a toolchain directive identical to the minimum Go version.
+    # That canonical form still pins the exact patch release we must download.
+    if [[ -z $version ]]; then
+        version=$(sed -n 's/^go \([0-9][0-9]*[.][0-9][0-9]*[.][0-9][0-9]*\)$/go\1/p' "$1") || return
+    fi
+    [[ $version =~ ^go[0-9]+[.][0-9]+[.][0-9]+$ ]] || return 1
+    printf '%s\n' "$version"
+}
+
 cr_build() {
-    local jobs=$1 version expected modules info module
+    local jobs=$1 version expected modules info module overlay replacement
     # This also covers later authenticated protocol checks: x/net's inherited
     # http2debug logs header values, including the Basic proxy credential.
     unset GODEBUG GOCACHEPROG
@@ -891,8 +903,7 @@ cr_build() {
     clone_job=$!
     # Use the repository's exact Go release and the official archive metadata.
     # Require one archive matching both the release and native Linux architecture.
-    version=$(sed -n 's/^toolchain \(go[0-9][0-9.]*\)$/\1/p' "$work/source/go.mod")
-    [[ $version =~ ^go[0-9]+[.][0-9]+[.][0-9]+$ ]] || cr_die 'go.mod must pin a release Go toolchain.'
+    version=$(cr_go_version "$work/source/go.mod") || cr_die 'go.mod must pin a release Go toolchain.'
     cr_download 'https://go.dev/dl/?mode=json&include=all' "$work/go-releases.json"
     expected=$(jq -er --arg version "$version" --arg arch "$arch" \
         '[.[] | select(.version == $version) | .files[] | select(.os == "linux" and .arch == $arch and .kind == "archive" and .filename == ($version + ".linux-" + $arch + ".tar.gz"))] | if length == 1 then .[0].sha256 else error("No unique Go archive") end' "$work/go-releases.json")
@@ -918,6 +929,8 @@ cr_build() {
     # Do not trust a partially removed installation's caches or an inherited
     # module-cache path. All compiled/downloaded material for this run is private.
     export GOAMD64=v1 GOARM64=v8.0 GOPATH=$work/gopath GOMODCACHE=$work/gopath/pkg/mod GOCACHE=$work/gocache
+    python3 "$work/source/deploy/go-tls/prepare.py" "$work/go" "$work/go-tls"
+    export GOROOT=$work/go-tls
     local go=$work/go/bin/go mod=$work/source/cloudflare-build.mod
     "$go" version
     # All build overlays live in the temporary snapshot, never in this checkout.
@@ -933,15 +946,21 @@ cr_build() {
         # Alternate module files isolate dependency resolution from go.mod/go.sum.
         "$go" mod edit -modfile "$mod" -replace github.com/caddy-dns/cloudflare=../cloudflare-src
         "$go" get -modfile "$mod" github.com/caddy-dns/cloudflare@"$PLUGIN_TAG"
-        # Preserve the project's patched HTTP/2 and QUIC transports. Upstream
-        # substitutions could compile successfully while changing relay behavior.
-        "$go" mod edit -modfile "$mod" -json | jq -e '
-            any(.Replace[]; .Old.Path == "golang.org/x/net" and .New.Path == "./third_party/x-net") and
-            any(.Replace[]; .Old.Path == "github.com/quic-go/quic-go" and .New.Path == "./third_party/quic-go") and
-            any(.Replace[]; .Old.Path == "github.com/caddy-dns/cloudflare" and .New.Path == "../cloudflare-src")' >/dev/null
+        # Preserve the reviewed transports and JOSE security backports. Upstream
+        # substitutions can compile while losing protocol or security fixes.
+        overlay=$("$go" mod edit -modfile "$mod" -json)
+        for replacement in golang.org/x/net=./third_party/x-net \
+                           github.com/quic-go/quic-go=./third_party/quic-go \
+                           github.com/go-jose/go-jose/v3=./third_party/go-jose-v3 \
+                           github.com/go-jose/go-jose/v4=./third_party/go-jose-v4 \
+                           github.com/caddy-dns/cloudflare=../cloudflare-src; do
+            jq -e --arg module "${replacement%%=*}" --arg path "${replacement#*=}" \
+                'any(.Replace[]; .Old.Path == $module and .New.Path == $path)' \
+                <<< "$overlay" >/dev/null || cr_die "Missing reviewed source replacement in Cloudflare build overlay: $replacement."
+        done
         # Dependency resolution is complete: building may no longer edit it.
         # Keep the repository's compatibility tag and limit build parallelism.
-        "$go" build -modfile "$mod" -mod=readonly -tags http2legacy -trimpath -p "$jobs" -o "$work/$SERVICE" ./cmd/caddy
+        "$go" build -modfile "$mod" -mod=readonly -tags http2legacy,relay_tls9846_v1 -trimpath -p "$jobs" -o "$work/$SERVICE" ./cmd/caddy
     )
     # Check the resulting executable, not just the requested build options:
     # required Caddy modules, source replacements, architecture and CGO status.
@@ -950,9 +969,19 @@ cr_build() {
         grep -Fxq "$module" <<< "$modules" || cr_die "Built Caddy is missing $module."
     done
     info=$("$go" version -m "$work/$SERVICE")
+    awk -F '\t' '
+        $2 == "build" && $3 ~ /^-tags=/ {
+            value=substr($3, 7); gsub(/^"|"$/, "", value)
+            count=split(value, tags, /[,[:space:]]+/)
+            for (i=1; i<=count; i++) if (tags[i] == "relay_tls9846_v1") found=1
+        }
+        END { exit !found }
+    ' <<< "$info" || cr_die 'Missing reviewed TLS policy build tag: relay_tls9846_v1.'
     cr_check_replacement "$info" github.com/caddy-dns/cloudflare ../cloudflare-src || cr_die 'Missing Cloudflare build replacement.'
     cr_check_replacement "$info" golang.org/x/net ./third_party/x-net || cr_die 'Missing patched HTTP/2 transport.'
     cr_check_replacement "$info" github.com/quic-go/quic-go ./third_party/quic-go || cr_die 'Missing patched QUIC transport.'
+    cr_check_replacement "$info" github.com/go-jose/go-jose/v3 ./third_party/go-jose-v3 || cr_die 'Missing patched JOSE v3.'
+    cr_check_replacement "$info" github.com/go-jose/go-jose/v4 ./third_party/go-jose-v4 || cr_die 'Missing patched JOSE v4.'
     grep -Eq "^[[:space:]]*build[[:space:]]+GOARCH=$arch$" <<< "$info" || cr_die 'Wrong binary architecture.'
     grep -Eq '^[[:space:]]*build[[:space:]]+CGO_ENABLED=0$' <<< "$info" || cr_die 'Binary unexpectedly requires CGO.'
     "$work/$SERVICE" version
@@ -1025,7 +1054,8 @@ cr_unit_text() {
             print "# Installed by install-caddy-network-relay-native-build-cloudflare-dns.sh as " unit "."
             next
         }
-        /^(ProtectSystem|PrivateTmp|AmbientCapabilities|Restart|RestartSec|StartLimitIntervalSec)=/ { next }
+        /^(ProtectSystem|PrivateTmp|AmbientCapabilities|Restart|RestartSec|StartLimitIntervalSec|RuntimeDirectory|RuntimeDirectoryMode)=/ { next }
+        /^Environment=CADDY_ADMIN=/ { next }
         /^\[Unit\]$/ { print; print "StartLimitIntervalSec=0"; next }
         /^User=/ { print "User=" service; next }
         /^Group=/ { print "Group=" service; next }
@@ -1042,6 +1072,7 @@ cr_unit_text() {
             print "Environment=XDG_CONFIG_HOME=" data "/.config"
             print "RuntimeDirectory=" service
             print "RuntimeDirectoryMode=0700"
+            print "Environment=CADDY_ADMIN=" admin
             print "StateDirectory=" service
             print "StateDirectoryMode=0700"
             print "UMask=0077"
@@ -1630,9 +1661,13 @@ cr_main() {
     printf 'Defaults: user iphone, one build job, bundled selected-domain profile.\n'
     printf 'DNS-01 needs no A/AAAA records. For direct domain-based clients, route DNS-only records here and allow TCP/UDP 443.\n'
     printf 'Installing Caddy with Cloudflare DNS-01 and automatic certificate renewal.\n'
-    # The local patched transports, command entry point, unit and domain lists
+    # The reviewed local forks, command entry point, unit and domain lists
     # are mandatory. This installer cannot work as a standalone downloaded file.
     local required=(deploy/fresh-source.sh go.mod go.sum cmd/caddy/main.go third_party/quic-go/go.mod third_party/x-net/go.mod
+        third_party/go-jose-v3/go.mod third_party/go-jose-v4/go.mod
+        deploy/go-tls/prepare.py deploy/go-tls/source-manifest.json deploy/go-tls/relay_key_usage.go.txt deploy/go-tls/LICENSE deploy/go-tls/UPSTREAM.md
+        deploy/go-tls/versions/go1.26.11/conn.go.txt deploy/go-tls/versions/go1.27.4/conn.go.txt
+        deploy/go-tls/relay_host_field.go.txt deploy/go-tls/versions/go1.26.11/server.go.txt deploy/go-tls/versions/go1.27.4/server.go.txt
         deploy/caddy.service deploy/domains/google-ai-social.txt deploy/domains/global-services.txt)
     for path in "${required[@]}"; do [[ -f $REPO/$path ]] || cr_die "Complete checkout required; missing $path."; done
     caddy_build_parent /opt $((5*1024*1024)) || cr_die 'At least 5 GiB on disk is required for compilation.'
@@ -1643,7 +1678,7 @@ cr_main() {
     local apt=(apt-get -o DPkg::Lock::Timeout=1800 -o Acquire::Retries=3
         -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold)
     DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none cr_apt "${apt[@]:1}" update
-    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none cr_apt "${apt[@]:1}" install -y --no-install-recommends ca-certificates curl git procps jq openssl iproute2
+    DEBIAN_FRONTEND=noninteractive NEEDRESTART_MODE=a APT_LISTCHANGES_FRONTEND=none cr_apt "${apt[@]:1}" install -y --no-install-recommends ca-certificates curl git procps python3 jq openssl iproute2
     cr_check_existing_certificate
     install -d -m 700 "$TOOLS"
     work=$(mktemp -d "$work_parent/build.$(date +%Y%m%d-%H%M%S).XXXXXXXX")

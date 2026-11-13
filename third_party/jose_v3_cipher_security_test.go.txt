@@ -1,0 +1,47 @@
+package josecipher
+
+import (
+	"crypto/aes"
+	"strings"
+	"testing"
+)
+
+func TestOpenEmptyCiphertextContent(t *testing.T) {
+	defer func() {
+		if p := recover(); p != nil {
+			t.Errorf("unexpected panic: %v", p)
+		}
+	}()
+	key := make([]byte, 32)
+	aead, _ := NewCBCHMAC(key, aes.NewCipher)
+	ctx := aead.(*cbcAEAD)
+	nonce := make([]byte, 16)
+	aad := []byte("aad")
+
+	// Compute a valid auth tag so that we don't hit an early exit on that.
+	tag := ctx.computeAuthTag(aad, nonce, nil /*empty ciphertext*/)
+	if _, err := aead.Open(nil, nonce, tag /* tag || empty ciphertext */, aad); err == nil {
+		t.Error("expected error for empty ciphertext content, got nil")
+	}
+}
+
+func TestUnpadEmpty(t *testing.T) {
+	defer func() {
+		if p := recover(); p != nil {
+			t.Errorf("unexpected panic: %v", p)
+		}
+	}()
+	_, err := unpadBuffer(nil, 16)
+	if err == nil || !strings.Contains(err.Error(), "padding") {
+		t.Errorf("expected padding-related error unpadding empty buffer, got %v", err)
+	}
+}
+
+// Ported from the official CBC-HMAC invalid-key regression.
+func TestSecurityInvalidCBCKeys(t *testing.T) {
+	for _, n := range []int{31, 47, 63} {
+		if _, err := NewCBCHMAC(make([]byte, n), aes.NewCipher); err == nil {
+			t.Errorf("invalid CBC-HMAC key length %d accepted", n)
+		}
+	}
+}

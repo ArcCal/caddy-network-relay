@@ -4,7 +4,7 @@
 
 | Path | Contents |
 |---|---|
-| `/usr/local/bin/caddy` | Caddy with the plugin (`go build -tags http2legacy -trimpath`) |
+| `/usr/local/bin/caddy` | Caddy with the plugin (`go build -tags http2legacy,relay_tls9846_v1 -trimpath`) |
 | `/etc/systemd/system/caddy.service` | From [deploy/caddy.service](../deploy/caddy.service): runs as the `caddy` user, with only `CAP_NET_BIND_SERVICE` to bind low ports, and `GODEBUG=http2xconnect=1` |
 | `/etc/caddy/Caddyfile` | The first line is `# Managed by caddy-network-relay deploy/install.sh`, followed by the domain and the first user. Mode 640, owned by `root:caddy` |
 | `/etc/caddy/relay/` | Mode 700, only root can enter: the profiles (600), which contain the first user's password; it is stored nowhere else (delete them once installed). Installers before October 2026 also kept `<user>.password` here |
@@ -12,6 +12,7 @@
 | `/var/www/relay/index.html` | The default website (not overwritten if it already exists). It can be replaced with any static website |
 | `/etc/sysctl.d/60-caddy-network-relay.conf` | Persists UDP receive and send buffer limits of at least 7.5 MB (quic-go's recommendation), preserving higher existing runtime values across reboots |
 | `/var/cache/caddy-network-relay/` | Generated candidate binary, deployment backups and check output; new compiler caches are private and removed |
+| `/run/caddy/` | Recreated by systemd for `caddy`, mode 700; contains the default Unix admin socket |
 
 It also: runs `apt-get install ca-certificates curl git python3 iproute2`; creates the system user `caddy`; allows TCP 80, TCP 443 and UDP 443 when ufw is active; and with `--replace-network-relay` runs `systemctl disable --now network-relay`.
 
@@ -21,6 +22,35 @@ Each source build fetches complete latest `main` into a private timestamped
 directory on low-RAM hosts. Newly downloaded Go tools and module/build caches
 are removed with the source on success, failure and normal signals; an existing
 verified Go toolchain may be reused read-only. Existing user files are preserved.
+
+## Local administration
+
+The installed service sets `CADDY_ADMIN=unix//run/caddy/admin.sock`.
+Both `run` and `systemctl reload caddy` use this default. The parent directory is
+mode 700 and belongs to the service account, so other local users cannot read or
+replace the relay configuration through Caddy's admin API. The default TCP admin
+listener on localhost:2019 is not enabled by this unit.
+
+An existing Caddyfile with no explicit `admin` setting adopts this default when
+the installer replaces the unit and restarts the service. The installer preserves
+the Caddyfile. An explicit `admin` setting in that file takes precedence; review
+its access controls, especially if it uses a TCP endpoint. To migrate such a
+setting, remove it or choose the private Unix socket, then restart the service.
+Changing only the unit environment does not move an already running endpoint.
+
+For a direct CLI reload outside systemd, supply the private address explicitly:
+
+```sh
+sudo /usr/local/bin/caddy reload --address unix//run/caddy/admin.sock \
+    --config /etc/caddy/Caddyfile --force
+```
+
+Use the configured address instead when the Caddyfile explicitly selects one.
+The dedicated Cloudflare service uses `/run/caddy-network-relay/admin.sock` under
+its separate account and private directory. Keeping these namespaces separate
+also permits the services to coexist when their public listeners use different
+ports.
+See [Caddy's admin API guidance](https://caddyserver.com/docs/api).
 
 ## The script's checks and rollback
 
@@ -38,11 +68,29 @@ verified Go toolchain may be reused read-only. Existing user files are preserved
 
 ## Manual upgrade (a Caddy not installed by install.sh)
 
-Build in the source directory, check the configuration, then replace the binary:
+Use official Go 1.26.11 or 1.27.4 and Python 3. Build in the source directory
+with the reviewed private standard library, check the configuration, then replace
+the binary:
 
 ```bash
-go build -tags http2legacy -trimpath -o caddy.new ./cmd/caddy
+relay_go_work=$(mktemp -d)
+python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$relay_go_work/go"
+export GOROOT="$relay_go_work/go" GOTOOLCHAIN=local
+export GOFLAGS=-tags=relay_tls9846_v1
+go build -tags http2legacy,relay_tls9846_v1 -trimpath -o caddy.new ./cmd/caddy
 ```
+
+Check the candidate's compiled dependency metadata before installation:
+
+```bash
+go version -m ./caddy.new
+```
+
+Confirm the retained `relay_tls9846_v1` build tag and all four local
+transport/JOSE replacement pairs from the
+[manual build checks](USER_GUIDE.md#manual-build-and-caddy-integration). Custom
+main modules must apply those replacements themselves; Go does not inherit a
+dependency's replacement directives.
 
 ```bash
 ./caddy.new validate --config /etc/caddy/Caddyfile

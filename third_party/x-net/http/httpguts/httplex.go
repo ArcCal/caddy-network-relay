@@ -6,6 +6,7 @@ package httpguts
 
 import (
 	"net"
+	"net/netip"
 	"strings"
 	"unicode/utf8"
 
@@ -344,4 +345,143 @@ func PunycodeHostPort(v string) (string, error) {
 		return host, nil
 	}
 	return net.JoinHostPort(host, port), nil
+}
+
+// Other URI schemes may use userinfo; HTTP(S) and classic CONNECT may not.
+func ValidAuthority(value string, allowUserinfo bool) bool {
+	if allowUserinfo {
+		if i := strings.IndexByte(value, '@'); i >= 0 {
+			return validURIName(value[:i], true) && ValidHostField(value[i+1:])
+		}
+	}
+	return ValidHostField(value)
+}
+
+// ValidHostField checks the Host grammar in RFC 9110 section 7.2 and
+// RFC 3986 sections 3.2.2-3.2.3. Host syntax is broader than a DNS name:
+// empty names, percent-encoded registered names and IPvFuture are valid.
+func ValidHostField(value string) bool {
+	var rest string
+	if strings.HasPrefix(value, "[") {
+		end := strings.IndexByte(value, ']')
+		if end < 0 {
+			return false
+		}
+		literal := value[1:end]
+		ip, err := netip.ParseAddr(literal)
+		if (err != nil || !ip.Is6() || ip.Zone() != "") && !validIPvFuture(literal) {
+			return false
+		}
+		rest = value[end+1:]
+	} else {
+		name, _, hasPort := strings.Cut(value, ":")
+		if !validURIName(name, false) {
+			return false
+		}
+		if !hasPort {
+			return true
+		}
+		rest = value[len(name):]
+	}
+	if rest == "" {
+		return true
+	}
+	if rest[0] != ':' {
+		return false
+	}
+	for i := 1; i < len(rest); i++ {
+		if rest[i] < '0' || rest[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func validURIName(s string, allowColon bool) bool {
+	for i := 0; i < len(s); i++ {
+		if uriHostChar(s[i]) || allowColon && s[i] == ':' {
+			continue
+		}
+		if s[i] != '%' || i+2 >= len(s) || !authorityHex(s[i+1]) || !authorityHex(s[i+2]) {
+			return false
+		}
+		i += 2
+	}
+	return true
+}
+
+func validIPvFuture(s string) bool {
+	if len(s) < 4 || s[0] != 'v' && s[0] != 'V' {
+		return false
+	}
+	version, address, ok := strings.Cut(s[1:], ".")
+	if !ok || version == "" || address == "" {
+		return false
+	}
+	for i := 0; i < len(version); i++ {
+		if !authorityHex(version[i]) {
+			return false
+		}
+	}
+	for i := 0; i < len(address); i++ {
+		if address[i] != ':' && !uriHostChar(address[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// unreserved / sub-delims from RFC 3986 sections 2.2-2.3.
+func uriHostChar(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+		strings.ContainsRune("-._~!$&'()*+,;=", rune(c))
+}
+
+func authorityHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}
+
+// ValidRequestAuthority checks URI authority syntax plus the HTTP(S) and
+// classic CONNECT restrictions from RFC 9110 sections 4.2.1-4.2.2,
+// RFC 9113 section 8.5 and RFC 9114 sections 4.3.1-4.4.
+func ValidRequestAuthority(value, scheme string, classicConnect bool) bool {
+	if scheme != "" && !validAuthorityScheme(scheme) {
+		return false
+	}
+	isHTTP := strings.EqualFold(scheme, "http") || strings.EqualFold(scheme, "https")
+	allowUserinfo := !isHTTP && !classicConnect
+	if !ValidAuthority(value, allowUserinfo) {
+		return false
+	}
+	hostport := value
+	if allowUserinfo {
+		if i := strings.IndexByte(hostport, '@'); i >= 0 {
+			hostport = hostport[i+1:]
+		}
+	}
+	if (isHTTP || classicConnect) && (hostport == "" || hostport[0] == ':') {
+		return false
+	}
+	if !classicConnect {
+		return true
+	}
+	if strings.HasPrefix(hostport, "[") {
+		end := strings.IndexByte(hostport, ']')
+		return end >= 0 && len(hostport) > end+2 && hostport[end+1] == ':'
+	}
+	i := strings.IndexByte(hostport, ':')
+	return i > 0 && i < len(hostport)-1
+}
+
+func validAuthorityScheme(s string) bool {
+	if len(s) == 0 || !(s[0] >= 'a' && s[0] <= 'z' || s[0] >= 'A' && s[0] <= 'Z') {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if !('a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '+' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
 }

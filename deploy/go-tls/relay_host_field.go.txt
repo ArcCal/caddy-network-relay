@@ -1,0 +1,97 @@
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package http
+
+import (
+	"net/netip"
+	"strings"
+)
+
+// RelayHTTP1HostPolicy identifies the reviewed original-Host validation policy.
+// Relay builds reference it so an unpatched standard library cannot silently
+// produce a server without the RFC 9112 request-boundary checks.
+const RelayHTTP1HostPolicy = "rfc9112-host-v1"
+
+// relayValidHostField checks the Host grammar in RFC 9110 section 7.2 and
+// RFC 3986 sections 3.2.2-3.2.3. Empty names, percent-encoded registered
+// names, empty ports and IPvFuture literals are valid Host field values.
+func relayValidHostField(value string) bool {
+	var rest string
+	if strings.HasPrefix(value, "[") {
+		end := strings.IndexByte(value, ']')
+		if end < 0 {
+			return false
+		}
+		literal := value[1:end]
+		ip, err := netip.ParseAddr(literal)
+		if (err != nil || !ip.Is6() || ip.Zone() != "") && !relayValidIPvFuture(literal) {
+			return false
+		}
+		rest = value[end+1:]
+	} else {
+		name, _, hasPort := strings.Cut(value, ":")
+		if !relayValidURIHostName(name) {
+			return false
+		}
+		if !hasPort {
+			return true
+		}
+		rest = value[len(name):]
+	}
+	if rest == "" {
+		return true
+	}
+	if rest[0] != ':' {
+		return false
+	}
+	for i := 1; i < len(rest); i++ {
+		if rest[i] < '0' || rest[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func relayValidURIHostName(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if relayURIHostChar(s[i]) {
+			continue
+		}
+		if s[i] != '%' || i+2 >= len(s) || !relayAuthorityHex(s[i+1]) || !relayAuthorityHex(s[i+2]) {
+			return false
+		}
+		i += 2
+	}
+	return true
+}
+
+func relayValidIPvFuture(s string) bool {
+	if len(s) < 4 || s[0] != 'v' && s[0] != 'V' {
+		return false
+	}
+	version, address, ok := strings.Cut(s[1:], ".")
+	if !ok || version == "" || address == "" {
+		return false
+	}
+	for i := 0; i < len(version); i++ {
+		if !relayAuthorityHex(version[i]) {
+			return false
+		}
+	}
+	for i := 0; i < len(address); i++ {
+		if address[i] != ':' && !relayURIHostChar(address[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// unreserved / sub-delims from RFC 3986 sections 2.2-2.3.
+func relayURIHostChar(c byte) bool {
+	return 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' ||
+		strings.ContainsRune("-._~!$&'()*+,;=", rune(c))
+}
+func relayAuthorityHex(c byte) bool {
+	return '0' <= c && c <= '9' || 'a' <= c && c <= 'f' || 'A' <= c && c <= 'F'
+}

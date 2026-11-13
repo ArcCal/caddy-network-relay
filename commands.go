@@ -101,13 +101,18 @@ password is itself a random secret of at least 24 characters.`,
 				if len(password) < 12 {
 					return errors.New("the password must be at least 12 characters")
 				}
+				if !validBasicText(password) {
+					return errors.New("the password contains control characters forbidden by Basic authentication")
+				}
 			}
-			hash := HashPassword(password)
+			var hash string
 			if !stdin || fastHash {
 				var err error
 				if hash, err = HashGeneratedSecret(password); err != nil {
 					return err
 				}
+			} else {
+				hash = HashPassword(password)
 			}
 			if !stdin {
 				fmt.Printf("password: %s\n", password)

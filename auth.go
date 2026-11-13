@@ -290,7 +290,19 @@ func parseBasic(header string) (user, password string, ok bool) {
 	if err != nil {
 		return "", "", false
 	}
-	return strings.Cut(string(raw), ":")
+	user, password, ok = strings.Cut(string(raw), ":")
+	return user, password, ok && validBasicText(user) && validBasicText(password)
+}
+
+// RFC 7617 section 2 forbids ASCII CTLs in user IDs and passwords. Other
+// octets remain valid here: Basic's default character encoding is undefined.
+func validBasicText(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 // account is a verified user: its name and the credentials it was verified
@@ -556,12 +568,14 @@ func newAuthenticator(users []User) (*authenticator, error) {
 	// kind as the configured ones, so response times do not reveal which
 	// names exist.
 	a.fastDummy = len(a.hashes) > 0 && allFast
-	dummyHash := HashPassword(RandomPassword())
+	var dummyHash string
 	if a.fastDummy {
 		var err error
 		if dummyHash, err = HashGeneratedSecret(RandomPassword()); err != nil {
 			return nil, err
 		}
+	} else {
+		dummyHash = HashPassword(RandomPassword())
 	}
 	dummy, err := parsePasswordHash(dummyHash)
 	if err != nil {

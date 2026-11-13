@@ -165,8 +165,8 @@ func (p *Profile) check() error {
 	if err := validateUserName(p.User); err != nil {
 		return err
 	}
-	if strings.ContainsAny(p.Password, "\r\n") || !utf8.ValidString(p.Password) {
-		return errors.New("the password contains characters that cannot be sent in a header")
+	if !validBasicText(p.Password) || !utf8.ValidString(p.Password) {
+		return errors.New("the password contains characters that cannot be sent with Basic authentication")
 	}
 	if err := checkDomain(p.Host); err != nil {
 		return err

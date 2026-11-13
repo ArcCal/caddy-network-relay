@@ -45,10 +45,7 @@ func newFrameSorter() *frameSorter {
 }
 
 func (s *frameSorter) Push(data []byte, offset protocol.ByteCount, doneCb func()) error {
-	if doneCb != nil {
-		doneCb = sync.OnceFunc(doneCb)
-	}
-	err := s.push(data, offset, doneCb)
+	err := s.push(data, offset, &doneCb)
 	if err != nil {
 		if doneCb != nil {
 			doneCb()
@@ -60,7 +57,10 @@ func (s *frameSorter) Push(data []byte, offset protocol.ByteCount, doneCb func()
 	return err
 }
 
-func (s *frameSorter) push(data []byte, offset protocol.ByteCount, doneCb func()) error {
+// push transfers callback ownership through doneCb. A copied small fragment
+// clears it when releasing the original frame, so Push can clean up failures
+// without allocating a second once-guard for every incoming frame.
+func (s *frameSorter) push(data []byte, offset protocol.ByteCount, doneCb *func()) error {
 	// Slicing a pooled frame does not free its original backing array.
 	retainedCapacity := cap(data)
 	if len(data) == 0 {
@@ -173,9 +173,9 @@ func (s *frameSorter) push(data []byte, offset protocol.ByteCount, doneCb func()
 		copy(newData, data)
 		data = newData
 		retainedCapacity = cap(newData)
-		if doneCb != nil {
-			doneCb()
-			doneCb = nil
+		if *doneCb != nil {
+			(*doneCb)()
+			*doneCb = nil
 		}
 	}
 
@@ -190,8 +190,8 @@ func (s *frameSorter) push(data []byte, offset protocol.ByteCount, doneCb func()
 		if !budget.TryAcquire(charge) {
 			return &qerr.TransportError{ErrorCode: qerr.InternalError, ErrorMessage: "receive buffer budget exhausted"}
 		}
-		originalDone := doneCb
-		doneCb = sync.OnceFunc(func() {
+		originalDone := *doneCb
+		*doneCb = sync.OnceFunc(func() {
 			if originalDone != nil {
 				originalDone()
 			}
@@ -201,7 +201,7 @@ func (s *frameSorter) push(data []byte, offset protocol.ByteCount, doneCb func()
 	if s.queue == nil {
 		s.queue = make(map[protocol.ByteCount]frameSorterEntry)
 	}
-	s.queue[start] = frameSorterEntry{Data: data, DoneCb: doneCb}
+	s.queue[start] = frameSorterEntry{Data: data, DoneCb: *doneCb}
 	return nil
 }
 

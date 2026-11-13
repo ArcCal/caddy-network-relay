@@ -1,0 +1,13 @@
+package jwt
+
+import "testing"
+
+func TestSecurityExpectedAudienceRequiresAll(t *testing.T) {
+	expected := Expected{Audience: Audience{"required-a", "required-b"}}
+	if err := (Claims{Audience: Audience{"required-a"}}).Validate(expected); err != ErrInvalidAudience {
+		t.Errorf("one matching audience weakened ALL semantics: %v", err)
+	}
+	if err := (Claims{Audience: Audience{"required-b", "required-a", "extra"}}).Validate(expected); err != nil {
+		t.Errorf("all required audiences rejected: %v", err)
+	}
+}

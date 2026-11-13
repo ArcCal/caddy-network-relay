@@ -82,6 +82,17 @@ exit 0''',
 FAKE_CADDY = r'''#!/bin/sh
 # The real binary, except for the parts that need a running system.
 case "$1 $2" in
+  "build-info ")
+    "$REAL_CADDY" build-info | awk -F '\t' -v missing="${FAKE_MISSING_REPLACEMENT:-}" -v version="${FAKE_BUILD_GO_VERSION:-}" -v missing_tag="${FAKE_MISSING_TLS_POLICY:-}" -v tags="${FAKE_BUILD_TAGS:-http2legacy,relay_tls9846_v1}" '
+      BEGIN { OFS="\t" }
+      drop { drop=0; if ($1 == "=>") next }
+      ($1 == "dep" || $1 == "mod") && $2 == missing { drop=1 }
+      $1 == "go" && version != "" { $2=version }
+      $1 == "build" && $2 ~ /^-tags=/ { seen_tag=1; if (missing_tag != "") next; $2="-tags=" tags }
+      { print }
+      END { if (!seen_tag && missing_tag == "") print "build", "-tags=" tags }
+    '
+    exit ;;
   "validate --config") echo "validate" >> "$LOG"; [ -n "$FAKE_INVALID" ] && exit 1; exit 0 ;;
   "network-relay check") cat > "$STATE/check-stdin"; echo "check $*" >> "$LOG"; [ -n "$FAKE_CHECK_FAILS" ] && { echo "FAIL HTTP/3"; exit 1; }; echo "all checks passed"; exit 0 ;;
   "network-relay profile")
@@ -109,6 +120,7 @@ if [ -n "$CHECK_NATIVE_BUILD_ENV" ]; then
   [ "$GOOS" = linux ] && [ "$GOARCH" = amd64 ] && [ "$GOWORK" = off ] || exit 93
 fi
 echo "go $*" >> "$LOG"
+if [ "$1 $2" = "env GOROOT" ]; then printf '%s\n' "$FAKE_INSTALLED_GOROOT"; exit 0; fi
 while [ $# -gt 0 ]; do
   if [ "$1" = -o ]; then cp "$FAKE_CADDY_SCRIPT" "$2"; chmod 755 "$2"; fi
   shift
@@ -123,6 +135,7 @@ def source_fixture():
         unittest.addModuleCleanup(SOURCE_FIXTURE.cleanup)
         source = Path(SOURCE_FIXTURE.name) / 'source'
         shutil.copytree(SRC, source, ignore=shutil.ignore_patterns('.git', '__pycache__', '*.pyc'))
+        (source / 'deploy/go-tls/prepare.py').write_text("import os, pathlib, sys\nroot, output = map(pathlib.Path, sys.argv[1:])\nassert str(root) == os.environ['FAKE_INSTALLED_GOROOT']\noutput.mkdir(parents=True, exist_ok=True)\nprint(output)\n")
         subprocess.run(['git', '-c', 'core.hooksPath=/dev/null', 'init', '--template=', '-q', '-b', 'main', str(source)], check=True)
         subprocess.run(['git', '-C', str(source), 'add', '.'], check=True)
         environment = os.environ | {'GIT_AUTHOR_NAME': 'Anonymous', 'GIT_AUTHOR_EMAIL': 'anonymous@example.invalid',
@@ -141,7 +154,7 @@ def setUpModule():
         temporary = tempfile.TemporaryDirectory(prefix='caddy-installer-test-build-')
         unittest.addModuleCleanup(temporary.cleanup)
         out = Path(temporary.name) / 'caddy'
-        subprocess.run(['go', 'build', '-tags', 'http2legacy', '-o', str(out), './cmd/caddy'], cwd=SRC, check=True)
+        subprocess.run(['go', 'build', '-tags', 'http2legacy,relay_tls9846_v1', '-o', str(out), './cmd/caddy'], cwd=SRC, check=True)
         REAL_CADDY = out
 
 
@@ -181,6 +194,7 @@ class InstallTest(unittest.TestCase):
             'RELAY_TEST_ROOT': str(self.root),
             'RELAY_TEST_GO': str(fake_go),
             'FAKE_CADDY_SCRIPT': str(self.fake_caddy),
+            'FAKE_INSTALLED_GOROOT': str(self.dir / 'installed-go'),
             'REAL_CADDY': str(REAL_CADDY),
             'LOG': str(self.log),
             'STATE': str(self.state),
@@ -265,9 +279,13 @@ class InstallTest(unittest.TestCase):
         self.assertNotIn('CAP_NET_ADMIN', unit)
         self.assertIn('relay_id relay.example.com', self.path('/etc/caddy/Caddyfile').read_text())
         self.assertIn('GODEBUG=http2xconnect=1', unit)
+        self.assertIn('RuntimeDirectory=caddy', unit.splitlines())
+        self.assertIn('RuntimeDirectoryMode=0700', unit)
+        self.assertIn('Environment=CADDY_ADMIN=unix//run/caddy/admin.sock', unit.splitlines())
         self.assertIn('net.core.rmem_max = 7500000', self.path('/etc/sysctl.d/60-caddy-network-relay.conf').read_text())
         self.assertTrue(self.path('/var/www/relay/index.html').exists())
         calls = self.calls()
+        self.assertIn('relay_tls9846_v1', self.calls())
         self.assertIn('-tags http2legacy', calls)
         self.assertIn('systemctl enable caddy', calls)
         self.assertIn('systemctl restart caddy', calls)
@@ -490,6 +508,61 @@ class InstallTest(unittest.TestCase):
         r = self.fresh(ok=False, FAKE_LONG_MODULES='missing')
         self.assertIn('has no network_relay module', r.stderr)
         self.assertFalse(self.path('/usr/local/bin/caddy').exists())
+
+    def test_missing_jose_fork_is_refused_before_account_or_service_activation(self):
+        for major in ('v3', 'v4'):
+            with self.subTest(major=major):
+                result = self.fresh(ok=False, FAKE_MISSING_REPLACEMENT=f'github.com/go-jose/go-jose/{major}')
+                self.assertIn(f'go-jose/go-jose/{major}', result.stderr)
+                self.assertFalse(self.path('/usr/local/bin/caddy').exists())
+                self.assertFalse(self.path('/etc/caddy/Caddyfile').exists())
+                self.assertFalse((self.state / 'user-caddy').exists())
+                self.assertNotIn('systemctl restart caddy', self.calls())
+
+    def test_missing_jose_fork_keeps_the_existing_upgrade_running(self):
+        self.fresh()
+        old_binary = self.path('/usr/local/bin/caddy').read_bytes()
+        old_config = self.path('/etc/caddy/Caddyfile').read_bytes()
+        for major in ('v3', 'v4'):
+            with self.subTest(major=major):
+                self.log.write_text('')
+                result = self.install(ok=False, FAKE_MISSING_REPLACEMENT=f'github.com/go-jose/go-jose/{major}')
+                self.assertIn(f'go-jose/go-jose/{major}', result.stderr)
+                self.assertEqual(self.path('/usr/local/bin/caddy').read_bytes(), old_binary)
+                self.assertEqual(self.path('/etc/caddy/Caddyfile').read_bytes(), old_config)
+                self.assertTrue((self.state / 'active-caddy').exists())
+                self.assertTrue((self.state / 'enabled-caddy').exists())
+                self.assertNotIn('systemctl restart caddy', self.calls())
+                self.assertNotIn('systemctl stop caddy', self.calls())
+
+    def test_insecure_or_unknown_go_build_is_refused_before_activation(self):
+        for version in ('go1.26.10', 'go1.27.2', 'go1.28rc1', 'devel go1.28-snapshot',
+                        'go1.026.11', 'go1.26.011'):
+            with self.subTest(version=version):
+                result = self.fresh(ok=False, FAKE_BUILD_GO_VERSION=version)
+                self.assertIn('Go', result.stderr)
+                self.assertFalse((self.state / 'user-caddy').exists())
+                self.assertFalse(self.path('/usr/local/bin/caddy').exists())
+                self.assertNotIn('systemctl restart caddy', self.calls())
+
+    def test_missing_or_lookalike_tls_policy_is_refused_before_activation(self):
+        for overrides in ({'FAKE_MISSING_TLS_POLICY': '1'},
+                          {'FAKE_BUILD_TAGS': 'http2legacy,relay_tls9846_v10'},
+                          {'FAKE_BUILD_TAGS': 'http2legacy,prefix_relay_tls9846_v1'}):
+            with self.subTest(overrides=overrides):
+                result = self.fresh(ok=False, **overrides)
+                self.assertIn('TLS policy build tag', result.stderr)
+                self.assertFalse((self.state / 'user-caddy').exists())
+                self.assertFalse(self.path('/usr/local/bin/caddy').exists())
+                self.assertNotIn('systemctl restart caddy', self.calls())
+
+    def test_newer_stable_go_build_is_accepted(self):
+        self.fresh(FAKE_BUILD_GO_VERSION='go1.28.0')
+        self.assertTrue((self.state / 'active-caddy').exists())
+
+    def test_large_canonical_go_patch_is_accepted_without_overflow(self):
+        self.fresh(FAKE_BUILD_GO_VERSION='go1.26.' + '9' * 40)
+        self.assertTrue((self.state / 'active-caddy').exists())
 
     def test_failed_self_check_keeps_the_service(self):
         r = self.fresh(ok=False, FAKE_CHECK_FAILS='1')

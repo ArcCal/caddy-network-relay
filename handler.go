@@ -24,6 +24,7 @@ import (
 	"github.com/quic-go/quic-go/http3"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"golang.org/x/net/http/httpguts"
 )
 
 func init() {
@@ -293,6 +294,17 @@ func headerHasToken(hdr http.Header, name, token string) bool {
 
 // ServeHTTP implements caddyhttp.MiddlewareHandler.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhttp.Handler) error {
+	// net/http checks Host's bytes but accepts invalid ports and bracketed
+	// non-IP literals. RFC 9112 section 3.2 requires 400 for an invalid Host.
+	badHTTP1Host := r.ProtoMajor == 1 && !validHostField(r.Host)
+	if r.ProtoMajor == 1 && (strings.EqualFold(r.URL.Scheme, "http") || strings.EqualFold(r.URL.Scheme, "https")) {
+		badHTTP1Host = badHTTP1Host || !httpguts.ValidRequestAuthority(r.URL.Host, r.URL.Scheme, false)
+	}
+	if badHTTP1Host {
+		w.Header().Set("Connection", "close")
+		w.WriteHeader(http.StatusBadRequest)
+		return nil
+	}
 	if r.ProtoMajor < 3 && r.TLS != nil && h.server != nil {
 		if v := h.server.altSvc(r); v != "" {
 			w.Header().Set("Alt-Svc", v)
@@ -481,6 +493,11 @@ func (h *Handler) refuseMalformed(w http.ResponseWriter, r *http.Request, why *r
 		w.Header().Set("Connection", "close")
 	}
 	_ = h.refuse(w, r, why)
+	resetMalformedRequest(w, r)
+	return nil
+}
+
+func resetMalformedRequest(w http.ResponseWriter, r *http.Request) {
 	base := baseWriter(w)
 	switch r.ProtoMajor {
 	case 2:
@@ -496,7 +513,6 @@ func (h *Handler) refuseMalformed(w http.ResponseWriter, r *http.Request, why *r
 			str.CancelWrite(h3MessageError)
 		}
 	}
-	return nil
 }
 
 func (h *Handler) serveTCP(ctx context.Context, w http.ResponseWriter, r *http.Request,

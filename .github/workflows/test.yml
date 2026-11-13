@@ -26,6 +26,13 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+      - name: Prepare reviewed TLS source
+        run: |
+          echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+          echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+          echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
       - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
       - run: go vet ./...
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
@@ -50,10 +57,17 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.27"
+          go-version: "1.27.4"
       # Local transport patches keep the same reviewed implementation and
       # extended CONNECT APIs on both toolchains and with either build mode.
-      - run: GOTOOLCHAIN=local RELAY_STRESS_MB=16 go test -count=1 -timeout 40m -tags http2legacy ./...
+      - name: Prepare reviewed TLS source
+        run: |
+          echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+          echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+          echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
+      - run: GOTOOLCHAIN=local RELAY_STRESS_MB=16 go test -count=1 -timeout 40m -tags http2legacy,relay_tls9846_v1 ./...
       - run: GOTOOLCHAIN=local GODEBUG=http2xconnect=1 go test -count=1 -run 'HTTP2Ext|TCP|Masque|HTTP3|Caddyfile|Target|Success|Capsule|HTTP1|Extended|Unreachable|Accessor' ./...
 
   build:
@@ -67,7 +81,34 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
-      - run: CGO_ENABLED=0 GOARCH=${{ matrix.arch }} go build -tags http2legacy -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
+      - name: Prepare reviewed TLS source
+        run: |
+          echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+          echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+          echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
+      - run: |
+          CGO_ENABLED=0 GOARCH=${{ matrix.arch }} go build -tags http2legacy,relay_tls9846_v1 -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
+          info=$(go version -m caddy)
+              awk -F '\t' '
+                  $2 == "build" && $3 ~ /^-tags=/ {
+                      value=substr($3, 7); gsub(/^"|"$/, "", value)
+                      count=split(value, tags, /[,[:space:]]+/)
+                      for (i=1; i<=count; i++) if (tags[i] == "relay_tls9846_v1") found=1
+                  }
+                  END { exit !found }
+              ' <<< "$info" || { echo 'Missing reviewed TLS policy build tag: relay_tls9846_v1.' >&2; exit 1; }
+          for replacement in golang.org/x/net=./third_party/x-net \
+                             github.com/quic-go/quic-go=./third_party/quic-go \
+                             github.com/go-jose/go-jose/v3=./third_party/go-jose-v3 \
+                             github.com/go-jose/go-jose/v4=./third_party/go-jose-v4; do
+            awk -F '\t' -v module="${replacement%%=*}" -v path="${replacement#*=}" '
+              ($2 == "dep" || $2 == "mod") && $3 == module { pending=1; next }
+              pending { if ($2 == "=>" && $3 == path) found=1; pending=0 }
+              END { exit !found }
+            ' <<< "$info" || { echo "missing replacement: $replacement" >&2; exit 1; }
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: caddy-network-relay-linux-${{ matrix.arch }}

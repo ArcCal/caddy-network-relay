@@ -326,17 +326,28 @@ Maintainers can request release builds in three ways. Successful jobs attach arc
 
 ### Building
 
-Needs Go 1.26 (the exact version is in `go.mod`; with `GOTOOLCHAIN=auto` it is downloaded automatically):
+Use an unmodified official Go 1.26.11 or 1.27.4 toolchain and Python 3.
+Prepare the reviewed TLS and HTTP/1 source policy in a private GOROOT first:
 
 ```bash
-go build -tags http2legacy -o caddy ./cmd/caddy
+relay_go_work=$(mktemp -d)
+python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$relay_go_work/go"
+export GOROOT="$relay_go_work/go" GOTOOLCHAIN=local
+export GOFLAGS=-tags=relay_tls9846_v1
+go build -tags http2legacy,relay_tls9846_v1 -o caddy ./cmd/caddy
 ```
 
 `cmd/caddy` includes Caddy v2.11.9's standard modules and this plugin. Build from
-this repository root: the `go.mod` replacements select the reviewed transport sources
+this repository root: the `go.mod` replacements select the reviewed transport and JOSE sources
 in `third_party`. Go ignores a dependency's replacements, so an ordinary xcaddy
-`--with` build does **not** include these fixes. Custom builds must apply both
-replacements in their main module. The patched x/net HTTP/2 implementation is
+`--with` build does **not** include these fixes. Custom builds must apply all four
+replacements (quic-go, x/net, go-jose/v3 and go-jose/v4) in their main module and
+verify their adjacent replacement records with `go version -m caddy`.
+Custom entry points also require the prepared Go standard library and retained
+`relay_tls9846_v1` tag; both are enforced by package compilation. Unknown Go
+source versions fail preparation until reviewed. See [source policy](deploy/go-tls/UPSTREAM.md). See the
+[manual build checks](docs/USER_GUIDE.md#manual-build-and-caddy-integration).
+The patched x/net HTTP/2 implementation is
 used on all supported Go versions; the `http2legacy` tag remains accepted for
 existing build scripts. See [transport patch provenance](third_party/README.md).
 
@@ -356,7 +367,8 @@ binaries include the Cloudflare DNS plugin. Run it with `--help` for all
 options. Private source, compiler work and new build caches are removed on
 success, failure and normal signals. Compiler work uses disk rather than a
 small RAM-backed `/tmp`; effective RAM, cgroup limits and usable free swap
-bound parallelism. Results remain shareable with mode-777 directories. Existing
+bound parallelism. New artifact directories are at most mode 755 and respect a
+stricter caller umask; existing directory permissions are preserved. Existing
 user checkouts, tools and caches are not deleted.
 
 ### Caddyfile

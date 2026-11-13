@@ -423,14 +423,18 @@ func (c *relayClient) openUDPH2(ctx context.Context, h *h2Conn, host, port strin
 // ---- HTTP/1.1 ----
 
 type h1Stream struct {
-	conn *tls.Conn
-	br   *bufio.Reader
+	conn        *tls.Conn
+	br          *bufio.Reader
+	stopContext func() bool
 }
 
 func (s *h1Stream) Read(p []byte) (int, error)  { return s.br.Read(p) }
 func (s *h1Stream) Write(p []byte) (int, error) { return s.conn.Write(p) }
 func (s *h1Stream) CloseWrite() error           { return s.conn.CloseWrite() }
-func (s *h1Stream) Close() error                { return s.conn.Close() }
+func (s *h1Stream) Close() error {
+	defer s.stopContext()
+	return s.conn.Close()
+}
 
 func (c *relayClient) h1Request(ctx context.Context, request string, upgrade bool) (*h1Stream, error) {
 	d := tls.Dialer{Config: c.tlsConfig("http/1.1")}
@@ -439,25 +443,41 @@ func (c *relayClient) h1Request(ctx context.Context, request string, upgrade boo
 		return nil, err
 	}
 	tc := conn.(*tls.Conn)
+	// The dial context only covers the TLS handshake. Keep cancellation
+	// attached while sending headers and for the established tunnel's I/O.
+	// Closing TLS itself can wait behind a blocked write of close_notify;
+	// close the transport directly so socket backpressure cannot delay it.
+	stopContext := context.AfterFunc(ctx, func() { _ = tc.NetConn().Close() })
+	failed := func(err error) (*h1Stream, error) {
+		stopContext()
+		_ = tc.NetConn().Close()
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		} else if deadline, ok := ctx.Deadline(); ok && !time.Now().Before(deadline) && isTimeout(err) {
+			err = context.DeadlineExceeded
+		}
+		return nil, err
+	}
 	if deadline, ok := ctx.Deadline(); ok {
-		tc.SetDeadline(deadline)
+		if err := tc.SetDeadline(deadline); err != nil {
+			return failed(err)
+		}
 	}
 	if _, err := io.WriteString(tc, request); err != nil {
-		tc.Close()
-		return nil, err
+		return failed(err)
 	}
 	br := bufio.NewReader(tc)
 	rsp, err := http.ReadResponse(br, nil)
 	if err != nil {
-		tc.Close()
-		return nil, err
+		return failed(err)
 	}
 	if err := checkResponse(rsp, upgrade); err != nil {
-		tc.Close()
-		return nil, err
+		return failed(err)
 	}
-	tc.SetDeadline(time.Time{})
-	return &h1Stream{conn: tc, br: br}, nil
+	if err := ctx.Err(); err != nil {
+		return failed(err)
+	}
+	return &h1Stream{conn: tc, br: br, stopContext: stopContext}, nil
 }
 
 func (c *relayClient) authLine() string {

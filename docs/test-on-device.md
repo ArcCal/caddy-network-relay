@@ -61,7 +61,7 @@ Optional: `--email you@example.com` (Let's Encrypt uses it to tell you about cer
 **What you should see along the way** (each step starts with `==>`):
 
 1. `This machine's public IPv4: x.x.x.x; relay.example.com resolves to: x.x.x.x` — the two IPs are the same. If they differ, it stops without having changed anything: fix the DNS, wait until `dig` shows the new IP, and run it again.
-2. `==> Installing dependencies`, `==> Preparing Go 1.26.10` (a download of about 70 MB).
+2. `==> Installing dependencies`, `==> Preparing Go 1.26.11` (a download of about 70 MB).
 3. `==> Building Caddy with the network_relay plugin` — lots of `go: downloading ...` lines scroll by, then it is quiet for a few minutes. This is the slowest step: about 10 minutes on a machine with 1 GB of memory.
 4. `==> Generating a random password for user iphone (not shown; it is only put into the profiles)`.
 5. `==> Checking the configuration`, `==> Installing and starting the service`.
@@ -112,8 +112,22 @@ xcode-select --install; brew install go
 ```
 
 ```bash
-cd ~/Downloads && unzip -o caddy-network-relay-main.zip && cd caddy-network-relay-main && go build -tags http2legacy -o caddy ./cmd/caddy
+cd ~/Downloads && unzip -o caddy-network-relay-main.zip && cd caddy-network-relay-main
+relay_go_work=$(mktemp -d)
+python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$relay_go_work/go"
+export GOROOT="$relay_go_work/go" GOTOOLCHAIN=local
+export GOFLAGS=-tags=relay_tls9846_v1
+go build -tags http2legacy,relay_tls9846_v1 -o caddy ./cmd/caddy
 ```
+
+Use Go 1.26.11, Go 1.27.4 or a newer stable release. Check the resulting binary:
+
+```bash
+go version -m ./caddy
+```
+
+Its module records must retain the local quic-go, x/net, go-jose/v3 and
+go-jose/v4 replacements listed in [the source provenance](../third_party/README.md).
 
 ```bash
 ./caddy network-relay check --server relay.example.com --user iphone

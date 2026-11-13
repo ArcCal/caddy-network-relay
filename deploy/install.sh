@@ -20,12 +20,12 @@ set -Eeuo pipefail
 unset CDPATH
 export LANG=C.UTF-8 LC_ALL=C.UTF-8
 
-GO_VERSION=1.26.10
+GO_VERSION=1.26.11
 # h1 hashes of golang.org/toolchain@v0.0.1-go$GO_VERSION.linux-* from
 # sum.golang.org.
 declare -A GO_SUMS=(
-    [amd64]='h1:5VAGHlY8yl8pTPVSNIez3SNMy6fWabs+QMR25f3oMT0='
-    [arm64]='h1:TuAzKmE5TqYnXpnhgY3GtBJCVg4AfNDA/K1gLyX5Hig='
+    [amd64]='h1:KyINmJ/FQdKRmDYGuTAAXkumyeR2DyUlSNHZj7XaLFg='
+    [arm64]='h1:GFS9FmglLJxMwOSuun3qb8tBjpr8ibzOkt8tBrRLrnk='
 )
 # For tests: all paths under this directory, and no real downloads.
 ROOT=${RELAY_TEST_ROOT:-}
@@ -43,6 +43,42 @@ MARKER='# Managed by caddy-network-relay deploy/install.sh'
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'Error: %s\n' "$*" >&2; exit 1; }
+
+# Read the executable's own build metadata; supplied binaries need no Go tools.
+# Preserve reviewed protocol/security forks and reject known vulnerable Go releases.
+check_binary_build() {
+    local binary=$1 info version minor patch replacement secure=0
+    info=$("$binary" build-info) || die 'Cannot read the candidate build metadata.'
+    version=$(awk -F '\t' 'NR == 1 && $1 == "go" { print $2 }' <<< "$info")
+    [[ $version =~ ^go1\.([1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]] || die 'The binary has no supported stable Go build version.'
+    minor=${BASH_REMATCH[1]} patch=${BASH_REMATCH[2]}
+    # Only canonical two-digit values (at most 99) enter numeric comparison;
+    # longer decimal strings are accepted by length without integer conversion.
+    case $minor in
+        26) [[ ${#patch} -gt 2 || ( ${#patch} -eq 2 && $patch -gt 10 ) ]] && secure=1 ;;
+        27) [[ ${#patch} -gt 1 || $patch == [4-9] ]] && secure=1 ;;
+        *) [[ ${#minor} -gt 2 || ( ${#minor} -eq 2 && $minor -gt 27 ) ]] && secure=1 ;;
+    esac
+    ((secure)) || die 'The binary uses an insecure or unsupported Go release; require Go 1.26.11, 1.27.4 or a newer stable 1.x release.'
+    awk -F '\t' '
+        $1 == "build" && $2 ~ /^-tags=/ {
+            value=substr($2, 7); gsub(/^"|"$/, "", value)
+            count=split(value, tags, /[,[:space:]]+/)
+            for (i=1; i<=count; i++) if (tags[i] == "relay_tls9846_v1") found=1
+        }
+        END { exit !found }
+    ' <<< "$info" || die 'Missing reviewed TLS policy build tag: relay_tls9846_v1.'
+    for replacement in github.com/quic-go/quic-go=./third_party/quic-go \
+                       golang.org/x/net=./third_party/x-net \
+                       github.com/go-jose/go-jose/v3=./third_party/go-jose-v3 \
+                       github.com/go-jose/go-jose/v4=./third_party/go-jose-v4; do
+        awk -F '\t' -v module="${replacement%%=*}" -v path="${replacement#*=}" '
+            ($1 == "dep" || $1 == "mod") && $2 == module { pending=1; next }
+            pending { if ($1 == "=>" && $2 == path) found=1; pending=0 }
+            END { exit !found }
+        ' <<< "$info" || die "The binary is missing reviewed source replacement: $replacement."
+    done
+}
 run_apt() { DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=1800 -o Acquire::Retries=3 "$@"; }
 
 SRC=$(cd "$(dirname "$0")/.." && pwd)
@@ -204,16 +240,20 @@ PY
     mv "$CADDY_BUILD_WORK/go.new" "$CADDY_BUILD_WORK/go"
 fi
 
+caddy_run_build caddy_build_in_source "$SRC" python3 "$SRC/deploy/go-tls/prepare.py" \
+        "$(caddy_build_in_source "$SRC" env GOTOOLCHAIN=local GOWORK=off GOOS=linux GOARCH="$GOARCH" "$GO" env GOROOT)" "$CADDY_BUILD_WORK/go-tls" \
+        || die 'Preparing the reviewed Go TLS policy failed.'
 say "==> Building Caddy with the network_relay plugin (takes several minutes on machines with little memory)"
 mkdir -p "$CACHE"
 jobs=(-p "$CADDY_BUILD_JOBS")
-caddy_run_build caddy_build_in_source "$SRC" env GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 GOMAXPROCS="$CADDY_BUILD_JOBS" GOWORK=off GOOS=linux GOARCH="$GOARCH" \
+caddy_run_build caddy_build_in_source "$SRC" env GOROOT="$CADDY_BUILD_WORK/go-tls" GOTOOLCHAIN=local GOFLAGS=-mod=readonly CGO_ENABLED=0 GOMAXPROCS="$CADDY_BUILD_JOBS" GOWORK=off GOOS=linux GOARCH="$GOARCH" \
         GOPATH="$CADDY_BUILD_WORK/gopath" GOMODCACHE="$CADDY_BUILD_WORK/gomod" GOCACHE="$CADDY_BUILD_WORK/gocache" \
-        "$GO" build "${jobs[@]}" -tags http2legacy -trimpath -ldflags '-s -w' -o "$CACHE/caddy.new" ./cmd/caddy || die 'Build failed (the reason is above). If memory is short, add swap first; if it is a network problem, check that proxy.golang.org is reachable.'
+        "$GO" build "${jobs[@]}" -tags http2legacy,relay_tls9846_v1 -trimpath -ldflags '-s -w' -o "$CACHE/caddy.new" ./cmd/caddy || die 'Build failed (the reason is above). If memory is short, add swap first; if it is a network problem, check that proxy.golang.org is reachable.'
 # Read the whole list before searching it: with pipefail, "| grep -q" can fail
 # when grep exits at the match and the writer then dies of SIGPIPE.
 modules=$("$CACHE/caddy.new" list-modules 2>/dev/null || true)
 grep -qx 'http.handlers.network_relay' <<<"$modules" || die 'The built Caddy has no network_relay module.'
+check_binary_build "$CACHE/caddy.new"
 
 if ! getent passwd caddy >/dev/null; then
     say "==> Creating the system user caddy"

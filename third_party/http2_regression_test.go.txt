@@ -521,3 +521,36 @@ func TestRelayResetAfterDirectionalFINKeepsErrorCode(t *testing.T) {
 		}
 	})
 }
+
+type relayCloseWaitScheduler struct {
+	WriteScheduler
+	returned <-chan struct{}
+}
+
+func (s *relayCloseWaitScheduler) CloseStream(id uint32) {
+	s.WriteScheduler.CloseStream(id)
+	// A scheduler may take time to release per-stream bookkeeping. Let the
+	// handler run while that cleanup is still in progress.
+	<-s.returned
+}
+
+func TestRelayCloseWriteCompletionBeforeStreamClose(t *testing.T) {
+	synctestTest(t, func(t testing.TB) {
+		returned := make(chan struct{})
+		result := make(chan error, 1)
+		st := newServerTester(t, func(w http.ResponseWriter, r *http.Request) {
+			err := w.(interface{ CloseWrite() error }).CloseWrite()
+			result <- err
+			close(returned)
+		}, func(s *Server) {
+			s.NewWriteScheduler = func() WriteScheduler { return &relayCloseWaitScheduler{NewRoundRobinWriteScheduler(), returned} }
+		})
+		defer st.Close()
+		st.greet()
+		st.writeHeaders(HeadersFrameParam{StreamID: 1, BlockFragment: st.encodeHeaderRaw(":method", "CONNECT", ":authority", "target:443"), EndHeaders: true, EndStream: true})
+		synctest.Wait()
+		if err := <-result; err != nil {
+			t.Fatalf("successful directional FIN reported %v", err)
+		}
+	})
+}

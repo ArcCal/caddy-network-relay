@@ -67,7 +67,8 @@ network have been certified. No production service has been deployed.
 
 ## Required automated checks
 
-Run from the repository root so local transport replacements are applied:
+Run from the repository root so all four local transport/JOSE replacements are
+applied. Use Go 1.26.11, Go 1.27.4 or a newer stable release:
 
 ```sh
 go vet ./...
@@ -85,7 +86,7 @@ budget is required for the intended production capacity. Go VCS stamping may
 need `GOFLAGS=-buildvcs=false` in managed nested worktrees; this is a build
 environment constraint, not a passing test result.
 
-CI also queries vulnerability records for the upstream transport versions in
+CI also queries vulnerability records for the upstream library versions in
 `third_party/provenance.json`: local replacements lack version information in
 the source scanner. A matching record blocks release until it is evaluated.
 Release builds use the exact commit that passed verification, even if the branch

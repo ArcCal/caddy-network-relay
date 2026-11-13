@@ -45,6 +45,13 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+      - name: Prepare reviewed TLS source
+        run: |
+          echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+          echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+          echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
       - run: go vet ./...
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Check pinned transport vulnerability records
@@ -83,13 +90,39 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+      - name: Prepare reviewed TLS source
+        run: |
+          echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+          echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+          echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
       - name: Build
         env:
           CGO_ENABLED: "0"
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
         run: |
-          go build -tags http2legacy -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
+          go build -tags http2legacy,relay_tls9846_v1 -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
+          info=$(go version -m caddy)
+              awk -F '\t' '
+                  $2 == "build" && $3 ~ /^-tags=/ {
+                      value=substr($3, 7); gsub(/^"|"$/, "", value)
+                      count=split(value, tags, /[,[:space:]]+/)
+                      for (i=1; i<=count; i++) if (tags[i] == "relay_tls9846_v1") found=1
+                  }
+                  END { exit !found }
+              ' <<< "$info" || { echo 'Missing reviewed TLS policy build tag: relay_tls9846_v1.' >&2; exit 1; }
+          for replacement in golang.org/x/net=./third_party/x-net \
+                             github.com/quic-go/quic-go=./third_party/quic-go \
+                             github.com/go-jose/go-jose/v3=./third_party/go-jose-v3 \
+                             github.com/go-jose/go-jose/v4=./third_party/go-jose-v4; do
+            awk -F '\t' -v module="${replacement%%=*}" -v path="${replacement#*=}" '
+              ($2 == "dep" || $2 == "mod") && $3 == module { pending=1; next }
+              pending { if ($2 == "=>" && $3 == path) found=1; pending=0 }
+              END { exit !found }
+            ' <<< "$info" || { echo "missing replacement: $replacement" >&2; exit 1; }
+          done
           name=caddy-network-relay-${{ inputs.tag || github.event.release.tag_name || github.ref_name }}-${{ matrix.os }}-${{ matrix.arch }}
           tar -czf "$name.tar.gz" caddy
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
@@ -122,7 +155,14 @@ jobs:
         with:
           go-version-file: caddy-network-relay-src/go.mod
       # Same overlay as build-linux-servers-on-linux.sh: alternate module
-      # files keep the tracked go.mod and the transport replacements intact.
+      # files keep the tracked go.mod and reviewed local replacements intact.
+      - name: Prepare reviewed TLS source
+        run: |
+          echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+          python3 caddy-network-relay-src/deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+          echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+          echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
       - name: Build
         working-directory: caddy-network-relay-src
         env:
@@ -136,11 +176,21 @@ jobs:
           printf 'package main\n\nimport _ "github.com/caddy-dns/cloudflare"\n' > cmd/caddy/cloudflare_dns_build.go
           go mod edit -modfile build-plugins.mod -replace github.com/caddy-dns/cloudflare=../cloudflare-src
           go get -modfile build-plugins.mod github.com/caddy-dns/cloudflare@v0.0.0
-          go build -modfile build-plugins.mod -mod=readonly -tags http2legacy -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
+          go build -modfile build-plugins.mod -mod=readonly -tags http2legacy,relay_tls9846_v1 -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
           info=$(go version -m caddy)
+              awk -F '\t' '
+                  $2 == "build" && $3 ~ /^-tags=/ {
+                      value=substr($3, 7); gsub(/^"|"$/, "", value)
+                      count=split(value, tags, /[,[:space:]]+/)
+                      for (i=1; i<=count; i++) if (tags[i] == "relay_tls9846_v1") found=1
+                  }
+                  END { exit !found }
+              ' <<< "$info" || { echo 'Missing reviewed TLS policy build tag: relay_tls9846_v1.' >&2; exit 1; }
           for replacement in github.com/caddy-dns/cloudflare=../cloudflare-src \
                              golang.org/x/net=./third_party/x-net \
-                             github.com/quic-go/quic-go=./third_party/quic-go; do
+                             github.com/quic-go/quic-go=./third_party/quic-go \
+                             github.com/go-jose/go-jose/v3=./third_party/go-jose-v3 \
+                             github.com/go-jose/go-jose/v4=./third_party/go-jose-v4; do
             awk -F '\t' -v module="${replacement%%=*}" -v path="${replacement#*=}" '
               ($2 == "dep" || $2 == "mod") && $3 == module { pending=1; next }
               pending { if ($2 == "=>" && $3 == path) found=1; pending=0 }

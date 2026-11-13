@@ -254,3 +254,26 @@ func TestRelayQUICReceiveBudgetAttachedToEveryReceivingStreamKind(t *testing.T) 
 	require.Same(t, budget, uni.frameQueue.receiveBufferBudget)
 	require.Same(t, budget, populateConfig(&Config{ReceiveBufferBudget: budget}).ReceiveBufferBudget)
 }
+
+// Restore this fixture through test_upstream.py and run with -bench RelayQUIC.
+func BenchmarkRelayQUICFrameSorter(b *testing.B) {
+	for _, budgeted := range []bool{false, true} {
+		b.Run(fmt.Sprint("budget=", budgeted), func(b *testing.B) {
+			s := newFrameSorter()
+			if budgeted {
+				s.receiveBufferBudget = &relayQUICReceiveBudget{}
+			}
+			data := make([]byte, 1200)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(data)))
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if err := s.Push(data, protocol.ByteCount(i*len(data)), func() {}); err != nil {
+					b.Fatal(err)
+				}
+				_, _, done := s.Pop()
+				done()
+			}
+		})
+	}
+}

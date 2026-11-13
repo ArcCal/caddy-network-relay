@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import plistlib
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -28,6 +29,17 @@ upstream.INSTALL = SRC / 'deploy/install-debian13-selective.sh'
 upstream.FAKE_CADDY = r'''#!/bin/sh
 echo "caddy $*" >> "$LOG"
 case "$1 $2" in
+  "build-info ")
+    "$REAL_CADDY" build-info | awk -F '\t' -v missing="${FAKE_MISSING_REPLACEMENT:-}" -v version="${FAKE_BUILD_GO_VERSION:-}" -v missing_tag="${FAKE_MISSING_TLS_POLICY:-}" -v tags="${FAKE_BUILD_TAGS:-http2legacy,relay_tls9846_v1}" '
+      BEGIN { OFS="\t" }
+      drop { drop=0; if ($1 == "=>") next }
+      ($1 == "dep" || $1 == "mod") && $2 == missing { drop=1 }
+      $1 == "go" && version != "" { $2=version }
+      $1 == "build" && $2 ~ /^-tags=/ { seen_tag=1; if (missing_tag != "") next; $2="-tags=" tags }
+      { print }
+      END { if (!seen_tag && missing_tag == "") print "build", "-tags=" tags }
+    '
+    exit ;;
   "validate --config") [ -n "$FAKE_INVALID" ] && exit 1; exit 0 ;;
   "network-relay check")
     cat > "$STATE/check-stdin"
@@ -58,7 +70,7 @@ def setUpModule():
     else:
         BUILD_DIRECTORY = tempfile.TemporaryDirectory(prefix='selective-installer-build-')
         BINARY = Path(BUILD_DIRECTORY.name) / 'caddy'
-        subprocess.run([os.environ.get('GO', 'go'), 'build', '-buildvcs=false', '-tags', 'http2legacy',
+        subprocess.run([os.environ.get('GO', 'go'), 'build', '-buildvcs=false', '-tags', 'http2legacy,relay_tls9846_v1',
                         '-o', str(BINARY), './cmd/caddy'], cwd=SRC, check=True)
     upstream.REAL_CADDY = BINARY
 
@@ -116,6 +128,7 @@ class SelectiveInstallTest(unittest.TestCase):
         self.assertNotIn('--password ' + secret, self.calls())
         self.assertEqual((self.state / 'check-stdin').read_text(), secret + '\n')
         self.assertIn('-buildvcs=false', self.calls())
+        self.assertIn('relay_tls9846_v1', self.calls())
         self.assertIn('-tags http2legacy', self.calls())
         self.assertLess(self.calls().index('install -y'), self.calls().index('curl '))
         self.assertLess(self.calls().index('validate --config'), self.calls().index('systemctl restart caddy'))
@@ -123,6 +136,10 @@ class SelectiveInstallTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE(self.path('/etc/caddy').stat().st_mode), 0o755)
         self.assertEqual(stat.S_IMODE(self.path('/etc/caddy/Caddyfile').stat().st_mode), 0o640)
+        unit = self.path('/etc/systemd/system/caddy.service').read_text()
+        self.assertIn('RuntimeDirectory=caddy', unit.splitlines())
+        self.assertIn('RuntimeDirectoryMode=0700', unit)
+        self.assertIn('Environment=CADDY_ADMIN=unix//run/caddy/admin.sock', unit.splitlines())
         config = self.path('/etc/caddy/Caddyfile')
         a = subprocess.run([str(BINARY), 'adapt', '--config', str(config), '--adapter', 'caddyfile'], capture_output=True, text=True)
         self.assertEqual(a.returncode, 0, a.stderr)
@@ -236,6 +253,97 @@ class SelectiveInstallTest(unittest.TestCase):
         self.assertIn('Expected a Linux x86_64 ELF', result.stderr)
         self.assertFalse((self.dir / 'executed').exists())
         self.assert_no_deployment()
+
+    def supplied_cli_fixture(self):
+        # A real ELF launcher preserves the supplied-binary preflight while
+        # forwarding CLI calls to the same real-Caddy wrapper as build tests.
+        source = self.dir / 'supplied-cli.c'
+        source.write_text('#include <stdlib.h>\n#include <unistd.h>\n'
+                          'int main(int argc, char **argv) {\n'
+                          ' (void)argc; const char *cli = getenv("FAKE_CADDY_SCRIPT");\n'
+                          ' if (!cli) return 127; argv[0] = (char *)cli; execv(cli, argv); return 127;\n}\n')
+        binary = self.dir / 'supplied-cli'
+        subprocess.run(['cc', '-o', str(binary), str(source)], check=True)
+        return binary
+
+    def test_missing_jose_fork_is_refused_before_activation(self):
+        for major in ('v3', 'v4'):
+            with self.subTest(major=major):
+                result = self.fresh(ok=False, FAKE_MISSING_REPLACEMENT=f'github.com/go-jose/go-jose/{major}')
+                self.assertIn(f'go-jose/go-jose/{major}', result.stderr)
+                self.assert_no_deployment()
+                self.assertFalse((self.state / 'user-caddy').exists())
+
+    @unittest.skipUnless(shutil.which('cc') and os.uname().machine == 'x86_64',
+                         'supplied ELF fixture needs a native x86_64 C compiler')
+    def test_supplied_binary_missing_jose_fork_is_refused_before_activation(self):
+        binary = self.supplied_cli_fixture()
+        for major in ('v3', 'v4'):
+            with self.subTest(major=major):
+                result = self.fresh('--binary', str(binary), ok=False,
+                                    FAKE_MISSING_REPLACEMENT=f'github.com/go-jose/go-jose/{major}')
+                self.assertIn(f'go-jose/go-jose/{major}', result.stderr)
+                self.assert_no_deployment()
+                self.assertFalse((self.state / 'user-caddy').exists())
+                self.assertNotIn('go build', self.calls())
+
+    def test_insecure_or_unknown_go_build_is_refused_before_activation(self):
+        for version in ('go1.26.10', 'go1.27.2', 'go1.28rc1', 'devel go1.28-snapshot',
+                        'go1.026.11', 'go1.26.011'):
+            with self.subTest(version=version):
+                result = self.fresh(ok=False, FAKE_BUILD_GO_VERSION=version)
+                self.assertIn('Go', result.stderr)
+                self.assert_no_deployment()
+                self.assertFalse((self.state / 'user-caddy').exists())
+
+    @unittest.skipUnless(shutil.which('cc') and os.uname().machine == 'x86_64',
+                         'supplied ELF fixture needs a native x86_64 C compiler')
+    def test_supplied_binary_insecure_go_build_is_refused_before_activation(self):
+        binary = self.supplied_cli_fixture()
+        for version in ('go1.26.10', 'go1.27.2'):
+            with self.subTest(version=version):
+                result = self.fresh('--binary', str(binary), ok=False, FAKE_BUILD_GO_VERSION=version)
+                self.assertIn('Go', result.stderr)
+                self.assert_no_deployment()
+                self.assertFalse((self.state / 'user-caddy').exists())
+                self.assertNotIn('go build', self.calls())
+
+    @unittest.skipUnless(shutil.which('cc') and os.uname().machine == 'x86_64',
+                         'supplied ELF fixture needs a native x86_64 C compiler')
+    def test_valid_supplied_binary_needs_no_go_executable(self):
+        binary = self.supplied_cli_fixture()
+        go = Path(self.env['PATH'].split(':')[0]) / 'go'
+        go.write_text('#!/bin/sh\necho unexpected-go >> "$LOG"\nexit 99\n')
+        go.chmod(0o755)
+        self.fresh('--binary', str(binary), RELAY_TEST_GO='/missing-go')
+        self.assertNotIn('unexpected-go', self.calls())
+        self.assertNotIn('go build', self.calls())
+        self.assertTrue((self.state / 'active-caddy').exists())
+
+    def test_missing_tls_policy_is_refused_before_activation(self):
+        result = self.fresh(ok=False, FAKE_MISSING_TLS_POLICY='1')
+        self.assertIn('TLS policy build tag', result.stderr)
+        self.assert_no_deployment()
+        self.assertFalse((self.state / 'user-caddy').exists())
+
+    @unittest.skipUnless(shutil.which('cc') and os.uname().machine == 'x86_64',
+                         'supplied ELF fixture needs a native x86_64 C compiler')
+    def test_supplied_binary_missing_tls_policy_is_refused_without_go(self):
+        binary = self.supplied_cli_fixture()
+        result = self.fresh('--binary', str(binary), ok=False,
+                            RELAY_TEST_GO='/missing-go', FAKE_MISSING_TLS_POLICY='1')
+        self.assertIn('TLS policy build tag', result.stderr)
+        self.assert_no_deployment()
+        self.assertFalse((self.state / 'user-caddy').exists())
+        self.assertNotIn('go build', self.calls())
+
+    def test_newer_stable_go_build_is_accepted(self):
+        self.fresh(FAKE_BUILD_GO_VERSION='go1.28.0')
+        self.assertTrue((self.state / 'active-caddy').exists())
+
+    def test_large_canonical_go_minor_is_accepted_without_overflow(self):
+        self.fresh(FAKE_BUILD_GO_VERSION='go1.' + '9' * 40 + '.0')
+        self.assertTrue((self.state / 'active-caddy').exists())
 
     def test_all18_local_rules(self):
         rules = self.dir / 'rules'

@@ -1,0 +1,28 @@
+package http3
+
+import (
+	"math"
+	"testing"
+
+	"github.com/quic-go/qpack"
+)
+
+func TestRelayRequestSchemeRequired(t *testing.T) {
+	for _, scheme := range []string{"missing", "", "1https", "https:", "ht tp", "https/", "\u212Ahttps", "\u0130https"} {
+		t.Run(scheme, func(t *testing.T) {
+			headers := []qpack.HeaderField{{Name: ":method", Value: "GET"}, {Name: ":authority", Value: "relay.test"}, {Name: ":path", Value: "/"}}
+			if scheme != "missing" {
+				headers = append(headers, qpack.HeaderField{Name: ":scheme", Value: scheme})
+			}
+			if _, err := requestFromHeaders(decodeFromSlice(headers), math.MaxInt, nil); err == nil {
+				t.Fatal("accepted an ordinary request without a valid scheme")
+			}
+		})
+	}
+	for _, scheme := range []string{"https", "HTTP", "f+1.bar-baz"} {
+		headers := []qpack.HeaderField{{Name: ":method", Value: "GET"}, {Name: ":authority", Value: "relay.test"}, {Name: ":path", Value: "/"}, {Name: ":scheme", Value: scheme}}
+		if _, err := requestFromHeaders(decodeFromSlice(headers), math.MaxInt, nil); err != nil {
+			t.Fatalf("valid scheme %q rejected: %v", scheme, err)
+		}
+	}
+}

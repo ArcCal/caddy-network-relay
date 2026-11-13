@@ -104,6 +104,13 @@ func parseHeaders(decodeFn qpack.DecodeFunc, isRequest bool, sizeLimit int, head
 			case ":scheme":
 				_, isDuplicatePseudoHeader = hdr.Headers[h.Name]
 				hdr.Headers[h.Name] = nil
+				// URI schemes use ASCII ALPHA. Validate before Unicode-aware
+				// case folding could turn a non-ASCII letter into an ASCII one.
+				for i := 0; i < len(h.Value); i++ {
+					if h.Value[i] >= 0x80 {
+						return header{}, fmt.Errorf("invalid :scheme: %q", h.Value)
+					}
+				}
 				// URI schemes are case-insensitive and canonically lowercase, see section 3.1 of RFC 3986
 				hdr.Scheme = strings.ToLower(h.Value)
 			case ":status":
@@ -295,6 +302,14 @@ func requestFromHeaders(decodeFn qpack.DecodeFunc, sizeLimit int, headerFields *
 	if (!isConnect || isExtendedConnected) && !validPath {
 		return nil, fmt.Errorf("invalid :path: %q", hdr.Path)
 	}
+	// RFC 9114 section 4.3.1 requires a valid scheme on every request
+	// except classic CONNECT. RFC 3986 section 3.1 defines its syntax.
+	if (!isConnect || isExtendedConnected) && !validRequestScheme(hdr.Scheme) {
+		return nil, fmt.Errorf("invalid or missing :scheme: %q", hdr.Scheme)
+	}
+	if !httpguts.ValidRequestAuthority(hdr.Authority, hdr.Scheme, isConnect && !isExtendedConnected) {
+		return nil, fmt.Errorf("invalid :authority: %q", hdr.Authority)
+	}
 
 	var u *url.URL
 	var requestURI string
@@ -334,6 +349,19 @@ func requestFromHeaders(decodeFn qpack.DecodeFunc, sizeLimit int, headerFields *
 	}
 	req.Trailer = extractAnnouncedTrailers(req.Header)
 	return req, nil
+}
+
+func validRequestScheme(s string) bool {
+	if len(s) == 0 || s[0] < 'a' || s[0] > 'z' {
+		return false
+	}
+	for i := 1; i < len(s); i++ {
+		c := s[i]
+		if !('a' <= c && c <= 'z' || '0' <= c && c <= '9' || c == '+' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	return true
 }
 
 func validExtendedConnectProtocol(protocol string) bool {

@@ -173,16 +173,21 @@ var hostAddrCache struct {
 
 // interfaceAddrs returns the addresses of this host's network interfaces,
 // read again at most every hostAddrsTTL so that address changes are seen.
-// If they cannot be read, the last list is kept.
+// Failed discovery clears the list so default destination policy fails closed.
 func interfaceAddrs() []netip.Addr {
+	return interfaceAddrsWith(net.InterfaceAddrs)
+}
+
+func interfaceAddrsWith(read func() ([]net.Addr, error)) []netip.Addr {
 	hostAddrCache.Lock()
 	defer hostAddrCache.Unlock()
 	if !hostAddrCache.fetched.IsZero() && time.Since(hostAddrCache.fetched) < hostAddrsTTL {
 		return hostAddrCache.addrs
 	}
 	hostAddrCache.fetched = time.Now()
-	ifaddrs, err := net.InterfaceAddrs()
+	ifaddrs, err := read()
 	if err != nil {
+		hostAddrCache.addrs = nil
 		return hostAddrCache.addrs
 	}
 	var addrs []netip.Addr

@@ -1252,6 +1252,11 @@ func (sc *serverConn) wroteFrame(res frameWriteResult) {
 				sc.resetStream(streamError(st.id, ErrCodeNo))
 			}
 		case stateHalfClosedRemote:
+			// Publish the completed FIN before closeStream wakes the writer.
+			// writeDataFromHandler must observe this result instead of racing
+			// the stream-closed notification after a successful final write.
+			wr.replyToWriter(res.err)
+			wr.done = nil
 			sc.closeStream(st, errHandlerComplete)
 		}
 	} else {
@@ -2181,18 +2186,34 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 		Path:      f.PseudoValue("path"),
 		Protocol:  f.PseudoValue("protocol"),
 	}
+	var hasScheme, hasPath, hasAuthority, hasProtocol bool
+	for _, field := range f.PseudoFields() {
+		switch field.Name {
+		case ":scheme":
+			hasScheme = true
+		case ":path":
+			hasPath = true
+		case ":authority":
+			hasAuthority = true
+		case ":protocol":
+			hasProtocol = true
+		}
+	}
 
 	// extended connect is disabled, so we should not see :protocol
-	if disableExtendedConnectProtocol && rp.Protocol != "" {
+	if disableExtendedConnectProtocol && hasProtocol {
 		return nil, nil, sc.countError("bad_connect", streamError(f.StreamID, ErrCodeProtocol))
 	}
 
 	isConnect := rp.Method == "CONNECT"
 	if isConnect {
-		if rp.Protocol == "" && (rp.Path != "" || rp.Scheme != "" || rp.Authority == "") {
+		if hasProtocol && (!httpguts.ValidHeaderFieldName(rp.Protocol) || rp.Path == "" || rp.Scheme == "" || rp.Authority == "") {
 			return nil, nil, sc.countError("bad_connect", streamError(f.StreamID, ErrCodeProtocol))
 		}
-	} else if rp.Method == "" || rp.Path == "" || (rp.Scheme != "https" && rp.Scheme != "http") {
+		if !hasProtocol && (hasPath || hasScheme || rp.Authority == "") {
+			return nil, nil, sc.countError("bad_connect", streamError(f.StreamID, ErrCodeProtocol))
+		}
+	} else if hasProtocol || rp.Method == "" || rp.Path == "" || (!asciiEqualFold(rp.Scheme, "https") && !asciiEqualFold(rp.Scheme, "http")) {
 		// See 8.1.2.6 Malformed Requests and Responses:
 		//
 		// Malformed requests or responses that are detected
@@ -2212,11 +2233,20 @@ func (sc *serverConn) newWriterAndRequest(st *stream, f *MetaHeadersFrame) (*res
 		header.Add(sc.canonicalHeader(hf.Name), hf.Value)
 	}
 	if rp.Authority == "" {
+		if hasAuthority {
+			return nil, nil, sc.countError("bad_authority", streamError(f.StreamID, ErrCodeProtocol))
+		}
 		rp.Authority = header.Get("Host")
 	}
 	if rp.Protocol != "" {
 		header.Set(":protocol", rp.Protocol)
 	}
+	if !httpguts.ValidRequestAuthority(rp.Authority, rp.Scheme, isConnect && rp.Protocol == "") {
+		return nil, nil, sc.countError("bad_authority", streamError(f.StreamID, ErrCodeProtocol))
+	}
+	// Validate raw ASCII syntax before case folding, then preserve the
+	// canonical scheme for TLS state and extended CONNECT consumers.
+	rp.Scheme, _ = asciiToLower(rp.Scheme)
 
 	rw, req, err := sc.newWriterAndRequestNoBody(st, rp)
 	if err != nil {

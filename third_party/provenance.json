@@ -124,7 +124,7 @@
         {
           "path": "frame_sorter.go",
           "upstream_sha256": "6f22ebac07d86a2666004dc1d000c32ab0edbf435348476549bf960b77ed34df",
-          "local_sha256": "baf484c5c3a85a97a81f2d1c4679343ef4f940f91eeaf0aa21beaaa19227e9d1",
+          "local_sha256": "8dd30f8812078995c92f558e7c48026e4d9d0817fd5b2d550798977e6aa44125",
           "modified": true
         },
         {
@@ -196,7 +196,7 @@
         {
           "path": "http3/headers.go",
           "upstream_sha256": "e8205242b3b2bc935918f00209540a1d9091749fa4c82c767820c9a75df8e353",
-          "local_sha256": "9eee19f8ae5956ed4d765195dcf196746fa38d72ac7c40680c3b1b98ab35c8f9",
+          "local_sha256": "abb80ed7b95d57072c8c8d7b392b0870ad956d92d7f624f4585931585869ccb8",
           "modified": true
         },
         {
@@ -1507,8 +1507,8 @@
         {
           "path": "http/httpguts/httplex.go",
           "upstream_sha256": "8cfd5819dc821d45f82fde10afff4b2e652535b0091e0559fc8ad7766051a2c2",
-          "local_sha256": "8cfd5819dc821d45f82fde10afff4b2e652535b0091e0559fc8ad7766051a2c2",
-          "modified": false
+          "local_sha256": "9295285f9a768bf7263db0d47d512c815185b3cc2203d25a80fbcfaa9b41b9c8",
+          "modified": true
         },
         {
           "path": "http/httpproxy/proxy.go",
@@ -1663,7 +1663,7 @@
         {
           "path": "http2/server.go",
           "upstream_sha256": "cf07329cd7d5d95909a5404f3b29f10f4252189012b98ad4c8fdbfca384cb9d1",
-          "local_sha256": "9978b315dd4274800e982b25ec94037f721a79cd4576e86439f540bc901e43d1",
+          "local_sha256": "97857f53550f80e7e8b00977a646b7ecc3dab9c541ee768c1b9429896f15d591",
           "modified": true
         },
         {
@@ -4490,7 +4490,560 @@
         "GO-2026-6860": "fixed: x/net v0.62.0 text-node coalescing backported to html/parse.go",
         "GO-2026-6866": "fixed: x/net v0.62.0 raw-text ancestor namespace check backported to html/render.go"
       },
-      "selected_version": "v0.60.0"
+      "selected_version": "v0.62.0"
+    },
+    {
+      "module": "github.com/go-jose/go-jose/v3",
+      "directory": "go-jose-v3",
+      "version": "v3.0.5",
+      "go_sum": [
+        "github.com/go-jose/go-jose/v3 v3.0.5 h1:BLLJWbC4nMZOfuPVxoZIxeYsn6Nl2r1fITaJ78UQlVQ="
+      ],
+      "files": [
+        {
+          "path": "LICENSE",
+          "upstream_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "local_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "modified": false
+        },
+        {
+          "path": "asymmetric.go",
+          "upstream_sha256": "712a24fce3600ea60af382a29a9485b9da11c4847ff9a37093df45fab6ae6976",
+          "local_sha256": "712a24fce3600ea60af382a29a9485b9da11c4847ff9a37093df45fab6ae6976",
+          "modified": false
+        },
+        {
+          "path": "cipher/cbc_hmac.go",
+          "upstream_sha256": "5bdd0358dee976cb1350eae8b29e130019a98924b8d1a2527cbc30200b9aee6a",
+          "local_sha256": "4beee7b631b54f50a81ddd4783cb89b34ac91397dd3e059b5c5fb24be849bea0",
+          "modified": true
+        },
+        {
+          "path": "cipher/concat_kdf.go",
+          "upstream_sha256": "84608a8c5a5f7fde7ec993a5c3fcecc5a0c7e1781b11c651c9aecd83c424b20a",
+          "local_sha256": "84608a8c5a5f7fde7ec993a5c3fcecc5a0c7e1781b11c651c9aecd83c424b20a",
+          "modified": false
+        },
+        {
+          "path": "cipher/ecdh_es.go",
+          "upstream_sha256": "14f403591026951c84d3e11a2a328c2785d393e0372a4bbf59a4ffff383582b5",
+          "local_sha256": "14f403591026951c84d3e11a2a328c2785d393e0372a4bbf59a4ffff383582b5",
+          "modified": false
+        },
+        {
+          "path": "cipher/key_wrap.go",
+          "upstream_sha256": "10468f9aabd1604255cb71564047fd23e9cb1f9317e2f145c1f6f11a6de81af8",
+          "local_sha256": "10468f9aabd1604255cb71564047fd23e9cb1f9317e2f145c1f6f11a6de81af8",
+          "modified": false
+        },
+        {
+          "path": "crypter.go",
+          "upstream_sha256": "7395f1f05012f0619395dcfc6ae7ac60e349381dc80f99ba23866eb5cf1af11d",
+          "local_sha256": "7395f1f05012f0619395dcfc6ae7ac60e349381dc80f99ba23866eb5cf1af11d",
+          "modified": false
+        },
+        {
+          "path": "cryptosigner/cryptosigner.go",
+          "upstream_sha256": "143ad295ca0f4325cf6e31dade7dd7b9d12b783729b6d4cdf270cbc6f404c3cf",
+          "local_sha256": "143ad295ca0f4325cf6e31dade7dd7b9d12b783729b6d4cdf270cbc6f404c3cf",
+          "modified": false
+        },
+        {
+          "path": "doc.go",
+          "upstream_sha256": "9ca9a84359e3c263e96ce44d34ecf34a0d875fe37e4f88d98ac7bcd04aaf10b6",
+          "local_sha256": "9ca9a84359e3c263e96ce44d34ecf34a0d875fe37e4f88d98ac7bcd04aaf10b6",
+          "modified": false
+        },
+        {
+          "path": "encoding.go",
+          "upstream_sha256": "02a6f9e68de0e988d9d1ec025ee88f9762c632363f8cf6923813a1337e3366aa",
+          "local_sha256": "02a6f9e68de0e988d9d1ec025ee88f9762c632363f8cf6923813a1337e3366aa",
+          "modified": false
+        },
+        {
+          "path": "go.mod",
+          "upstream_sha256": "8a138c7825a1375edbc6cce6037b38d10bb8db7ebddc7b886e22a9460501aca3",
+          "local_sha256": "8a138c7825a1375edbc6cce6037b38d10bb8db7ebddc7b886e22a9460501aca3",
+          "modified": false
+        },
+        {
+          "path": "go.sum",
+          "upstream_sha256": "0a999edb648b3e8ac082d4bf3a5e51d14d57881a83d85fc9c7803a428336b90b",
+          "local_sha256": "0a999edb648b3e8ac082d4bf3a5e51d14d57881a83d85fc9c7803a428336b90b",
+          "modified": false
+        },
+        {
+          "path": "json/LICENSE",
+          "upstream_sha256": "dd26a7abddd02e2d0aba97805b31f248ef7835d9e10da289b22e3b8ab78b324d",
+          "local_sha256": "dd26a7abddd02e2d0aba97805b31f248ef7835d9e10da289b22e3b8ab78b324d",
+          "modified": false
+        },
+        {
+          "path": "json/decode.go",
+          "upstream_sha256": "2b8768b473ecf66b8e2319e912a9370d433ecc01c75c33aeaaf532d6912b1fc4",
+          "local_sha256": "6db0e26d94415f912dffe7bdb178cefee181748aef625481f90a459b99fc398b",
+          "modified": true
+        },
+        {
+          "path": "json/encode.go",
+          "upstream_sha256": "3c013eb9024bd574fe571cc33bc1a72ba96ed67ecddb3a42fad0bf32eaf247ac",
+          "local_sha256": "e340df09419a397f12649794748a7d7230a1cef3f2d1e2389942e1d92559f32b",
+          "modified": true
+        },
+        {
+          "path": "json/indent.go",
+          "upstream_sha256": "fe95485e51867d61a5b6096bb8288fc6af2ee057f700688354b04dc71d44f5de",
+          "local_sha256": "fe95485e51867d61a5b6096bb8288fc6af2ee057f700688354b04dc71d44f5de",
+          "modified": false
+        },
+        {
+          "path": "json/scanner.go",
+          "upstream_sha256": "0a3842b88d6007dee4259f87a64607ea348e651c0ba66f0f28e273fd424f2866",
+          "local_sha256": "9bb2d25488976aa88c0284b895394d5b1d52b38500d619d17fd50d36078f6eed",
+          "modified": true
+        },
+        {
+          "path": "json/stream.go",
+          "upstream_sha256": "0b64d2ef9370826cd2aaa348a39b59af4f4c3a7a7df7997a0935ea330e55a395",
+          "local_sha256": "0b64d2ef9370826cd2aaa348a39b59af4f4c3a7a7df7997a0935ea330e55a395",
+          "modified": false
+        },
+        {
+          "path": "json/tags.go",
+          "upstream_sha256": "2fa51c15e906895f21a9055bab4571573a68091b795335a814f0d4ba87403658",
+          "local_sha256": "2fa51c15e906895f21a9055bab4571573a68091b795335a814f0d4ba87403658",
+          "modified": false
+        },
+        {
+          "path": "jwe.go",
+          "upstream_sha256": "904beb59428b5bd472debed7bc9c799b7cffeb426fc4395ee78973b88597f8a8",
+          "local_sha256": "23795271494cceba63f4a315cb3b6cc1f22f4773676e7066a84a1194ac14f04c",
+          "modified": true
+        },
+        {
+          "path": "jwk.go",
+          "upstream_sha256": "79f510a4b97fa2e34ec37932cab57e64dfdc9fa6c314654d1ccc2dd93898a532",
+          "local_sha256": "acfcb08305c0a6235aabed36f9838d81a4d05dd03ce70d17754ddee8fe983af8",
+          "modified": true
+        },
+        {
+          "path": "jws.go",
+          "upstream_sha256": "6cc24876cea42cf11503f87ac68456d9169d5e6fec757efaf9e4fd46bc74fb0b",
+          "local_sha256": "47c82fbe45ef4febbbe29e746dd7547c680418caee96148a651f23dcbb97b7ed",
+          "modified": true
+        },
+        {
+          "path": "jwt/builder.go",
+          "upstream_sha256": "0a214aff7fa3efb30b5b64f6165d25ee686d081b48c2adffdd0acb06da413e85",
+          "local_sha256": "0a214aff7fa3efb30b5b64f6165d25ee686d081b48c2adffdd0acb06da413e85",
+          "modified": false
+        },
+        {
+          "path": "jwt/claims.go",
+          "upstream_sha256": "6fac52914eaa78b327cade7a9d273d08b9f69d76a5a16ae168769ba71c32d9e7",
+          "local_sha256": "6fac52914eaa78b327cade7a9d273d08b9f69d76a5a16ae168769ba71c32d9e7",
+          "modified": false
+        },
+        {
+          "path": "jwt/doc.go",
+          "upstream_sha256": "9af8857427e52d3156a15ddfb06e3f716a917f69545f577e3c26fd0f06e0fe1b",
+          "local_sha256": "9af8857427e52d3156a15ddfb06e3f716a917f69545f577e3c26fd0f06e0fe1b",
+          "modified": false
+        },
+        {
+          "path": "jwt/errors.go",
+          "upstream_sha256": "70d2eeb241106fb449aa5ec10b2a8febd0628b27b9ec30165d11cc74a5aadbcc",
+          "local_sha256": "70d2eeb241106fb449aa5ec10b2a8febd0628b27b9ec30165d11cc74a5aadbcc",
+          "modified": false
+        },
+        {
+          "path": "jwt/jwt.go",
+          "upstream_sha256": "31060827a46e11767fa0cd9f9bc8f70a712553b177fecc0a521b54884c8733c8",
+          "local_sha256": "31060827a46e11767fa0cd9f9bc8f70a712553b177fecc0a521b54884c8733c8",
+          "modified": false
+        },
+        {
+          "path": "jwt/validation.go",
+          "upstream_sha256": "795808acfd20aed2fb30909b3502ac75d98552b1a8826080e9ecb5d4911792ed",
+          "local_sha256": "795808acfd20aed2fb30909b3502ac75d98552b1a8826080e9ecb5d4911792ed",
+          "modified": false
+        },
+        {
+          "path": "opaque.go",
+          "upstream_sha256": "257ee0dc596476a56a720078bcf1ada5eafecdb1d1442dd927d67aba86f0da88",
+          "local_sha256": "257ee0dc596476a56a720078bcf1ada5eafecdb1d1442dd927d67aba86f0da88",
+          "modified": false
+        },
+        {
+          "path": "shared.go",
+          "upstream_sha256": "3802ca5b8f811f72d33eb662cbbdf53d3b7aa4bcbb6b6c6ddd7695a54e3a3d40",
+          "local_sha256": "a87f4cb0c455b078d353da5f8c304aecf368e455d514e86c9e1c0d815133a29e",
+          "modified": true
+        },
+        {
+          "path": "signing.go",
+          "upstream_sha256": "cf6dcd3750dce8f3050bd03fc422774887f95b55b4180732fd8edb70c2248eb5",
+          "local_sha256": "cf6dcd3750dce8f3050bd03fc422774887f95b55b4180732fd8edb70c2248eb5",
+          "modified": false
+        },
+        {
+          "path": "symmetric.go",
+          "upstream_sha256": "4595e9de6d2f74e3128b142a71dd2cc8675edcf46662cba38a438332a373b969",
+          "local_sha256": "4595e9de6d2f74e3128b142a71dd2cc8675edcf46662cba38a438332a373b969",
+          "modified": false
+        }
+      ],
+      "reviewed_advisories": {
+        "GHSA-p9j4-2j95-j4rv": "fixed: reviewed upstream security backport; see go-jose-v3.md and the pinned regression fixtures",
+        "GHSA-27pc-rm86-68pq": "fixed: reviewed upstream security backport; see go-jose-v3.md and the pinned regression fixtures",
+        "GHSA-r39w-98wm-9pp6": "fixed: reviewed upstream security backport; see go-jose-v3.md and the pinned regression fixtures",
+        "GHSA-c67m-wr4h-2ccg": "fixed: reviewed upstream security backport; see go-jose-v3.md and the pinned regression fixtures",
+        "GHSA-v6h2-qj3f-2h6v": "fixed: reviewed upstream security backport; see go-jose-v3.md and the pinned regression fixtures",
+        "GHSA-4w3g-jfj2-cw2q": "fixed: reviewed upstream security backport; see go-jose-v3.md and the pinned regression fixtures",
+        "GHSA-vvm8-gf78-28g4": "fixed: reviewed upstream security backport; see go-jose-v3.md and the pinned regression fixtures",
+        "GHSA-mgcc-cww5-fp2q": "fixed: reviewed upstream security backport; see go-jose-v3.md and the pinned regression fixtures"
+      },
+      "test_fixtures": [
+        {
+          "source": "jose_v3_upstream_security_test.go.txt",
+          "target": "relay_upstream_security_test.go",
+          "sha256": "bde8902501e403c96c70f5537fe7707a8c58a6f887bada56f0ae347824ea8a47"
+        },
+        {
+          "source": "jose_v3_security_test.go.txt",
+          "target": "relay_security_test.go",
+          "sha256": "6693f77b1874baa1eddec07d3254089cc476c9739c4c6ca4725a5440bd0eadae"
+        },
+        {
+          "source": "jose_v3_cipher_security_test.go.txt",
+          "target": "cipher/relay_security_test.go",
+          "sha256": "ea541cdf0e290db0a3e84f8aa5efa092e139e978a1b12908f61bb04b5f33984c"
+        },
+        {
+          "source": "jose_v3_json_security_test.go.txt",
+          "target": "json/relay_security_test.go",
+          "sha256": "2b93d2b70d1341fb538212e9c55fbdc2632da98e7ce14df4d4b08eb19fdb778e"
+        },
+        {
+          "source": "jose_v3_jwt_security_test.go.txt",
+          "target": "jwt/relay_security_test.go",
+          "sha256": "1d84e55fc7ea696a265f516ddc836b574b238bc0868a61bc224fb33419f31379"
+        }
+      ]
+    },
+    {
+      "module": "github.com/go-jose/go-jose/v4",
+      "directory": "go-jose-v4",
+      "version": "v4.1.9",
+      "go_sum": [
+        "github.com/go-jose/go-jose/v4 v4.1.9 h1:pKfeQkig1NmgK4hJrZYXLEYURXfoJB61Larw0uIW4gY="
+      ],
+      "files": [
+        {
+          "path": "LICENSE",
+          "upstream_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "local_sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "modified": false
+        },
+        {
+          "path": "asymmetric.go",
+          "upstream_sha256": "38dec175acae55c72d9e8e7245ad1036d9fe0f8cb66e930b48ddb0945c0a9bcd",
+          "local_sha256": "38dec175acae55c72d9e8e7245ad1036d9fe0f8cb66e930b48ddb0945c0a9bcd",
+          "modified": false
+        },
+        {
+          "path": "cipher/cbc_hmac.go",
+          "upstream_sha256": "4beee7b631b54f50a81ddd4783cb89b34ac91397dd3e059b5c5fb24be849bea0",
+          "local_sha256": "4beee7b631b54f50a81ddd4783cb89b34ac91397dd3e059b5c5fb24be849bea0",
+          "modified": false
+        },
+        {
+          "path": "cipher/concat_kdf.go",
+          "upstream_sha256": "84608a8c5a5f7fde7ec993a5c3fcecc5a0c7e1781b11c651c9aecd83c424b20a",
+          "local_sha256": "84608a8c5a5f7fde7ec993a5c3fcecc5a0c7e1781b11c651c9aecd83c424b20a",
+          "modified": false
+        },
+        {
+          "path": "cipher/ecdh_es.go",
+          "upstream_sha256": "14f403591026951c84d3e11a2a328c2785d393e0372a4bbf59a4ffff383582b5",
+          "local_sha256": "14f403591026951c84d3e11a2a328c2785d393e0372a4bbf59a4ffff383582b5",
+          "modified": false
+        },
+        {
+          "path": "cipher/key_wrap.go",
+          "upstream_sha256": "10468f9aabd1604255cb71564047fd23e9cb1f9317e2f145c1f6f11a6de81af8",
+          "local_sha256": "10468f9aabd1604255cb71564047fd23e9cb1f9317e2f145c1f6f11a6de81af8",
+          "modified": false
+        },
+        {
+          "path": "crypter.go",
+          "upstream_sha256": "e5f99dd8ec6f1bed8b8ffc5c1eccada512b21c3996d7ac2c7afdeebc30867386",
+          "local_sha256": "e5f99dd8ec6f1bed8b8ffc5c1eccada512b21c3996d7ac2c7afdeebc30867386",
+          "modified": false
+        },
+        {
+          "path": "cryptosigner/cryptosigner.go",
+          "upstream_sha256": "413759c79ffcddb018fee8f1d93885eafa4aaf5d722b9c51faf3877863f7075c",
+          "local_sha256": "413759c79ffcddb018fee8f1d93885eafa4aaf5d722b9c51faf3877863f7075c",
+          "modified": false
+        },
+        {
+          "path": "cryptosigner/cryptosigner_mldsa.go",
+          "upstream_sha256": "d6358416095fa172fe74c2d898a7225c1bda8d1f95500cf278801cef94e07f11",
+          "local_sha256": "d6358416095fa172fe74c2d898a7225c1bda8d1f95500cf278801cef94e07f11",
+          "modified": false
+        },
+        {
+          "path": "cryptosigner/cryptosigner_mldsa_stub.go",
+          "upstream_sha256": "ec5ed62b2397a71d9441cc82f660d5e5291ec2771c932bb7a582c57f908a2b36",
+          "local_sha256": "ec5ed62b2397a71d9441cc82f660d5e5291ec2771c932bb7a582c57f908a2b36",
+          "modified": false
+        },
+        {
+          "path": "doc.go",
+          "upstream_sha256": "645cd19d5b605b60c8e73e5ba8941ebfb67cdf69aea84fc6b2958ef9807aeecb",
+          "local_sha256": "645cd19d5b605b60c8e73e5ba8941ebfb67cdf69aea84fc6b2958ef9807aeecb",
+          "modified": false
+        },
+        {
+          "path": "encoding.go",
+          "upstream_sha256": "be63fc28f66bb80d88cf9d654ab8fbeceb6abfae3b6175f873b44e1f8cbde3ae",
+          "local_sha256": "be63fc28f66bb80d88cf9d654ab8fbeceb6abfae3b6175f873b44e1f8cbde3ae",
+          "modified": false
+        },
+        {
+          "path": "go.mod",
+          "upstream_sha256": "e069e6002d29495b8c2dc6cf0d3b56a075ec5be7abb6c2eb1a1c0845cb66b8b3",
+          "local_sha256": "e069e6002d29495b8c2dc6cf0d3b56a075ec5be7abb6c2eb1a1c0845cb66b8b3",
+          "modified": false
+        },
+        {
+          "path": "go.sum",
+          "upstream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "local_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "modified": false
+        },
+        {
+          "path": "jose-util/crypto.go",
+          "upstream_sha256": "c519180a84418021bc117b50be0e862e9a0bb5c5988afe046f68cf7e238344cb",
+          "local_sha256": "c519180a84418021bc117b50be0e862e9a0bb5c5988afe046f68cf7e238344cb",
+          "modified": false
+        },
+        {
+          "path": "jose-util/format.go",
+          "upstream_sha256": "a49bdc8336af114d64ecb362fc1ad855b85fc5236bf5e6c0acf16b1eb01f693e",
+          "local_sha256": "a49bdc8336af114d64ecb362fc1ad855b85fc5236bf5e6c0acf16b1eb01f693e",
+          "modified": false
+        },
+        {
+          "path": "jose-util/generate.go",
+          "upstream_sha256": "6bd6ca0a23db6f0afedd1beed2e11fa73487e7230fd80d16ac7509c1d5f55844",
+          "local_sha256": "6bd6ca0a23db6f0afedd1beed2e11fa73487e7230fd80d16ac7509c1d5f55844",
+          "modified": false
+        },
+        {
+          "path": "jose-util/generator/encoding.go",
+          "upstream_sha256": "63642575d376e2faf0a4e028170376aa5e04104ec8fd59a83385fa7f132992ad",
+          "local_sha256": "63642575d376e2faf0a4e028170376aa5e04104ec8fd59a83385fa7f132992ad",
+          "modified": false
+        },
+        {
+          "path": "jose-util/generator/generate.go",
+          "upstream_sha256": "4583feca84934d5768f4400de47c1c314157136bb75de6d601d7e145cf847de4",
+          "local_sha256": "4583feca84934d5768f4400de47c1c314157136bb75de6d601d7e145cf847de4",
+          "modified": false
+        },
+        {
+          "path": "jose-util/generator/generate_mldsa.go",
+          "upstream_sha256": "dec0f7c6e114fc4745e4a466605b53ed60d86681856809e3fe1371efabe6089c",
+          "local_sha256": "dec0f7c6e114fc4745e4a466605b53ed60d86681856809e3fe1371efabe6089c",
+          "modified": false
+        },
+        {
+          "path": "jose-util/generator/generate_mldsa_stub.go",
+          "upstream_sha256": "95c7c62a5b97aa3a009e6446da20eb67da91f65dde0a40c71a45ffe4ba1be073",
+          "local_sha256": "95c7c62a5b97aa3a009e6446da20eb67da91f65dde0a40c71a45ffe4ba1be073",
+          "modified": false
+        },
+        {
+          "path": "jose-util/generator/utils.go",
+          "upstream_sha256": "3e9ea05c60b3c2261735c83f69068120fe171b9bc9ae5524f8db57968c1a122c",
+          "local_sha256": "3e9ea05c60b3c2261735c83f69068120fe171b9bc9ae5524f8db57968c1a122c",
+          "modified": false
+        },
+        {
+          "path": "jose-util/io.go",
+          "upstream_sha256": "775e6ab4c47d6effad70c400cb7f143fa08b58cc9e3b565556a507098d87b470",
+          "local_sha256": "775e6ab4c47d6effad70c400cb7f143fa08b58cc9e3b565556a507098d87b470",
+          "modified": false
+        },
+        {
+          "path": "jose-util/main.go",
+          "upstream_sha256": "1f98b47b80d8af96e9240829b165ac84c8212f437fd346721d079099edcff659",
+          "local_sha256": "1f98b47b80d8af96e9240829b165ac84c8212f437fd346721d079099edcff659",
+          "modified": false
+        },
+        {
+          "path": "json/LICENSE",
+          "upstream_sha256": "dd26a7abddd02e2d0aba97805b31f248ef7835d9e10da289b22e3b8ab78b324d",
+          "local_sha256": "dd26a7abddd02e2d0aba97805b31f248ef7835d9e10da289b22e3b8ab78b324d",
+          "modified": false
+        },
+        {
+          "path": "json/decode.go",
+          "upstream_sha256": "6db0e26d94415f912dffe7bdb178cefee181748aef625481f90a459b99fc398b",
+          "local_sha256": "6db0e26d94415f912dffe7bdb178cefee181748aef625481f90a459b99fc398b",
+          "modified": false
+        },
+        {
+          "path": "json/encode.go",
+          "upstream_sha256": "f42e1e250647218b399342fd566b7eb8fb14842489f3c1572e427e0ea4da27a1",
+          "local_sha256": "f42e1e250647218b399342fd566b7eb8fb14842489f3c1572e427e0ea4da27a1",
+          "modified": false
+        },
+        {
+          "path": "json/indent.go",
+          "upstream_sha256": "fe95485e51867d61a5b6096bb8288fc6af2ee057f700688354b04dc71d44f5de",
+          "local_sha256": "fe95485e51867d61a5b6096bb8288fc6af2ee057f700688354b04dc71d44f5de",
+          "modified": false
+        },
+        {
+          "path": "json/scanner.go",
+          "upstream_sha256": "9bb2d25488976aa88c0284b895394d5b1d52b38500d619d17fd50d36078f6eed",
+          "local_sha256": "9bb2d25488976aa88c0284b895394d5b1d52b38500d619d17fd50d36078f6eed",
+          "modified": false
+        },
+        {
+          "path": "json/stream.go",
+          "upstream_sha256": "0b64d2ef9370826cd2aaa348a39b59af4f4c3a7a7df7997a0935ea330e55a395",
+          "local_sha256": "0b64d2ef9370826cd2aaa348a39b59af4f4c3a7a7df7997a0935ea330e55a395",
+          "modified": false
+        },
+        {
+          "path": "json/tags.go",
+          "upstream_sha256": "2fa51c15e906895f21a9055bab4571573a68091b795335a814f0d4ba87403658",
+          "local_sha256": "2fa51c15e906895f21a9055bab4571573a68091b795335a814f0d4ba87403658",
+          "modified": false
+        },
+        {
+          "path": "jwe.go",
+          "upstream_sha256": "b29fdd2d559a1d0c0dc1633d807fef3ae338029e3416b882b477f05a55aaa42b",
+          "local_sha256": "1d09e9b882b1b4d535b6a0ea72b38212ed1fc343dcbff5a85a6b819c2db50d16",
+          "modified": true
+        },
+        {
+          "path": "jwk.go",
+          "upstream_sha256": "380cca80501d67f9b491d8d6c3b216217821f53c82451e6e32cd6dce58f9e9cd",
+          "local_sha256": "380cca80501d67f9b491d8d6c3b216217821f53c82451e6e32cd6dce58f9e9cd",
+          "modified": false
+        },
+        {
+          "path": "jws.go",
+          "upstream_sha256": "8a13bb504190d0627649552146509aa00acc48177cae99a3bc0ea2acd4edbc8f",
+          "local_sha256": "f45ab95b7a97f6dd2725dc143a894e8c40280a7254ba517867f903daa91e881f",
+          "modified": true
+        },
+        {
+          "path": "jwt/builder.go",
+          "upstream_sha256": "82dc3a191d9b3911c9a339ea1f81f28ea1b38369932a3b2bda1f28af7b634f82",
+          "local_sha256": "82dc3a191d9b3911c9a339ea1f81f28ea1b38369932a3b2bda1f28af7b634f82",
+          "modified": false
+        },
+        {
+          "path": "jwt/claims.go",
+          "upstream_sha256": "9b127a2307adcd11ca6a9474bdcf934660a3a4428823d70028c342bbaef6e93f",
+          "local_sha256": "9b127a2307adcd11ca6a9474bdcf934660a3a4428823d70028c342bbaef6e93f",
+          "modified": false
+        },
+        {
+          "path": "jwt/doc.go",
+          "upstream_sha256": "9af8857427e52d3156a15ddfb06e3f716a917f69545f577e3c26fd0f06e0fe1b",
+          "local_sha256": "9af8857427e52d3156a15ddfb06e3f716a917f69545f577e3c26fd0f06e0fe1b",
+          "modified": false
+        },
+        {
+          "path": "jwt/errors.go",
+          "upstream_sha256": "32a8841432d06dffae4f7f0e0bd8d64db7a396c8b64cf0258c8b709e65a7fb1f",
+          "local_sha256": "32a8841432d06dffae4f7f0e0bd8d64db7a396c8b64cf0258c8b709e65a7fb1f",
+          "modified": false
+        },
+        {
+          "path": "jwt/jwt.go",
+          "upstream_sha256": "f5fd5942f5f1dc448a17d53c90555758ce8f5de3ac06ddee778ba3b595c78de5",
+          "local_sha256": "f5fd5942f5f1dc448a17d53c90555758ce8f5de3ac06ddee778ba3b595c78de5",
+          "modified": false
+        },
+        {
+          "path": "jwt/validation.go",
+          "upstream_sha256": "23937ccdd2a32a9cddfa6c1a6ac9a23574eb2e1a43e08980d4e5a19f5edb8935",
+          "local_sha256": "23937ccdd2a32a9cddfa6c1a6ac9a23574eb2e1a43e08980d4e5a19f5edb8935",
+          "modified": false
+        },
+        {
+          "path": "mldsa.go",
+          "upstream_sha256": "503cf131a1456fa9ed9614d5a76861bc9446580693cd87422085b506b21dddaf",
+          "local_sha256": "503cf131a1456fa9ed9614d5a76861bc9446580693cd87422085b506b21dddaf",
+          "modified": false
+        },
+        {
+          "path": "mldsa_stub.go",
+          "upstream_sha256": "256b1876f4e4ea90325b58fdd79765f9394774463b72b7dda0f5a03b7b60260d",
+          "local_sha256": "256b1876f4e4ea90325b58fdd79765f9394774463b72b7dda0f5a03b7b60260d",
+          "modified": false
+        },
+        {
+          "path": "opaque.go",
+          "upstream_sha256": "e7862e600245051b503595136d339e492b1e789fdb057b21fa4d6d85a885aa3a",
+          "local_sha256": "e7862e600245051b503595136d339e492b1e789fdb057b21fa4d6d85a885aa3a",
+          "modified": false
+        },
+        {
+          "path": "shared.go",
+          "upstream_sha256": "896c3f67f3acaa1dbe81062c5fbf532243db6329db31306191f5c41a11cd3116",
+          "local_sha256": "5074243ec03af54f84d202da8f285736a85f6ad22d80bbff5f325fa74422ea0e",
+          "modified": true
+        },
+        {
+          "path": "signing.go",
+          "upstream_sha256": "a7dcad5687751917cb0f95a76be44303ff5733c9556f11272e415858b2366b29",
+          "local_sha256": "a7dcad5687751917cb0f95a76be44303ff5733c9556f11272e415858b2366b29",
+          "modified": false
+        },
+        {
+          "path": "symmetric.go",
+          "upstream_sha256": "082a23ba6e711f003092a43fa53bab47c744fddfcace6888ddf8a01f85cbd00d",
+          "local_sha256": "082a23ba6e711f003092a43fa53bab47c744fddfcace6888ddf8a01f85cbd00d",
+          "modified": false
+        },
+        {
+          "path": "testutils/assert/equal.go",
+          "upstream_sha256": "0046a83f39b3e58c90b564db4dc8f8d8c01724a43ea8ac06b2cbd08aa8c48f40",
+          "local_sha256": "0046a83f39b3e58c90b564db4dc8f8d8c01724a43ea8ac06b2cbd08aa8c48f40",
+          "modified": false
+        },
+        {
+          "path": "testutils/require/equal.go",
+          "upstream_sha256": "d6783558756e9461ab60d9dfa0733967fcf1697e821caf63d2a079bc45cc981d",
+          "local_sha256": "d6783558756e9461ab60d9dfa0733967fcf1697e821caf63d2a079bc45cc981d",
+          "modified": false
+        }
+      ],
+      "test_fixtures": [
+        {
+          "source": "jose_v4_header_security_test.go.txt",
+          "target": "relay_header_security_test.go",
+          "sha256": "0c05b2dd69b61b5c6c838bae1192192596ba19546cc842064eb79965c1b9c7db"
+        },
+        {
+          "source": "jose_v4_jwe_test.go.txt",
+          "target": "jwe_test.go",
+          "sha256": "0c452e92c9e383393fae93f07188ec90dd99b2967376c9d6c6d438492a877f3b",
+          "upstream_sha256": "1f2bd9523ea7e5b90ccfc5a9a96610c6f44cbaf7a581ba7212a2480d1e748d82"
+        }
+      ],
+      "standards_changes": [
+        "Reject cross-location duplicate JWS/JWE header parameter names before merging, as RFC 7515 section 5.2/7.2.1 and RFC 7516 section 5.2/7.2.1 require."
+      ]
     }
   ]
 }

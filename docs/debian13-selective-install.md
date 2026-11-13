@@ -56,6 +56,13 @@ plaintext password file. No existing Caddy installation, Caddy package or
 running Rust relay is overwritten. This script is for first installation;
 it deliberately refuses a rerun over an existing deployment.
 
+The installed service uses a Unix admin socket in `/run/caddy/`,
+whose directory is mode 700 and belongs to `caddy`. `systemctl reload caddy`
+inherits that default; other local users cannot use the default TCP admin API
+to change relay credentials or routing. Explicit custom `admin` settings take
+precedence. See [local administration and migration](deploy.md#local-administration)
+before changing that setting or replacing an older service unit.
+
 Building is serial and can take several minutes. `--binary /tmp/caddy` instead
 uses an uploaded Linux x64 Caddy executable containing `network_relay`, checks
 its ELF architecture and module, and stages it away from a possibly `noexec`
@@ -168,7 +175,7 @@ bash caddy-network-relay-install-debian13.sh --extract /tmp/caddy-relay-source
 
 The self-extracting payload has an embedded SHA-256 check and a separate
 script checksum. After packaging, every folder in the repository and the output
-folder is mode 777. Source code, helper behavior, real Caddy profile generation,
+folder keeps its existing permissions. Source code, helper behavior, real Caddy profile generation,
 configuration adaptation and installer transaction paths can be tested
 without deploying a public server. Scratch installer tests substitute apt,
 systemd, port inspection and network self-check commands. They do not prove

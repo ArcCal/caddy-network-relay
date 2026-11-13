@@ -6,12 +6,14 @@ These are source snapshots, not new upstream releases:
 |---|---|---|
 | quic-go | github.com/quic-go/quic-go | v0.63.0 |
 | x-net | golang.org/x/net | v0.59.0 |
+| go-jose-v3 | github.com/go-jose/go-jose/v3 | v3.0.5 |
+| go-jose-v4 | github.com/go-jose/go-jose/v4 | v4.1.9 |
 
 Original LICENSE/PATENTS files are retained. Only source files and required
 embedded data are included; upstream tests are not shipped. `provenance.json`
 records the original module sums and per-file original/source hashes.
 
-Caddy v2.11.9 selects x/net v0.60.0 in the module graph. Its local replacement
+The security dependency update selects x/net v0.62.0 in the module graph. Its local replacement
 remains the reviewed v0.59.0 snapshot with the security backports listed
 below. `selected_version` records that graph requirement separately from the
 snapshot's original `version`; upstream hash and vulnerability checks continue
@@ -20,6 +22,18 @@ until its selected version and compatibility have been reviewed.
 
 Local changes:
 
+- quic-go/http3 and x-net/http2: validate request authorities before invoking
+  handlers, using shared ASCII URI grammar in x-net/http/httpguts. HTTP(S)
+  authorities require a nonempty host; classic CONNECT requires a host and
+  explicit port. Registered names, percent encodings, IPv6 and IPvFuture are
+  checked without narrowing valid URI syntax to DNS names. Non-HTTP schemes
+  can carry valid userinfo. Existing ValidHostHeader behavior is unchanged.
+- quic-go/http3: require a valid scheme for ordinary and extended CONNECT
+  requests, and reject non-ASCII schemes before case folding.
+- x-net/http2: retain pseudo-header presence separately from empty values;
+  reject forbidden or malformed protocol fields and empty classic CONNECT
+  scheme/path fields. A present empty authority cannot fall back to Host.
+  Supported HTTP scheme names are compared and normalized using ASCII only.
 - quic-go: on a path-size rejection of an application DATAGRAM, wake bounded
   DPLPMTUD on its next probe deadline even without smaller application traffic.
   Respect DF capability, disabled discovery, congestion pacing and probe loss.
@@ -58,7 +72,9 @@ Local changes:
   sending the response header, so the relay needs no reflection.
 - x-net/http2: expose CloseWrite, ResetStream and concurrent-write-safe
   InterruptStream to handlers, releasing local stream state even when the peer
-  stops reading the underlying socket; retain and accept the receive direction after a
+  stops reading the underlying socket; publish a completed directional FIN before
+  closing local stream state so a successful CloseWrite cannot race a spurious
+  stream-closed error; retain and accept the receive direction after a
   CONNECT FIN; release stream state after both directions finish and return
   connection flow-control credits exactly once, including pending body reads;
   close the receive direction if a handler returns after CloseWrite; reject
@@ -109,6 +125,9 @@ Local changes:
   charged until consumed; cancellation, effective reset and shutdown discard
   unread frames and release their reservations. Exhaustion closes the affected
   connection with INTERNAL_ERROR.
+  Frame callback ownership is transferred explicitly when a small overlapping
+  fragment is copied or rejected, avoiding a redundant once-wrapper allocation.
+  The budget-release callback remains guarded against repeated release.
 
 The application exercises these changes through actual H2/H3 frames in
 `readiness_protocol_test.go`, in addition to existing interoperability, reload
@@ -121,6 +140,12 @@ hashes, then runs the original QUIC, HTTP/3 and HTTP/2 tests with the patches.
 Two HTTP/3 assertions are updated to require the intentionally preserved scheme
 instead of an empty scheme; the Config reflection fixture initializes the new
 optional ReceiveBufferBudget field. All other upstream assertions are retained.
+Valid-message fixtures also receive missing mandatory scheme/authority fields;
+the Host fallback fixture omits authority instead of sending an empty value.
+Their assertions and denial-of-service payload sizes are unchanged. The restored
+QUIC test module uses the application's reviewed x/crypto, x/net, x/sys, x/term
+and x/text versions, including the local x/net replacement; only that temporary
+module can refresh dependency metadata, with checksum verification enabled.
 The harness also copies `http2_regression_test.go.txt` into the upstream HTTP/2
 test package to verify flow-control credits for both FIN orders, cleanup after
 handler return, cancellation of a blocked response write under the race
@@ -133,9 +158,9 @@ The QUIC receive-budget fixture checks retained buffers, overlaps, FIN,
 cancellation, reset, shutdown and configuration propagation.
 
 Go ignores replace directives in dependencies. Builds must use this repository
-as the main module or repeat both replacements in the main module. An ordinary
-xcaddy --with build will silently omit the patches. Deployment instructions use
-the repository-root build. Review the upstream diff when updating versions,
+as the main module or repeat both replacements in the main module. These
+extensions require the patched APIs in both snapshots. Deployment instructions
+use the repository-root build. Review the upstream diff when updating versions,
 rerun the upstream transport test suites and dependency vulnerability scanning,
 and retire these patches when equivalent upstream APIs become available.
 
@@ -145,3 +170,9 @@ and retire these patches when equivalent upstream APIs become available.
 applied during upstream verification. Go string values retain identical runtime
 bytes. The upstream test runner verifies the pinned baseline, strict patch
 replay, and resulting hashes; arbitrary source changes fail verification.
+
+JOSE v3 has a separately reviewed security backport preserving its public API;
+see [go-jose-v3.md](go-jose-v3.md) for advisory, standards and regression details.
+
+The maintained JOSE v4 snapshot also enforces disjoint header locations; see
+[go-jose-v4.md](go-jose-v4.md). Its upstream security fixes remain intact.

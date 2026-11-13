@@ -1,0 +1,50 @@
+{
+  "policy": "rfc9846-v1",
+  "candidate_revision": "v3",
+  "retained_build_tag": "relay_tls9846_v1",
+  "versions": {
+    "go1.26.11": {
+      "original_conn_sha256": "c5267d4cc54fef91f4346e82865bee81224599c080dd2c559b21e09dd1d7e7d6",
+      "patched_conn_file": "versions/go1.26.11/conn.go.txt",
+      "patched_conn_sha256": "0178eecd3b205de2f183551a3fab18a8630e98554a18999c73f78e5925e36bc9",
+      "original_files": {
+        "src/crypto/tls/conn.go": "c5267d4cc54fef91f4346e82865bee81224599c080dd2c559b21e09dd1d7e7d6",
+        "src/net/http/server.go": "832934b96383a274d363bc3a3e77d2eac8507ab6a7c401858c53294b753eaeaa"
+      },
+      "patched_files": {
+        "src/crypto/tls/conn.go": "versions/go1.26.11/conn.go.txt",
+        "src/crypto/tls/relay_key_usage.go": "relay_key_usage.go.txt",
+        "src/net/http/server.go": "versions/go1.26.11/server.go.txt",
+        "src/net/http/relay_host_field.go": "relay_host_field.go.txt"
+      }
+    },
+    "go1.27.4": {
+      "original_conn_sha256": "1d37dcde86dea47f8297cfc9dd8edaa1abf8b9adbf7121c1b241b4188680c0dc",
+      "patched_conn_file": "versions/go1.27.4/conn.go.txt",
+      "patched_conn_sha256": "8495deeb152d633e12a4f2ca34e83531928eee488d60ae9a082ce8cf75b97293",
+      "original_files": {
+        "src/crypto/tls/conn.go": "1d37dcde86dea47f8297cfc9dd8edaa1abf8b9adbf7121c1b241b4188680c0dc",
+        "src/net/http/server.go": "10c0a1fa7cc5224c949f57b7054e025bede1a6d0662fef90473d799ee95e405b"
+      },
+      "patched_files": {
+        "src/crypto/tls/conn.go": "versions/go1.27.4/conn.go.txt",
+        "src/crypto/tls/relay_key_usage.go": "relay_key_usage.go.txt",
+        "src/net/http/server.go": "versions/go1.27.4/server.go.txt",
+        "src/net/http/relay_host_field.go": "relay_host_field.go.txt"
+      }
+    }
+  },
+  "files": {
+    "LICENSE": "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad",
+    "relay_key_usage.go.txt": "6d518dbfec8f95af70a0d040bdcd0156967d852e640f22293ed0d0698e10b4e4",
+    "relay_host_field.go.txt": "6fc7856a2b8837e373ec8826372f9b614add6b1f5832bb3a49f49e7195bdb385",
+    "versions/go1.26.11/server.go.txt": "8331c8a1f83535e68ac6bc6d38e3593ca5d31f95658633983a5a633b5b6af53f",
+    "versions/go1.26.11/conn.go.txt": "0178eecd3b205de2f183551a3fab18a8630e98554a18999c73f78e5925e36bc9",
+    "versions/go1.27.4/server.go.txt": "8b6f626edaf2e7dcd1173d7ca2aee50b0de1888e6f11fb6a9bf98bc269c0e635",
+    "versions/go1.27.4/conn.go.txt": "8495deeb152d633e12a4f2ca34e83531928eee488d60ae9a082ce8cf75b97293"
+  },
+  "stdlib_policies": {
+    "crypto/tls": "rfc9846-v1",
+    "net/http": "rfc9112-host-v1"
+  }
+}

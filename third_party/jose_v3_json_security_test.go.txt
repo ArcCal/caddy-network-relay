@@ -1,0 +1,55 @@
+package json
+
+import (
+	"strings"
+	"testing"
+)
+
+type securityHidden struct{ Value string }
+type securityHiddenString string
+
+func TestSecurityEmbeddedUnexported(t *testing.T) {
+	t.Run("nil pointer", func(t *testing.T) {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("unexported pointer panicked: %v", p)
+			}
+		}()
+		var dst struct{ *securityHidden }
+		if err := Unmarshal([]byte(`{"Value":"x"}`), &dst); err == nil {
+			t.Error("nil unexported embedded pointer accepted")
+		}
+	})
+	t.Run("non-struct ignored", func(t *testing.T) {
+		defer func() {
+			if p := recover(); p != nil {
+				t.Errorf("unexported field panicked: %v", p)
+			}
+		}()
+		var dst struct{ securityHiddenString }
+		if err := Unmarshal([]byte(`{"securityHiddenString":"x"}`), &dst); err != nil {
+			t.Error(err)
+		}
+		if dst.securityHiddenString != "" {
+			t.Error("unexported non-struct field changed")
+		}
+	})
+	t.Run("value struct preserved", func(t *testing.T) {
+		var dst struct{ securityHidden }
+		if err := Unmarshal([]byte(`{"Value":"x"}`), &dst); err != nil || dst.Value != "x" {
+			t.Errorf("exported embedded field lost: %v", err)
+		}
+	})
+}
+func TestSecurityNestingDepth(t *testing.T) {
+	for _, n := range []int{10000, 10001} {
+		var v interface{}
+		err := Unmarshal([]byte(strings.Repeat("[", n)+"0"+strings.Repeat("]", n)), &v)
+		if n == 10000 && err != nil {
+			t.Errorf("at-limit depth rejected: %v", err)
+		}
+		if n > 10000 && err == nil {
+			t.Error("excessive JSON nesting accepted")
+		}
+	}
+}

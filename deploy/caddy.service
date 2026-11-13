@@ -13,6 +13,11 @@ Requires=network-online.target
 Type=notify
 User=caddy
 Group=caddy
+# The default admin API can replace relay authentication and routing. Restrict
+# local administration to this service account and root, including reloads.
+RuntimeDirectory=caddy
+RuntimeDirectoryMode=0700
+Environment=CADDY_ADMIN=unix//run/caddy/admin.sock
 ExecStart=/usr/local/bin/caddy run --config /etc/caddy/Caddyfile
 # Reloads keep open tunnels, except those of removed users.
 ExecReload=/usr/local/bin/caddy reload --config /etc/caddy/Caddyfile --force

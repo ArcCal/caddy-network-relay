@@ -4,8 +4,10 @@ Only installer shell functions are sourced. Terminal reads are redirected to a
 pipe in a private copy; nothing is built, installed or stopped.
 """
 
+import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 import time
@@ -19,6 +21,231 @@ SAVED = 'cfut_' + 'S' * 40
 
 def domain_status(value):
     return subprocess.run(['bash', '-c', 'source "$1"; cr_domain "$2"', 'test', str(SCRIPT), value]).returncode
+
+
+class GoVersionTests(unittest.TestCase):
+    def test_exact_minimum_and_preferred_toolchain_select_a_release(self):
+        cases = (("go 1.26.11\n", "go1.26.11"),
+                 ("go 1.26.0\ntoolchain go1.27.4\n", "go1.27.4"),
+                 ("go 1.26\n", None),
+                 ("go 1.26.11\ntoolchain go1.27rc1\n", None))
+        with tempfile.TemporaryDirectory() as directory:
+            module = Path(directory) / 'go.mod'
+            for text, expected in cases:
+                with self.subTest(text=text):
+                    module.write_text('module fixture.example/relay\n' + text)
+                    result = subprocess.run(['bash', '-c', 'source "$1"; cr_go_version "$2"',
+                                             'test', str(SCRIPT), str(module)], capture_output=True, text=True)
+                    if expected is None:
+                        self.assertNotEqual(result.returncode, 0)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stderr)
+                        self.assertEqual(result.stdout.strip(), expected)
+
+
+PATCHED_REPLACEMENTS = (
+    ('github.com/quic-go/quic-go', './third_party/quic-go'),
+    ('golang.org/x/net', './third_party/x-net'),
+    ('github.com/go-jose/go-jose/v3', './third_party/go-jose-v3'),
+    ('github.com/go-jose/go-jose/v4', './third_party/go-jose-v4'),
+)
+
+
+def build_info(missing=None, missing_tag=False):
+    lines = ['fixture: go1.26.11']
+    for module, replacement in (*PATCHED_REPLACEMENTS,
+                                ('github.com/caddy-dns/cloudflare', '../cloudflare-src')):
+        lines.append(f'\tdep\t{module}\tv0.0.0')
+        if module != missing:
+            lines.append(f'\t=>\t{replacement}\t(devel)\t')
+    lines.extend(('\tbuild\tGOARCH=amd64', '\tbuild\tCGO_ENABLED=0'))
+    if not missing_tag:
+        lines.append('\tbuild\t-tags=http2legacy,relay_tls9846_v1')
+    return '\n'.join(lines) + '\n'
+
+
+class NativeBuildReplacementTests(unittest.TestCase):
+    """Run cr_build with local Go/download fixtures; never compile or deploy."""
+
+    def run_build(self, missing_binary=None, missing_overlay=None, missing_tag=False):
+        with tempfile.TemporaryDirectory(prefix='native-build-forks-') as temporary:
+            base = Path(temporary)
+            source = base / 'source'
+            (source / 'cmd/caddy').mkdir(parents=True)
+            (source / 'go.mod').write_text('module fixture.example/relay\n\ngo 1.26.11\n')
+            (source / 'go.sum').write_text('')
+            (source / 'deploy/go-tls').mkdir(parents=True)
+            (source / 'deploy/go-tls/prepare.py').write_text("import pathlib, sys\nroot, out=map(pathlib.Path, sys.argv[1:])\nassert (root / 'bin/go').is_file()\nout.mkdir()\n")
+            (base / 'work').mkdir()
+            (base / 'checkout').mkdir()
+            info = base / 'build-info'
+            info.write_text(build_info(missing_binary, missing_tag))
+            replacements = (*PATCHED_REPLACEMENTS,
+                            ('github.com/caddy-dns/cloudflare', '../cloudflare-src'))
+            overlay = base / 'overlay.json'
+            overlay.write_text(json.dumps({'Replace': [
+                {'Old': {'Path': module}, 'New': {'Path': replacement}}
+                for module, replacement in replacements if module != missing_overlay
+            ]}))
+            releases = base / 'releases.json'
+            releases.write_text(json.dumps([{'version': 'go1.26.11', 'files': [{
+                'os': 'linux', 'arch': 'amd64', 'kind': 'archive',
+                'filename': 'go1.26.11.linux-amd64.tar.gz', 'sha256': '0' * 64,
+            }]}]))
+            binary = base / 'fake-caddy'
+            binary.write_text('''#!/bin/sh
+case "$1" in
+  list-modules) printf '%s\\n' network_relay http.handlers.network_relay dns.providers.cloudflare ;;
+  version) echo fixture ;;
+  *) exit 94 ;;
+esac
+''')
+            fake_go = base / 'fake-go'
+            fake_go.write_text('''#!/bin/bash
+set -e
+case "$1" in
+  version)
+    if [[ ${2:-} == -m ]]; then cat "$CR_TEST_BUILDINFO"; else echo 'go version go1.26.11 linux/amd64'; fi ;;
+  mod)
+    for argument in "$@"; do
+      if [[ $argument == -json ]]; then cat "$CR_TEST_OVERLAY"; fi
+    done ;;
+  get) ;;
+  build)
+    touch "$CR_TEST_BUILT"
+    while (( $# )); do
+      if [[ $1 == -o ]]; then cp "$CR_TEST_BINARY" "$2"; chmod 755 "$2"; break; fi
+      shift
+    done ;;
+  *) exit 93 ;;
+esac
+''')
+            fake_go.chmod(0o755)
+            environment = os.environ | {
+                'CR_TEST_ROOT': str(base), 'CR_TEST_BUILDINFO': str(info),
+                'CR_TEST_OVERLAY': str(overlay), 'CR_TEST_RELEASES': str(releases),
+                'CR_TEST_BINARY': str(binary), 'CR_TEST_FAKE_GO': str(fake_go),
+                'CR_TEST_BUILT': str(base / 'built'),
+            }
+            command = '''source "$1"
+work=$CR_TEST_ROOT/work
+REPO=$CR_TEST_ROOT/source
+CADDY_SOURCE_WORK=$CR_TEST_ROOT/checkout
+arch=amd64
+cr_clone_plugin() {
+    mkdir -p "$CADDY_SOURCE_WORK/cloudflare-src"
+    printf 'module fixture.example/plugin\\n' > "$CADDY_SOURCE_WORK/cloudflare-src/go.mod"
+    : > "$work/plugin-clone.log"
+}
+cr_download() {
+    if [[ $1 == *go.dev* ]]; then cp "$CR_TEST_RELEASES" "$2"; else : > "$2"; fi
+}
+cr_verify() { :; }
+tar() { mkdir -p "$work/go/bin"; cp "$CR_TEST_FAKE_GO" "$work/go/bin/go"; }
+git() { printf '%s\\n' "$PLUGIN_COMMIT"; }
+cr_build 1
+'''
+            result = subprocess.run(['bash', '-euo', 'pipefail', '-c', command,
+                                     'native-build', str(SCRIPT)], env=environment,
+                                    capture_output=True, text=True, timeout=30)
+            return result, (base / 'built').exists()
+
+    def test_all_reviewed_sources_are_accepted(self):
+        result, built = self.run_build()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(built)
+
+    def test_binary_without_tls_policy_is_refused_after_build(self):
+        result, built = self.run_build(missing_tag=True)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(built)
+        self.assertIn('TLS policy build tag', result.stderr)
+
+    def test_binary_without_either_jose_replacement_is_refused(self):
+        for major in ('v3', 'v4'):
+            with self.subTest(major=major):
+                result, built = self.run_build(missing_binary=f'github.com/go-jose/go-jose/{major}')
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertTrue(built, 'the actual binary metadata must be checked')
+                self.assertIn(f'Missing patched JOSE {major}', result.stderr)
+
+    def test_overlay_without_either_jose_replacement_is_refused_before_build(self):
+        for major in ('v3', 'v4'):
+            with self.subTest(major=major):
+                result, built = self.run_build(missing_overlay=f'github.com/go-jose/go-jose/{major}')
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertFalse(built)
+                self.assertIn('Missing reviewed source replacement in Cloudflare build overlay: '
+                              f'github.com/go-jose/go-jose/{major}=./third_party/go-jose-{major}.',
+                              result.stderr)
+
+
+class WorkflowReplacementTests(unittest.TestCase):
+    def test_every_release_and_ci_artifact_guard_rejects_missing_reviewed_sources(self):
+        for filename, expected_blocks in (('release.yml', 2), ('test.yml', 1)):
+            text = (ROOT / '.github/workflows' / filename).read_text()
+            blocks = re.findall(r'(?m)^([ ]*)for replacement in [\s\S]*?^\1done', text)
+            # Capture complete shell loops separately from their indentation.
+            loops = [match.group(0) for match in re.finditer(
+                r'(?m)^([ ]*)for replacement in [\s\S]*?^\1done', text)]
+            self.assertEqual(len(blocks), expected_blocks, filename)
+            for index, loop in enumerate(loops):
+                for missing in (None, *(module for module, _ in PATCHED_REPLACEMENTS)):
+                    with self.subTest(workflow=filename, guard=index, missing=missing), \
+                            tempfile.TemporaryDirectory(prefix='workflow-forks-') as temporary:
+                        info = Path(temporary) / 'build-info'
+                        info.write_text(build_info(missing))
+                        result = subprocess.run(
+                            ['bash', '-euo', 'pipefail', '-c', 'info=$(cat "$1")\n' + loop,
+                             'workflow-build', str(info)], capture_output=True, text=True)
+                        self.assertEqual(result.returncode == 0, missing is None,
+                                         result.stdout + result.stderr)
+
+
+class WorkflowTLSBuildTests(unittest.TestCase):
+    def test_artifact_guards_require_exact_retained_policy_token(self):
+        for filename, expected in (('release.yml', 2), ('test.yml', 1)):
+            text = (ROOT / '.github/workflows' / filename).read_text()
+            blocks = re.findall(r'info=\$\(go version -m caddy\)\n(.*?)^[ ]*for replacement in', text, re.S | re.M)
+            self.assertEqual(len(blocks), expected)
+            for index, block in enumerate(blocks):
+                for metadata, valid in ((build_info(), True),
+                                        (build_info(missing_tag=True), False),
+                                        (build_info().replace('relay_tls9846_v1', 'relay_tls9846_v10'), False)):
+                    with self.subTest(workflow=filename, guard=index, valid=valid), tempfile.TemporaryDirectory() as directory:
+                        info = Path(directory) / 'info'
+                        info.write_text(metadata)
+                        result = subprocess.run(['bash', '-euo', 'pipefail', '-c',
+                                                 'info=$(cat "$1")\n' + block, 'workflow-tls', str(info)],
+                                                capture_output=True, text=True)
+                        self.assertEqual(result.returncode == 0, valid, result.stderr)
+
+    def test_every_server_job_prepares_private_source_before_go_checks(self):
+        for filename in ('release.yml', 'test.yml'):
+            text = (ROOT / '.github/workflows' / filename).read_text()
+            self.assertEqual(text.count('uses: actions/setup-go@'), 3)
+            self.assertEqual(text.count('- name: Prepare reviewed TLS source'), 3)
+            self.assertEqual(text.count('echo "GOTOOLCHAIN=local"'), 3)
+            self.assertEqual(text.count('echo "GOFLAGS=-tags=relay_tls9846_v1"'), 3)
+            self.assertNotIn('-tags http2legacy ', text)
+
+
+class AdminUnitTests(unittest.TestCase):
+    def test_template_defaults_are_replaced_once_for_the_native_service(self):
+        result = subprocess.run(['bash', '-c', 'source "$1"; cr_unit_text',
+                                 'test', str(SCRIPT)], capture_output=True, text=True, check=True)
+        lines = result.stdout.splitlines()
+        for prefix, expected in (
+            ('RuntimeDirectory=', 'RuntimeDirectory=caddy-network-relay'),
+            ('RuntimeDirectoryMode=', 'RuntimeDirectoryMode=0700'),
+            ('Environment=CADDY_ADMIN=',
+             'Environment=CADDY_ADMIN=unix//run/caddy-network-relay/admin.sock'),
+        ):
+            self.assertEqual([line for line in lines if line.startswith(prefix)], [expected])
+        self.assertIn('Environment=GODEBUG=http2xconnect=1', lines)
+        self.assertIn('NoNewPrivileges=yes', lines)
+        reload = next(line for line in lines if line.startswith('ExecReload='))
+        self.assertIn('--address unix//run/caddy-network-relay/admin.sock ', reload)
 
 
 class DomainTests(unittest.TestCase):

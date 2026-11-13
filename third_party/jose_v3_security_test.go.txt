@@ -1,0 +1,134 @@
+package jose
+
+import (
+	"crypto"
+	"crypto/rsa"
+	"encoding/base64"
+	"github.com/go-jose/go-jose/v3/json"
+	"math/big"
+	"strings"
+	"testing"
+)
+
+func TestSecurityInvalidRSAThumbprints(t *testing.T) {
+	for _, key := range []*rsa.PublicKey{{N: big.NewInt(3), E: 0}, {N: big.NewInt(3), E: -1}, {N: nil, E: 65537}} {
+		t.Run("invalid", func(t *testing.T) {
+			defer func() {
+				if p := recover(); p != nil {
+					t.Errorf("invalid RSA key panicked: %v", p)
+				}
+			}()
+			if _, err := (&JSONWebKey{Key: key}).Thumbprint(crypto.SHA256); err == nil {
+				t.Error("invalid RSA key accepted")
+			}
+		})
+	}
+}
+
+func TestSecurityPrivateHeaderKeysRejected(t *testing.T) {
+	b, err := json.Marshal(JSONWebKey{Key: rsaTestKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []HeaderKey{headerJWK, headerEPK} {
+		header := rawHeader{name: makeRawMessage(b)}
+		if name == headerEPK {
+			_, err = header.getEPK()
+		} else {
+			_, err = header.sanitized()
+		}
+		if err == nil || !strings.Contains(err.Error(), "private parameters") {
+			t.Errorf("%s private key not rejected before validation: %v", name, err)
+		}
+	}
+}
+
+func TestSecurityJWEHeaderOverlap(t *testing.T) {
+	key := make([]byte, 16)
+	enc, err := NewEncrypter(A128GCM, Recipient{Algorithm: DIRECT, Key: key}, (&EncrypterOptions{}).WithHeader("test", ""))
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj, err := enc.Encrypt([]byte("hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var msg map[string]*json.RawMessage
+	if err = json.Unmarshal([]byte(obj.FullSerialize()), &msg); err != nil {
+		t.Fatal(err)
+	}
+	msg["unprotected"] = makeRawMessage([]byte(`{"test":"tampered"}`))
+	b, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = ParseEncrypted(string(b)); err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Errorf("duplicate protected/unprotected header accepted: %v", err)
+	}
+}
+
+func TestSecurityJWSHeaderOverlap(t *testing.T) {
+	for _, input := range []string{
+		`{"payload":"AA","protected":"eyJhbGciOiJIUzI1NiIsInRlc3QiOm51bGx9","header":{"test":"tampered"},"signature":"AA"}`,
+		`{"payload":"AA","signatures":[{"protected":"eyJhbGciOiJIUzI1NiIsInRlc3QiOm51bGx9","header":{"test":"tampered"},"signature":"AA"}]}`,
+	} {
+		if _, err := ParseSigned(input); err == nil || !strings.Contains(err.Error(), "duplicate") {
+			t.Errorf("duplicate JWS header accepted: %v", err)
+		}
+	}
+}
+
+func TestSecurityJWERecipientHeaderOverlap(t *testing.T) {
+	for _, tc := range []struct{ name, protected, shared, recipient string }{
+		{"protected recipient", `{"enc":"A128GCM","test":null}`, `{}`, `{"alg":"A128KW","test":"tampered"}`},
+		{"shared recipient", `{"enc":"A128GCM"}`, `{"test":""}`, `{"alg":"A128KW","test":"tampered"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := `{"protected":"` + base64.RawURLEncoding.EncodeToString([]byte(tc.protected)) + `","unprotected":` + tc.shared + `,"recipients":[{"header":` + tc.recipient + `,"encrypted_key":"AA"}],"iv":"AA","ciphertext":"AA","tag":"AA"}`
+			if _, err := ParseEncrypted(input); err == nil || !strings.Contains(err.Error(), "duplicate") {
+				t.Errorf("duplicate recipient header accepted: %v", err)
+			}
+		})
+	}
+}
+
+func TestSecurityDisjointMultiRecipientRoundTrip(t *testing.T) {
+	key1, key2 := make([]byte, 16), make([]byte, 16)
+	key2[0] = 1
+	enc, err := NewMultiEncrypter(A128GCM, []Recipient{{Algorithm: A128KW, Key: key1, KeyID: "first"}, {Algorithm: A128KW, Key: key2, KeyID: "second"}}, (&EncrypterOptions{}).WithHeader("custom", "protected"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	obj, err := enc.Encrypt([]byte("disjoint recipient payload"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseEncrypted(obj.FullSerialize())
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, _, payload, err := parsed.DecryptMulti(key2)
+	if err != nil || index != 1 || string(payload) != "disjoint recipient payload" {
+		t.Errorf("valid multi-recipient round trip failed: index=%d payload=%q err=%v", index, payload, err)
+	}
+}
+
+func TestSecurityProtectedHeaderMustBeObject(t *testing.T) {
+	for _, value := range []string{"null", "[]", "true", `"string"`} {
+		protected := base64.RawURLEncoding.EncodeToString([]byte(value))
+		for _, input := range []string{
+			`{"payload":"AA","protected":"` + protected + `","signature":"AA"}`,
+			`{"protected":"` + protected + `","unprotected":{"alg":"dir","enc":"A128GCM"},"ciphertext":"AA"}`,
+		} {
+			var err error
+			if strings.Contains(input, `"payload"`) {
+				_, err = ParseSigned(input)
+			} else {
+				_, err = ParseEncrypted(input)
+			}
+			if err == nil || !strings.Contains(err.Error(), "protected header") {
+				t.Errorf("nonobject %s protected header accepted: %v", value, err)
+			}
+		}
+	}
+}

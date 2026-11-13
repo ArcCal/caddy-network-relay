@@ -7,6 +7,7 @@ import hashlib
 import io
 import os
 from pathlib import Path
+import secrets
 import tarfile
 import textwrap
 
@@ -18,10 +19,54 @@ DEPLOY_FILES = (
     'deploy/domains/LICENSE.domain-list-community',
     'deploy/domains/UPSTREAM.md',
     'docs/debian13-selective-install.md', 'deploy/selective-source.json',
+    'deploy/go-tls/prepare.py', 'deploy/go-tls/source-manifest.json',
+    'deploy/go-tls/relay_key_usage.go.txt', 'deploy/go-tls/LICENSE', 'deploy/go-tls/UPSTREAM.md',
+    'deploy/go-tls/versions/go1.26.11/conn.go.txt', 'deploy/go-tls/versions/go1.27.4/conn.go.txt',
+    'deploy/go-tls/relay_host_field.go.txt',
+    'deploy/go-tls/versions/go1.26.11/server.go.txt', 'deploy/go-tls/versions/go1.27.4/server.go.txt',
 )
 
 
+def check_output(path):
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise ValueError(f'Refusing a linked or non-regular package output: {path}')
+
+
+def create_output_directory(parent):
+    """Bound every new parent's mode without widening existing directories."""
+    missing = []
+    current = parent
+    while not current.exists():
+        missing.append(current)
+        current = current.parent
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o755, exist_ok=True)
+
+
+def atomic_write(path, data, mode, *, force_mode=False):
+    check_output(path)
+    temporary = path.parent / ('.relay-installer-' + secrets.token_hex(16))
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, mode)
+    try:
+        try:
+            # Keep ownership if constructing the buffered stream fails.
+            with os.fdopen(fd, 'wb', closefd=False) as stream:
+                if force_mode:
+                    os.fchmod(stream.fileno(), mode)
+                stream.write(data)
+                stream.flush()
+                os.fsync(stream.fileno())
+        finally:
+            os.close(fd)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def package(output):
+    checksum = output.with_name(output.name + '.sha256')
+    for path in (output, checksum):
+        check_output(path)
     files = set(DEPLOY_FILES) | {'go.mod', 'go.sum'}
     files.update(p.name for p in ROOT.glob('*.go') if not p.name.endswith('_test.go'))
     files.update(str(p.relative_to(ROOT)) for p in (ROOT / 'cmd').rglob('*.go')
@@ -74,22 +119,13 @@ if [[ ${1:-} == --extract ]]; then
 fi
 bash "$bundle_dir/source/deploy/install-debian13-selective.sh" "$@"
 '''
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(script)
-    output.chmod(0o755)
-    digest = hashlib.sha256(output.read_bytes()).hexdigest()
-    output.with_name(output.name + '.sha256').write_text(f'{digest}  {output.name}\n')
+    create_output_directory(output.parent)
+    data = script.encode()
+    digest = hashlib.sha256(data).hexdigest()
+    checksum_mode = checksum.stat().st_mode & 0o777 if checksum.exists() else 0o644
+    atomic_write(output, data, 0o755, force_mode=True)
+    atomic_write(checksum, f'{digest}  {output.name}\n'.encode(), checksum_mode, force_mode=checksum.exists())
     print(f'Wrote {output}: {output.stat().st_size} bytes; {len(files)} bundled files.')
-
-
-def open_dirs(*roots):
-    """Leave the source and artifact folders, and every folder below them, open to all users."""
-    for root in roots:
-        for folder, _, _ in os.walk(root):
-            try:
-                os.chmod(folder, 0o777)
-            except OSError:
-                pass
 
 
 if __name__ == '__main__':
@@ -97,4 +133,3 @@ if __name__ == '__main__':
     parser.add_argument('--out', type=Path, default=ROOT / 'caddy-network-relay-install-debian13.sh')
     output = parser.parse_args().out
     package(output)
-    open_dirs(ROOT, output.resolve().parent)

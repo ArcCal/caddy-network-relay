@@ -215,11 +215,16 @@ install nor a pristine host is implied by an error exit.
 
 ## Manual build and Caddy integration
 
-Use the toolchain in [go.mod](../go.mod), currently Go 1.26 with `go1.26.10`.
-From the repository root:
+Use official Go 1.26.11 or 1.27.4 and Python 3. From the repository
+root, prepare the exact reviewed standard-library policy without changing the
+installed toolchain:
 
 ```bash
-CGO_ENABLED=0 go build -tags http2legacy -trimpath -o caddy ./cmd/caddy
+relay_go_work=$(mktemp -d)
+python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$relay_go_work/go"
+export GOROOT="$relay_go_work/go" GOTOOLCHAIN=local
+export GOFLAGS=-tags=relay_tls9846_v1
+CGO_ENABLED=0 go build -tags http2legacy,relay_tls9846_v1 -trimpath -o caddy ./cmd/caddy
 ```
 
 ```bash
@@ -231,8 +236,30 @@ CGO_ENABLED=0 go build -tags http2legacy -trimpath -o caddy ./cmd/caddy
 ```
 
 Confirm `http.handlers.network_relay` is present. No xcaddy is required for this
-build. Use the repository root so the local QUIC/x/net replacements apply;
-replacing them with unpatched upstream copies changes tested behavior.
+build. Check the built dependency metadata as well:
+
+```bash
+go version -m ./caddy
+```
+
+The `build` record must retain `-tags=http2legacy,relay_tls9846_v1`.
+The package requires both reviewed TLS and HTTP/1 standard-library constants;
+a stock compiler or missing policy tag fails compilation. Unsupported Go source
+versions require review before the preparer accepts them. See
+[source policy and provenance](../deploy/go-tls/UPSTREAM.md).
+
+Each module must be immediately followed by its reviewed local replacement:
+
+| Module | Replacement |
+| --- | --- |
+| `github.com/quic-go/quic-go` | `./third_party/quic-go` |
+| `golang.org/x/net` | `./third_party/x-net` |
+| `github.com/go-jose/go-jose/v3` | `./third_party/go-jose-v3` |
+| `github.com/go-jose/go-jose/v4` | `./third_party/go-jose-v4` |
+
+Build from the repository root so all four replacements apply. Go ignores a
+dependency's replacements: a custom main module must apply all four itself.
+Unpatched copies can compile successfully while losing protocol or security fixes.
 
 The documented build retains the accepted `http2legacy` tag for compatibility.
 The patched x/net HTTP/2 implementation is used on all supported Go versions
@@ -507,8 +534,15 @@ For manual upgrade, save the known-good executable and private configuration,
 then build a candidate from the intended checkout:
 
 ```bash
-CGO_ENABLED=0 go build -tags http2legacy -trimpath -o caddy.new ./cmd/caddy
+relay_go_work=$(mktemp -d)
+python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$relay_go_work/go"
+export GOROOT="$relay_go_work/go" GOTOOLCHAIN=local
+export GOFLAGS=-tags=relay_tls9846_v1
+CGO_ENABLED=0 go build -tags http2legacy,relay_tls9846_v1 -trimpath -o caddy.new ./cmd/caddy
 ```
+
+Check `go version -m ./caddy.new` against the four reviewed replacement pairs in
+the [manual build checks](#manual-build-and-caddy-integration).
 
 ```bash
 ./caddy.new validate --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -601,11 +635,12 @@ later build.
 | --- | --- | --- |
 | [Production readiness](production-readiness.md) | Local race/protocol/fault/MTU/resource checks, independent clients, upstream transport checks and limited native systemd observations | Complete Apple acceptance, arbitrary WAN paths and production capacity |
 | [Hardening report](production-hardening-report.md) | Recorded 1,000-account synthetic H3 run, real Debian systemd process checks and selected rollback faults | Not a production RAM estimate or every download/ACME/device scenario |
-| [Selective installer validation](debian13-selective-validation.md) | 48 local installer/domain/profile checks, real Caddy profile generation/adaptation, source payload verification | Fresh public VPS/ACME and physical Apple routing not executed; recorded toolchain snapshot predates current Go 1.26.10 selection |
+| [Selective installer validation](debian13-selective-validation.md) | 48 local installer/domain/profile checks, real Caddy profile generation/adaptation, source payload verification | Fresh public VPS/ACME and physical Apple routing not executed; recorded toolchain snapshot predates current Go 1.26.11 selection |
 | [Test workflow](../.github/workflows/test.yml) | Intended lint/race/vulnerability/build recipe | Workflow existence does not prove execution; selective validation records an Actions-budget-blocked run |
 | [On-device procedure](test-on-device.md) | Repeatable native acceptance steps | A procedure itself is not a recorded pass |
 
-Representative checks from the repository root:
+Representative checks from the repository root, after the private Go
+preparation above (keep `GOROOT`, `GOTOOLCHAIN=local`, and the policy `GOFLAGS`):
 
 ```bash
 go vet ./...
