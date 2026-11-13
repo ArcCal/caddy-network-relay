@@ -171,6 +171,12 @@ func TestLargeTransfers(t *testing.T) {
 			t.Logf("%d MiB each way in %v (%.0f MiB/s)", size>>20, d.Round(time.Millisecond), 2*float64(size>>20)/d.Seconds())
 		})
 	}
+	// Closing the client does not synchronize the server handler's deferred
+	// quota release. Still require all tunnels to be released within a bound.
+	deadline := time.Now().Add(2 * time.Second)
+	for openTunnels.Load() != 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
 	if n := openTunnels.Load(); n != 0 {
 		t.Fatalf("%d tunnels still open", n)
 	}
