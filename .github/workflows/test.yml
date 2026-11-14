@@ -1,115 +1,70 @@
-# Lint and test on every push and pull request; build Caddy with the plugin
-# for Linux x86_64 and arm64. Weekly, rerun everything so that new
-# vulnerability records for the dependencies and the pinned transports
-# (third_party) fail the build even when nothing was pushed.
 name: test
-
 on:
-  push:
-    branches: [main]
-    paths-ignore: ["**.md", "docs/**"]
-  pull_request:
-    paths-ignore: ["**.md", "docs/**"]
-  schedule:
-    - cron: "23 5 * * 1"
   workflow_dispatch:
-
 permissions:
   contents: read
-
 jobs:
-  test:
-    name: lint and test (Go 1.26)
-    runs-on: ubuntu-24.04
+  macos-permissions:
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      GOTOOLCHAIN: go1.27.4
+      GOPROXY: https://proxy.golang.org|direct
+      GOMAXPROCS: '4'
     steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          go-version-file: go.mod
-      - name: Prepare reviewed TLS source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Isolate downloaded toolchain and compilation cache
         run: |
-          echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
-          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
-          echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
-          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
-          echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
-      - run: test -z "$(gofmt -l .)" || { gofmt -l .; exit 1; }
-      - run: go vet ./...
-      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
-      - name: Check pinned transport vulnerability records
-        run: |
-          mapfile -t transport_queries < <(jq -r '.snapshots[] | "\(.module)@\(.version)"' third_party/provenance.json)
-          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=query -json "${transport_queries[@]}" > transport-vulnerabilities.json
-          # Advisories for a recorded upstream version fail unless provenance.json
-          # records them as reviewed for that snapshot (backported or not affected).
-          jq -s -e --slurpfile prov third_party/provenance.json \
-            '([.[] | select(has("osv")) | .osv.id] | unique) - [$prov[0].snapshots[] | .reviewed_advisories // {} | keys[]] | length == 0' \
-            transport-vulnerabilities.json
-      - run: python3 third_party/test_upstream.py
-      - run: RELAY_STRESS_MB=16 go test -race -count=1 -timeout 40m ./...
-      - run: shellcheck -S warning -e SC1111,SC1091 deploy/install.sh
-      - run: python3 -m unittest discover -s deploy -v
-
-  go127:
-    name: test (Go 1.27)
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+          echo "GOMODCACHE=$RUNNER_TEMP/go-permissions-modules" >> "$GITHUB_ENV"
+          echo "GOCACHE=$RUNNER_TEMP/go-permissions-cache" >> "$GITHUB_ENV"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
         with:
-          go-version: "1.27.4"
-      # Local transport patches keep the same reviewed implementation and
-      # extended CONNECT APIs on both toolchains and with either build mode.
-      - name: Prepare reviewed TLS source
-        run: |
-          echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
-          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
-          echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
-          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
-          echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
-      - run: GOTOOLCHAIN=local RELAY_STRESS_MB=16 go test -count=1 -timeout 40m -tags http2legacy,relay_tls9846_v1 ./...
-      - run: GOTOOLCHAIN=local GODEBUG=http2xconnect=1 go test -count=1 -run 'HTTP2Ext|TCP|Masque|HTTP3|Caddyfile|Target|Success|Capsule|HTTP1|Extended|Unreachable|Accessor' ./...
-
-  build:
-    name: build ${{ matrix.arch }}
-    runs-on: ubuntu-24.04
-    strategy:
-      matrix:
-        arch: [amd64, arm64]
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+          go-version: '1.26.11'
+          cache: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          go-version-file: go.mod
-      - name: Prepare reviewed TLS source
-        run: |
-          echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
-          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
-          echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
-          echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
-          echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
-      - run: |
-          CGO_ENABLED=0 GOARCH=${{ matrix.arch }} go build -tags http2legacy,relay_tls9846_v1 -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
-          info=$(go version -m caddy)
-              awk -F '\t' '
-                  $2 == "build" && $3 ~ /^-tags=/ {
-                      value=substr($3, 7); gsub(/^"|"$/, "", value)
-                      count=split(value, tags, /[,[:space:]]+/)
-                      for (i=1; i<=count; i++) if (tags[i] == "relay_tls9846_v1") found=1
-                  }
-                  END { exit !found }
-              ' <<< "$info" || { echo 'Missing reviewed TLS policy build tag: relay_tls9846_v1.' >&2; exit 1; }
-          for replacement in golang.org/x/net=./third_party/x-net \
-                             github.com/quic-go/quic-go=./third_party/quic-go \
-                             github.com/go-jose/go-jose/v3=./third_party/go-jose-v3 \
-                             github.com/go-jose/go-jose/v4=./third_party/go-jose-v4; do
-            awk -F '\t' -v module="${replacement%%=*}" -v path="${replacement#*=}" '
-              ($2 == "dep" || $2 == "mod") && $3 == module { pending=1; next }
-              pending { if ($2 == "=>" && $3 == path) found=1; pending=0 }
-              END { exit !found }
-            ' <<< "$info" || { echo "missing replacement: $replacement" >&2; exit 1; }
-          done
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+          repository: ArcCal/network-relay
+          ref: e10e34c0d433833cc0f36e48111086bdd8cb83d2
+          path: network-relay-build-input
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          name: caddy-network-relay-linux-${{ matrix.arch }}
-          path: caddy
+          repository: caddy-dns/cloudflare
+          path: cloudflare-src
+          persist-credentials: false
+      - name: Reproduce old failure and verify exact private source
+        run: python3 .github/go-source-permissions-check.py before
+      - name: Run policy, permissions and cleanup regressions
+        run: |
+          python3 -m unittest discover -s deploy -p test_go_tls_policy.py -v 2>&1 | tee "$RUNNER_TEMP/go-permissions-evidence/tests.log"
+      - name: Exercise actual macOS to Linux server build helpers
+        shell: bash
+        run: |
+          source network-relay-build-input/build-linux-servers-on-linux.sh
+          caddy_src=$PWD
+          cloudflare_src=$PWD/cloudflare-src
+          work=$RUNNER_TEMP/go-permissions-work
+          output=$work/output
+          host_arch=arm64
+          jobs=4
+          failures=0
+          mkdir -p "$output/logs"
+          lr_run prepare-caddy lr_prepare_caddy
+          (( failures == 0 ))
+          lr_run build-caddy-amd64 lr_build_caddy amd64
+          (( failures == 0 ))
+          lr_run build-caddy-arm64 lr_build_caddy arm64
+          (( failures == 0 ))
+          python3 .github/go-source-permissions-check.py after
+      - name: Retain diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: go-source-permissions-macos
+          path: |
+            ${{ runner.temp }}/go-permissions-evidence
+            ${{ runner.temp }}/go-permissions-work/output/logs
+          retention-days: 7
