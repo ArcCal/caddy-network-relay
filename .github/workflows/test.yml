@@ -26,12 +26,6 @@ jobs:
           cache: false
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          repository: ArcCal/network-relay
-          ref: e10e34c0d433833cc0f36e48111086bdd8cb83d2
-          path: network-relay-build-input
-          persist-credentials: false
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-        with:
           repository: caddy-dns/cloudflare
           path: cloudflare-src
           persist-credentials: false
@@ -43,7 +37,7 @@ jobs:
       - name: Exercise actual macOS to Linux server build helpers
         shell: bash
         run: |
-          source network-relay-build-input/build-linux-servers-on-linux.sh
+          source build-linux-servers-on-linux.sh
           caddy_src=$PWD
           cloudflare_src=$PWD/cloudflare-src
           work=$RUNNER_TEMP/go-permissions-work
