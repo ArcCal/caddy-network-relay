@@ -5,6 +5,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import stat
 import tempfile
 
 ASSETS = Path(__file__).resolve().parent
@@ -27,6 +28,21 @@ def source_inventory(root):
         elif not path.is_dir():
             raise ValueError('Go source tree contains a non-regular entry.')
     return inventory
+
+
+def copy_private_source(source, destination):
+    # Downloaded toolchains use read-only cache modes. Preserve executable
+    # files, but keep our private copy writable for patching and cleanup.
+    destination.mkdir(mode=0o700)
+    for entry in source.iterdir():
+        target = destination / entry.name
+        if entry.is_symlink():
+            raise ValueError('Go source tree contains a symbolic link.')
+        if entry.is_dir():
+            copy_private_source(entry, target)
+        else:
+            shutil.copy2(entry, target)
+            target.chmod(target.stat().st_mode | stat.S_IWUSR)
 
 
 def prepare(original, output):
@@ -76,7 +92,7 @@ def prepare(original, output):
     try:
         for entry in root.iterdir():
             if entry.name == 'src':
-                shutil.copytree(entry, temporary / 'src')
+                copy_private_source(entry, temporary / 'src')
             else:
                 (temporary / entry.name).symlink_to(entry)
         for relative, asset in record['patched_files'].items():

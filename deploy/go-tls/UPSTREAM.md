@@ -14,6 +14,11 @@ modified unpatched files, symbolic links and non-regular source entries are
 rejected. The selected installed distribution remains the trust boundary for
 the unchanged compiler and tools.
 
+Read-only downloaded toolchains are supported. Only the newly created private
+source copy gains owner write permission; its directories are private and
+executable file modes are retained. Installed source contents and permissions
+remain unchanged, including when preparation fails and removes temporary work.
+
 Official input sources:
 - https://go.googlesource.com/go/+/refs/tags/go1.26.11/src/crypto/tls/conn.go
 - https://go.googlesource.com/go/+/refs/tags/go1.27.4/src/crypto/tls/conn.go

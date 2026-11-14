@@ -4,9 +4,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 ASSETS = ROOT / 'deploy/go-tls'
@@ -81,6 +83,54 @@ class PreparedGoPolicyTests(unittest.TestCase):
                 self.assertEqual(PREPARE.prepare(source, output), output)
                 self.assertTrue((output / 'bin').is_symlink())
                 self.assertFalse((output / 'src').is_symlink())
+
+    def read_only_fixture(self, official, name):
+        source = self.fixture(official, name)
+        (source / 'src/iter').mkdir()
+        (source / 'src/iter/iter_test.go').write_text('package iter\n')
+        executable = source / 'src/make.bash'
+        executable.write_text('#!/bin/sh\nexit 0\n')
+        executable.chmod(0o555)
+        paths = [source, *source.rglob('*')]
+        for path in paths:
+            path.chmod(0o555 if path.is_dir() or path == executable else 0o444)
+        def restore_directories():
+            for path in paths:
+                if path.is_dir():
+                    path.chmod(0o700)
+        self.addCleanup(restore_directories)
+        return source, {str(p.relative_to(source)): stat.S_IMODE(p.stat().st_mode) for p in paths}
+
+    def test_read_only_toolchain_cache_prepares_without_changing_installed_modes(self):
+        for index, (version, official) in enumerate(self.roots.items()):
+            with self.subTest(version=version):
+                source, modes = self.read_only_fixture(official, 'readonly-' + str(index))
+                before = PREPARE.source_inventory(source)
+                output = self.base / ('writable-' + str(index))
+                self.assertEqual(PREPARE.prepare(source, output), output)
+                self.assertEqual(PREPARE.prepare(source, output), output)
+                self.assertEqual(PREPARE.source_inventory(source), before)
+                self.assertEqual({name: stat.S_IMODE((source / name).stat().st_mode) for name in modes}, modes)
+                self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o700)
+                self.assertTrue((output / 'src/make.bash').stat().st_mode & stat.S_IXUSR)
+                for directory in [output / 'src', *(p for p in (output / 'src').rglob('*') if p.is_dir())]:
+                    self.assertTrue(directory.stat().st_mode & stat.S_IWUSR)
+                shutil.rmtree(output)
+                self.assertFalse(output.exists())
+
+    def test_read_only_copy_failure_preserves_error_and_removes_private_work(self):
+        source, modes = self.read_only_fixture(self.official, 'readonly-failure')
+        original_copy = shutil.copyfile
+        def fail_policy_copy(src, dst, *args, **kwargs):
+            if Path(src).is_relative_to(ASSETS):
+                raise OSError('controlled policy copy failure')
+            return original_copy(src, dst, *args, **kwargs)
+        with mock.patch.object(PREPARE.shutil, 'copyfile', side_effect=fail_policy_copy):
+            with self.assertRaisesRegex(OSError, 'controlled policy copy failure'):
+                PREPARE.prepare(source, self.output)
+        self.assertFalse(self.output.exists())
+        self.assertEqual(list(self.base.glob('.relay-go-tls-*')), [])
+        self.assertEqual({name: stat.S_IMODE((source / name).stat().st_mode) for name in modes}, modes)
 
     def test_unknown_source_version_is_refused_without_output(self):
         (self.source / 'VERSION').write_text('go1.28.0\n')
