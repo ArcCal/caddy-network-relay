@@ -1,53 +1,12 @@
-name: Release candidates on real Linux x86-64 and arm64 against Apple UDP
+name: Counterbalanced cold-start reference sizes against the exact final Linux binary
 'on':
   push:
     branches:
-    - audit/confirmed-datagrams-20261120
+    - audit/udp-cold-controls-20261120
 permissions:
   contents: read
   actions: read
 jobs:
-  candidate:
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
-    steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        ref: 03ca4e3b451e4f49e3e67b9db7386402f0d1955f
-        path: baseline
-        persist-credentials: false
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        ref: d7483b1fbe75b60af414ec043642b51ae5c43436
-        path: candidate
-        persist-credentials: false
-    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
-      with:
-        go-version: 1.27.4
-        cache: false
-    - name: Exercise exact production sources with the race detector and build both
-        release binaries
-      run: "set -euo pipefail\npython3 candidate/deploy/go-tls/prepare.py \"$(go env\
-        \ GOROOT)\" \"$RUNNER_TEMP/reviewed-go\"\nexport GOTOOLCHAIN=local GOROOT=\"\
-        $RUNNER_TEMP/reviewed-go\" GOFLAGS=\"-mod=readonly -tags=http2legacy,relay_tls9846_v1\"\
-        \n(cd candidate && \"$GOROOT/bin/go\" test -race -count=4 -run '^TestIdleDatagramPathMTUDiscovery$'\
-        \ .)\nmkdir \"$RUNNER_TEMP/probe-arm\"\nfor revision in baseline candidate;\
-        \ do\n    (cd \"$revision\" && \"$GOROOT/bin/go\" build -trimpath -o \"$RUNNER_TEMP/probe-arm/caddy-$revision\"\
-        \ ./cmd/caddy)\ndone\n(cd \"$RUNNER_TEMP/probe-arm\" && sha256sum caddy-baseline\
-        \ caddy-candidate > SHA256SUMS)\n"
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: production-pair-${{ matrix.arch }}
-        path: ${{ runner.temp }}/probe-arm
-        retention-days: 7
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        - runner: ubuntu-24.04
-          arch: amd64
-        - runner: ubuntu-22.04-arm
-          arch: arm64
   clients:
     name: ${{ matrix.platform }} on ${{ matrix.runner }} to Linux ${{ matrix.arch
       }}
@@ -84,6 +43,8 @@ jobs:
       with:
         name: production-pair-${{ matrix.arch }}
         path: ${{ runner.temp }}/probe-arm
+        github-token: ${{ github.token }}
+        run-id: 44760250937
     - name: Boot the release Linux kernel with loopback-only port forwards
       run: bash diagnostics/linux-apple/boot.sh "${{ matrix.arch }}" "$RUNNER_TEMP/image"
     - name: Prepare Apple client
@@ -112,4 +73,3 @@ jobs:
         name: ${{ matrix.platform }}-${{ matrix.runner }}-linux-${{ matrix.arch }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7
-    needs: candidate
