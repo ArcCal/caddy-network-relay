@@ -62,7 +62,7 @@ def main():
             (private / (kind + ".mobileconfig")).write_bytes(fetch(kind + ".mobileconfig"))
         for trial, servers in enumerate((("caddy", "candidate"), ("candidate", "caddy")), 1):
             for server in servers:
-                for size in (64, 1396, 1400, 1401):
+                for size in (64, 1200, 1350, 1396, 1400, 1401):
                     for phase in ("immediate", "delay", "small"):
                         row = check(probe, out, private, server, size, phase, trial)
                         rows.append(row)
@@ -70,7 +70,7 @@ def main():
                         (out / "trains.json").write_text(json.dumps(rows, indent=2))
     # Missing replies are measured outcomes. Missing controls or origin arrivals
     # invalidate the experiment, as does a failed 64-byte reference train.
-    return not (len(rows) == 48 and all(r["confirmed"] for r in rows)
+    return not (len(rows) == 72 and all(r["confirmed"] for r in rows)
                 and all(r["rc"] == 0 for r in rows if r["size"] == 64))
 
 
