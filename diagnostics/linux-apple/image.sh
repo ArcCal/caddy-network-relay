@@ -59,6 +59,7 @@ if gzip -t "/boot/vmlinuz-$rel" 2>/dev/null; then
 else
     cp "/boot/vmlinuz-$rel" "$out/kernel"
 fi
+chmod 644 "$out/kernel"
 (cd "$root" && find . -print0 | cpio --null --quiet -o -H newc | gzip -1 > "$out/guest.gz")
 ls -lh "$out/kernel" "$out/guest.gz"
 (cd "$out" && sha256sum kernel guest.gz > SHA256SUMS)
