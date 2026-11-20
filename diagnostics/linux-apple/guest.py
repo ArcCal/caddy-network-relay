@@ -71,6 +71,11 @@ def start_servers(secret):
         profile = ROOT / (name + ".mobileconfig")
         command(*cli, "profile", "--host", "ingress.relay.test", "--port", str(port), "--user", "alice", "--out", str(profile),
                 *(["--password-stdin"] if name != "rust" else []), password=secret)
+        if name in ("rust", "candidate"):
+            for version, flag in (("h2", "--no-http3"), ("h3", "--no-http2")):
+                command(*cli, "profile", "--host", "ingress.relay.test", "--port", str(port), "--user", "alice", flag,
+                        "--out", str(ROOT / (name + "-" + version + ".mobileconfig")),
+                        *(["--password-stdin"] if name == "candidate" else []), password=secret)
         log = (ROOT / (name + ".log")).open("wb")
         child = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
         jobs.append(child)
@@ -176,7 +181,7 @@ class Metadata(http.server.BaseHTTPRequestHandler):
                 data = dict(COUNTS)
             data.update(self.server.relay_counts.snapshot())
             body = json.dumps(data).encode()
-        elif self.path in ("/ca.der", "/rust.mobileconfig", "/caddy.mobileconfig", "/candidate.mobileconfig"):
+        elif self.path in ("/rust-h2.mobileconfig", "/rust-h3.mobileconfig", "/candidate-h2.mobileconfig", "/candidate-h3.mobileconfig", "/ca.der", "/rust.mobileconfig", "/caddy.mobileconfig", "/candidate.mobileconfig"):
             body = (ROOT / self.path[1:]).read_bytes()
         else:
             return self.send_error(404)
@@ -209,7 +214,12 @@ def main():
         while True:
             data, addr = udp.recvfrom(65535)
             count("udp")
-            udp.sendto(data, addr)
+            if len(data) in (62, 63, 64) and data.startswith(b"RLYU") and data[4] in (62,63,64):
+                count("fixture_" + hashlib.sha256(data).hexdigest())
+                reply = bytearray((n*17+23)&255 for n in range(data[4])); reply[-1] = data[-1]
+                udp.sendto(reply, addr)
+            else:
+                udp.sendto(data, addr)
     threading.Thread(target=echo, daemon=True).start()
     origin = http.server.ThreadingHTTPServer((BIND, 18443), Origin)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)

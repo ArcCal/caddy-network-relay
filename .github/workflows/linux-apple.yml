@@ -1,15 +1,15 @@
-name: Final Linux QUIC datagram change against native iOS simulator
+name: Native Apple UDP 63-byte cause and transport-only profile controls
 'on':
   push:
     branches:
-    - audit/confirmed-datagrams-ios-20261120
+    - audit/native-apple-udp63-paths-20261120
 permissions:
   contents: read
   actions: read
 jobs:
   clients:
     name: ${{ matrix.platform }} on ${{ matrix.runner }} to Linux ${{ matrix.arch
-      }} (${{ matrix.phase }})
+      }}
     strategy:
       fail-fast: false
       matrix:
@@ -17,11 +17,12 @@ jobs:
         - runner: xcode-27
           platform: iOS
           arch: arm64
-          phase: immediate
         - runner: xcode-27
-          platform: iOS
+          platform: macOS
           arch: arm64
-          phase: small
+        - runner: macos-15
+          platform: macOS
+          arch: amd64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     steps:
@@ -51,7 +52,7 @@ jobs:
       run: bash diagnostics/linux-apple/boot.sh "${{ matrix.arch }}" "$RUNNER_TEMP/image"
     - name: Prepare Apple client
       run: "set -euo pipefail\nguest_pid=$(cat \"$RUNNER_TEMP/guest.pid\")\nkill -STOP\
-        \ \"$guest_pid\"\ntrap 'kill -CONT \"$guest_pid\" || true' EXIT\npython3 diagnostics/linux-apple/prepare-train.py\
+        \ \"$guest_pid\"\ntrap 'kill -CONT \"$guest_pid\" || true' EXIT\npython3 diagnostics/linux-apple/boundary-probe.py\
         \ native-probe/diagnostics/RelayProbe.swift \"$RUNNER_TEMP/Train.swift\"\n\
         set -euo pipefail\nsw_vers\nxcodebuild -version\nif [[ '${{ matrix.platform\
         \ }}' == macOS ]]; then\n  xcrun swiftc -O -parse-as-library -target \"$(uname\
@@ -69,8 +70,8 @@ jobs:
         \ \"$GITHUB_ENV\"\n  cat > \"$RUNNER_TEMP/probe\" <<'PROBE'\n#!/bin/bash\n\
         exec xcrun simctl spawn \"$RELAY_SIMULATOR_ID\" \"$RUNNER_TEMP/ios-probe\"\
         \ \"$@\"\nPROBE\n  chmod 700 \"$RUNNER_TEMP/probe\"\nfi\n"
-    - name: Compare immediate, idle and small-first transmissions to an isolated echo
-        peer
+    - name: Verify exact native UDP origin and return bytes with compiler-generated
+        profiles
       shell: bash
       run: python3 diagnostics/linux-apple/native-run.py
     - name: Stop Linux fixture
@@ -82,9 +83,6 @@ jobs:
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: ${{ matrix.platform }}-${{ matrix.runner }}-linux-${{ matrix.arch }}-${{
-          matrix.phase }}
+        name: boundary-${{ matrix.platform }}-${{ matrix.arch }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7
-    env:
-      RELAY_TRAIN_PHASE: ${{ matrix.phase }}
