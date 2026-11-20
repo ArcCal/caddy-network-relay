@@ -1,0 +1,227 @@
+name: Exact macOS products and global utun with both Linux release architectures
+'on':
+  push:
+    branches:
+    - audit/final-macos-products-linux-architectures-20261120
+permissions:
+  contents: read
+  actions: read
+jobs:
+  rust:
+    name: Build exact Rust relay on Linux ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy: &id001
+      fail-fast: false
+      matrix:
+        include:
+        - arch: amd64
+          runner: ubuntu-24.04
+          machine: x86_64
+        - arch: arm64
+          runner: ubuntu-22.04-arm
+          machine: aarch64
+    timeout-minutes: 35
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: d5bd2b77bc2e220d0f0a58eabc5f7ae3f43b307d
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+      with:
+        toolchain: stable
+    - name: Build the pinned native ELF and record its digest
+      run: 'set -euo pipefail
+
+        cargo build --locked --release --bin network-relay
+
+        mkdir "$RUNNER_TEMP/exact-rust"
+
+        install -m 755 target/release/network-relay "$RUNNER_TEMP/exact-rust/network-relay"
+
+        (cd "$RUNNER_TEMP/exact-rust" && sha256sum network-relay > SHA256SUMS)
+
+        '
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: exact-product-rust-${{ matrix.arch }}
+        path: ${{ runner.temp }}/exact-rust
+        retention-days: 3
+  products:
+    name: products on macOS 27 against Linux ${{ matrix.arch }}
+    runs-on: xcode-27
+    timeout-minutes: 75
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+        ref: e95f651a11eb5468638555154fe9039f6b71091b
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: abb966352880c7521cbd9a1e23e9c2f6e70906b0
+        sparse-checkout: diagnostics
+        path: native-probe
+        persist-credentials: false
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: linux-${{ matrix.arch }}-guest
+        path: ${{ runner.temp }}/image
+        github-token: ${{ github.token }}
+        run-id: 44747890260
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: production-pair-${{ matrix.arch }}
+        path: ${{ runner.temp }}/final-linux
+        github-token: ${{ github.token }}
+        run-id: 44760250937
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: exact-product-rust-${{ matrix.arch }}
+        path: ${{ runner.temp }}/exact-rust
+    - name: Boot the release Linux kernel with loopback-only port forwards
+      run: "set -euo pipefail\n(cd \"$RUNNER_TEMP/exact-rust\" && shasum -a 256 --check\
+        \ SHA256SUMS)\npython3 - <<'BOOT'\nimport os\nfrom pathlib import Path\nboot=Path(\"\
+        diagnostics/linux-apple/boot.sh\").read_text()\nnames=\"srv/guest.py srv/caddy\
+        \ | cpio\"\nstage='install -m 755 \"$RUNNER_TEMP/final-linux/caddy-candidate\"\
+        \ \"$overlay/srv/caddy\"'\nassert boot.count(names)==boot.count(stage)==1\n\
+        boot=boot.replace(names,\"srv/guest.py srv/caddy srv/network-relay | cpio\"\
+        ).replace(stage,stage+'\\ninstall -m 755 \"$RUNNER_TEMP/exact-rust/network-relay\"\
+        \ \"$overlay/srv/network-relay\"')\n(Path(os.environ[\"RUNNER_TEMP\"])/\"\
+        boot-products.sh\").write_text(boot)\nBOOT\nbash \"$RUNNER_TEMP/boot-products.sh\"\
+        \ \"$GUEST_ARCH\" \"$RUNNER_TEMP/image\"\npython3 - <<'ELF'\nimport hashlib,json,os\n\
+        from pathlib import Path\nt=Path(os.environ['RUNNER_TEMP'])\nrecord=json.loads((t/'linux.json').read_bytes())\n\
+        assert record['system']=='Linux' and record['machine']==os.environ['GUEST_MACHINE'],record\n\
+        for name,path in [('rust',t/'exact-rust/network-relay'),('caddy',t/'final-linux/caddy-candidate')]:\n\
+        \    with path.open('rb') as f: assert hashlib.file_digest(f,'sha256').hexdigest()==record[name],name\n\
+        (t/'evidence/elf-identities.json').write_text(json.dumps(record))\nELF\n"
+      env:
+        GUEST_ARCH: ${{ matrix.arch }}
+        GUEST_MACHINE: ${{ matrix.machine }}
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: d5bd2b77bc2e220d0f0a58eabc5f7ae3f43b307d
+        path: clients
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+      with:
+        toolchain: stable
+    - name: Build production clients and the native controller entry points
+      run: bash diagnostics/linux-apple/build-products.sh "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
+        "$RUNNER_TEMP/products"
+    - name: Test all three product transports on H2 and H3
+      run: "python3 - <<'PYHOST'\nimport os, runpy, subprocess\nt=os.environ['RUNNER_TEMP']\n\
+        with runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']():\n\
+        \    subprocess.run(['python3','diagnostics/linux-apple/products.py',t+'/products',t+'/evidence'],check=True)\n\
+        PYHOST"
+    - name: Stop Linux fixture
+      if: always()
+      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
+        || true; fi
+
+        '
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: final-products-${{ matrix.arch }}
+        path: ${{ runner.temp }}/evidence
+        retention-days: 7
+    strategy: *id001
+    needs: rust
+  capture:
+    name: capture on macOS 27 against Linux ${{ matrix.arch }}
+    runs-on: xcode-27
+    timeout-minutes: 75
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+        ref: 3f2defcfc8680f333dddab651e06a2f8030322d9
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: abb966352880c7521cbd9a1e23e9c2f6e70906b0
+        sparse-checkout: diagnostics
+        path: native-probe
+        persist-credentials: false
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: linux-${{ matrix.arch }}-guest
+        path: ${{ runner.temp }}/image
+        github-token: ${{ github.token }}
+        run-id: 44747890260
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: production-pair-${{ matrix.arch }}
+        path: ${{ runner.temp }}/final-linux
+        github-token: ${{ github.token }}
+        run-id: 44760250937
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: exact-product-rust-${{ matrix.arch }}
+        path: ${{ runner.temp }}/exact-rust
+    - name: Boot the release Linux kernel with loopback-only port forwards
+      run: "set -euo pipefail\n(cd \"$RUNNER_TEMP/exact-rust\" && shasum -a 256 --check\
+        \ SHA256SUMS)\npython3 - <<'BOOT'\nimport os\nfrom pathlib import Path\nboot=Path(\"\
+        diagnostics/linux-apple/boot.sh\").read_text()\nnames=\"srv/guest.py srv/caddy\
+        \ | cpio\"\nstage='install -m 755 \"$RUNNER_TEMP/final-linux/caddy-candidate\"\
+        \ \"$overlay/srv/caddy\"'\nassert boot.count(names)==boot.count(stage)==1\n\
+        boot=boot.replace(names,\"srv/guest.py srv/caddy srv/network-relay | cpio\"\
+        ).replace(stage,stage+'\\ninstall -m 755 \"$RUNNER_TEMP/exact-rust/network-relay\"\
+        \ \"$overlay/srv/network-relay\"')\n(Path(os.environ[\"RUNNER_TEMP\"])/\"\
+        boot-products.sh\").write_text(boot)\nBOOT\nbash \"$RUNNER_TEMP/boot-products.sh\"\
+        \ \"$GUEST_ARCH\" \"$RUNNER_TEMP/image\"\npython3 - <<'ELF'\nimport hashlib,json,os\n\
+        from pathlib import Path\nt=Path(os.environ['RUNNER_TEMP'])\nrecord=json.loads((t/'linux.json').read_bytes())\n\
+        assert record['system']=='Linux' and record['machine']==os.environ['GUEST_MACHINE'],record\n\
+        for name,path in [('rust',t/'exact-rust/network-relay'),('caddy',t/'final-linux/caddy-candidate')]:\n\
+        \    with path.open('rb') as f: assert hashlib.file_digest(f,'sha256').hexdigest()==record[name],name\n\
+        (t/'evidence/elf-identities.json').write_text(json.dumps(record))\nELF\n"
+      env:
+        GUEST_ARCH: ${{ matrix.arch }}
+        GUEST_MACHINE: ${{ matrix.machine }}
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: d5bd2b77bc2e220d0f0a58eabc5f7ae3f43b307d
+        path: clients
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+      with:
+        toolchain: stable
+    - name: Build production clients and the native controller entry points
+      run: 'bash diagnostics/linux-apple/build-products.sh "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
+        "$RUNNER_TEMP/products"
+
+        bash clients/network-relay-tun/build-macos.sh
+
+        '
+    - name: Route ordinary Mac sockets through the installed utun, production transport
+        and Linux origins
+      run: "set -euo pipefail\nexport TUN_PROJECT=\"$PWD/clients/network-relay-tun\"\
+        \napp=\"$TUN_PROJECT/dist/Network Relay Tun.app\"\ncleanup() { sudo /bin/bash\
+        \ \"$app/Contents/Resources/uninstall-helper.sh\"; }\ntrap cleanup EXIT\n\
+        sudo /bin/bash \"$app/Contents/Resources/install-helper.sh\" \"$(id -u)\"\n\
+        diagnostic_app=\"$RUNNER_TEMP/controller/Network Relay Tun.app\"\nmkdir -p\
+        \ \"$RUNNER_TEMP/controller\"\nditto \"$app\" \"$diagnostic_app\"\nexport\
+        \ GLOBAL_CONTROLLER_BIN=\"$diagnostic_app/Contents/MacOS/NetworkRelayTun\"\
+        \ninstall -m 755 \"$RUNNER_TEMP/products/tun\" \"$GLOBAL_CONTROLLER_BIN\"\n\
+        codesign --force --sign - --timestamp=none \"$diagnostic_app\"\ncodesign --verify\
+        \ --strict \"$diagnostic_app\"\npython3 - <<'PYHOST'\nimport os, runpy, subprocess\n\
+        t=os.environ['RUNNER_TEMP']\nwith runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']():\n\
+        \    subprocess.run(['python3','diagnostics/linux-apple/products.py',t+'/products',t+'/evidence'],check=True)\n\
+        PYHOST\ntrap - EXIT\ncleanup\n"
+    - name: Stop Linux fixture
+      if: always()
+      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
+        || true; fi
+
+        '
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: final-capture-${{ matrix.arch }}
+        path: ${{ runner.temp }}/evidence
+        retention-days: 7
+    strategy: *id001
+    needs: rust
