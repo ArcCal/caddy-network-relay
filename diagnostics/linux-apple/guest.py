@@ -20,6 +20,8 @@ CADDY = os.environ.get("CADDY_RELAY", "/srv/caddy")
 CANDIDATE = os.environ.get("CADDY_CANDIDATE", "/srv/caddy-candidate")
 BLOCK = bytes(range(256)) * 256
 COUNTS = collections.Counter()
+BULK_WRITES = {}
+SERVER_PIDS = {}
 LOCK = threading.Lock()
 
 
@@ -78,6 +80,7 @@ def start_servers(secret):
                         *(["--password-stdin"] if name == "candidate" else []), password=secret)
         log = (ROOT / (name + ".log")).open("wb")
         child = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+        SERVER_PIDS[name] = child.pid
         jobs.append(child)
     return jobs
 
@@ -96,10 +99,20 @@ class Origin(http.server.BaseHTTPRequestHandler):
             self.send_header("X-Upload-Bytes", str(upload[0]))
             self.send_header("X-Upload-SHA256", upload[1])
         self.end_headers()
+        transfer = None
+        if size == 64 << 20:
+            with LOCK:
+                transfer = len(BULK_WRITES)+1
+                BULK_WRITES[transfer] = 0
+        written = 0
         while size:
             chunk = min(size, len(BLOCK))
             self.wfile.write(BLOCK[:chunk])
             size -= chunk
+            written += chunk
+            if transfer is not None and written % (1 << 20) == 0:
+                with LOCK:
+                    BULK_WRITES[transfer] = written
 
     def do_GET(self):
         if self.path not in ("/4096", "/1048576", "/8388608", "/67108864"):
@@ -176,6 +189,22 @@ class Metadata(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/environment":
             body = self.server.environment_record
+        elif self.path == "/progress":
+            with LOCK:
+                writes = dict(BULK_WRITES)
+            cpu = {}
+            for name, pid in SERVER_PIDS.items():
+                fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")",1)[1].split()
+                cpu[name]=(int(fields[11])+int(fields[12]))/os.sysconf("SC_CLK_TCK")
+            queues = {}
+            for raw in Path("/proc/net/tcp").read_text().splitlines()[1:]:
+                fields = raw.split()
+                port = int(fields[1].rsplit(":",1)[1],16)
+                if fields[3] == "01" and port in (14200,14202,18443):
+                    t, r = (int(n,16) for n in fields[4].split(":"))
+                    group = queues.setdefault(str(port),[0,0,0])
+                    group[0] += 1; group[1] += t; group[2] += r
+            body=json.dumps({"writes":writes,"cpu":cpu,"tcp_queues":queues}).encode()
         elif self.path == "/counts":
             with LOCK:
                 data = dict(COUNTS)
