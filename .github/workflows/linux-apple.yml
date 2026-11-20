@@ -1,12 +1,57 @@
-name: Native Apple UDP startup with per-packet Linux and reverse-path counts
+name: Controlled Linux DPLPMTUD candidate against native Apple UDP
 'on':
   push:
     branches:
-    - audit/native-udp-path-20261120
+    - audit/udp-discovery-comparison-20261120
 permissions:
   contents: read
   actions: read
 jobs:
+  candidate:
+    runs-on: ubuntu-22.04-arm
+    timeout-minutes: 40
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      with:
+        go-version: 1.27.4
+        cache: false
+    - name: Check the same minimum-path and idle-probe bounds, then build the Linux
+        arm64 candidate
+      run: 'set -euo pipefail
+
+        python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/reviewed-go"
+
+        export GOTOOLCHAIN=local GOROOT="$RUNNER_TEMP/reviewed-go" GOFLAGS="-mod=readonly
+        -tags=http2legacy,relay_tls9846_v1"
+
+        python3 diagnostics/linux-apple/prepare-probe-candidate.py "$RUNNER_TEMP/probe-overlay"
+
+        gofmt -w "$RUNNER_TEMP"/probe-overlay/*.go
+
+        overlay="$RUNNER_TEMP/probe-overlay/overlay.json"
+
+        go test -overlay="$overlay" -count=4 -run ''^Test(IdleDatagramPathMTUDiscovery|AuthenticatedDatagramProbeHint)$''
+        .
+
+        mkdir "$RUNNER_TEMP/probe-arm"
+
+        go build -trimpath -o "$RUNNER_TEMP/probe-arm/caddy-baseline" ./cmd/caddy
+
+        go build -overlay="$overlay" -trimpath -o "$RUNNER_TEMP/probe-arm/caddy-candidate"
+        ./cmd/caddy
+
+        (cd "$RUNNER_TEMP/probe-arm" && sha256sum caddy-baseline caddy-candidate >
+        SHA256SUMS)
+
+        '
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: probe-arm-candidate
+        path: ${{ runner.temp }}/probe-arm
+        retention-days: 7
   clients:
     name: ${{ matrix.platform }} on ${{ matrix.runner }} to Linux ${{ matrix.arch
       }}
@@ -36,6 +81,10 @@ jobs:
         path: ${{ runner.temp }}/image
         github-token: ${{ github.token }}
         run-id: 44747890260
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: probe-arm-candidate
+        path: ${{ runner.temp }}/probe-arm
     - name: Boot the release Linux kernel with loopback-only port forwards
       run: bash diagnostics/linux-apple/boot.sh "${{ matrix.arch }}" "$RUNNER_TEMP/image"
     - name: Prepare Apple client
@@ -64,3 +113,4 @@ jobs:
         name: ${{ matrix.platform }}-${{ matrix.runner }}-linux-${{ matrix.arch }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7
+    needs: candidate

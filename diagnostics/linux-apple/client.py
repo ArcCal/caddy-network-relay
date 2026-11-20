@@ -34,9 +34,9 @@ def check(probe, out, secret_dir, server, size, phase, trial):
     child = subprocess.run([probe, request, output], capture_output=True, timeout=35)
     report = json.loads(output.read_text()) if output.exists() else {}
     after = json.loads(fetch("counts"))
-    if server == "caddy":
+    if server in ("caddy", "candidate"):
         limit = time.monotonic() + 2
-        while time.monotonic() < limit and after.get("closed_udp", 0) == before.get("closed_udp", 0):
+        while time.monotonic() < limit and after.get(server + "_closed_udp", 0) == before.get(server + "_closed_udp", 0):
             time.sleep(.05)
             after = json.loads(fetch("counts"))
     diff = lambda key: after.get(key, 0) - before.get(key, 0)
@@ -45,8 +45,8 @@ def check(probe, out, secret_dir, server, size, phase, trial):
     return {"case": case, "rc": child.returncode, "origin": diff("udp"), "expected_origin": expected,
             "received_ids": checked, "relay_events": diff(server + "_udp"), "size": size,
             "confirmed": bool(report) and diff("udp") == expected and diff(server + "_udp") > 0,
-            "caddy_closed_sessions": diff("closed_udp"), "caddy_bytes_up": diff("closed_up"),
-            "caddy_bytes_down": diff("closed_down"), "caddy_budget_drops": diff("budget_drops")}
+            "caddy_closed_sessions": diff(server + "_closed_udp"), "caddy_bytes_up": diff(server + "_closed_up"),
+            "caddy_bytes_down": diff(server + "_closed_down"), "caddy_budget_drops": diff(server + "_budget_drops")}
 
 
 def main():
@@ -57,9 +57,9 @@ def main():
     with tempfile.TemporaryDirectory() as tmp:
         private = Path(tmp)
         (private / "ca.der").write_bytes(fetch("ca.der"))
-        for kind in ("rust", "caddy"):
+        for kind in ("candidate", "caddy"):
             (private / (kind + ".mobileconfig")).write_bytes(fetch(kind + ".mobileconfig"))
-        for trial, servers in enumerate((("caddy", "rust"), ("rust", "caddy")), 1):
+        for trial, servers in enumerate((("caddy", "candidate"), ("candidate", "caddy")), 1):
             for server in servers:
                 for size in (64, 1200, 1350, 1400):
                     for phase in ("immediate", "delay", "small"):

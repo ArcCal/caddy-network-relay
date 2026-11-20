@@ -13,13 +13,16 @@ esac
 overlay=$(mktemp -d "$RUNNER_TEMP/origin-overlay.XXXXXX")
 mkdir "$overlay/srv"
 cp diagnostics/linux-apple/guest.py "$overlay/srv/guest.py"
-(cd "$overlay" && printf '%s\n' srv/guest.py | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
+(cd "$RUNNER_TEMP/probe-arm" && shasum -a 256 --check SHA256SUMS)
+install -m 755 "$RUNNER_TEMP/probe-arm/caddy-baseline" "$overlay/srv/caddy"
+install -m 755 "$RUNNER_TEMP/probe-arm/caddy-candidate" "$overlay/srv/caddy-candidate"
+(cd "$overlay" && printf '%s\n' srv/guest.py srv/caddy srv/caddy-candidate | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
 cat "$image/guest.gz" "$overlay/fixture.gz" > "$overlay/guest-with-bulk.gz"
 command -v "$cmd" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install qemu
 # libslirp restricted mode drops every guest UDP reply, including forwarded
 # loopback ports. The guest permits only a host route to the forwarding gateway.
 net=user,id=nic,ipv6=off
-for mapping in tcp:18080 tcp:18443 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:14201; do
+for mapping in tcp:18080 tcp:18443 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:14201 tcp:14202 udp:14202; do
     protocol=${mapping%:*}
     port=${mapping#*:}
     net+=",hostfwd=$protocol:127.0.0.1:$port-10.0.2.15:$port"
@@ -58,7 +61,7 @@ def observed():
     with opener.open("http://127.0.0.1:18080/counts", timeout=12) as response:
         return json.load(response).get("udp", 0)
 trust = ssl.create_default_context(cafile=str(Path(sys.argv[1]) / "guest-ca.pem"))
-for port in (14200, 14201):
+for port in (14200, 14201, 14202):
     for identity in ("ingress.relay.test", "127.0.0.1"):
         with socket.create_connection(("127.0.0.1", port), timeout=12) as connection:
             with trust.wrap_socket(connection, server_hostname=identity) as secure:

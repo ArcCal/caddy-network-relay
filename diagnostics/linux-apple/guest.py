@@ -17,6 +17,7 @@ os.chmod(ROOT, 0o700)
 BIND = os.environ.get("FIXTURE_BIND", "127.0.0.1")
 RUST = os.environ.get("RUST_RELAY", "/srv/network-relay")
 CADDY = os.environ.get("CADDY_RELAY", "/srv/caddy")
+CANDIDATE = os.environ.get("CADDY_CANDIDATE", "/srv/caddy-candidate")
 BLOCK = bytes(range(256)) * 256
 COUNTS = collections.Counter()
 LOCK = threading.Lock()
@@ -48,8 +49,8 @@ def credentials():
 
 def start_servers(secret):
     jobs = []
-    for name, binary, port in (("rust", RUST, 14200), ("caddy", CADDY, 14201)):
-        cli = [binary] + (["network-relay"] if name == "caddy" else [])
+    for name, binary, port in (("rust", RUST, 14200), ("caddy", CADDY, 14201), ("candidate", CANDIDATE, 14202)):
+        cli = [binary] + (["network-relay"] if name != "rust" else [])
         account = command(*cli, "passwd", "--name", "alice", "--stdin", "--fast-hash", password=secret)
         if name == "rust":
             (ROOT / "relay.toml").write_text(f'listen = "{BIND}:{port}"\n[tls]\ncert = "{ROOT}/cert.pem"\n'
@@ -60,16 +61,16 @@ def start_servers(secret):
             handler = {"handler": "network_relay", "relay_id": "linux-fixture", "log_requests": True,
                        "users": [{"name": "alice", "password_hash": account.strip().split()[2]}],
                        "blocked_destinations": [], "blocked_ports": []}
-            cfg = {"logging": {"logs": {"default": {"level": "DEBUG"}}}, "admin": {"disabled": True}, "storage": {"module": "file_system", "root": str(ROOT/"storage")},
+            cfg = {"logging": {"logs": {"default": {"level": "DEBUG"}}}, "admin": {"disabled": True}, "storage": {"module": "file_system", "root": str(ROOT/(name+"-storage"))},
                    "apps": {"http": {"servers": {"relay": {"listen": [f"{BIND}:{port}"],
                    "automatic_https": {"disable": True}, "tls_connection_policies": [{}],
                    "routes": [{"handle": [handler, {"handler":"static_response","status_code":404}]}]}}},
                    "tls": {"certificates": {"load_files": [{"certificate": str(ROOT/"cert.pem"),"key":str(ROOT/"key.pem")}]}}}}
-            (ROOT / "caddy.json").write_text(json.dumps(cfg))
-            args = [binary, "run", "--config", str(ROOT / "caddy.json")]
+            (ROOT / (name + ".json")).write_text(json.dumps(cfg))
+            args = [binary, "run", "--config", str(ROOT / (name + ".json"))]
         profile = ROOT / (name + ".mobileconfig")
         command(*cli, "profile", "--host", "ingress.relay.test", "--port", str(port), "--user", "alice", "--out", str(profile),
-                *(["--password-stdin"] if name == "caddy" else []), password=secret)
+                *(["--password-stdin"] if name != "rust" else []), password=secret)
         log = (ROOT / (name + ".log")).open("wb")
         child = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
         jobs.append(child)
@@ -119,7 +120,7 @@ class Origin(http.server.BaseHTTPRequestHandler):
 
 def environment_record():
     data = {"system": os.uname().sysname, "machine": os.uname().machine, "kernel": os.uname().release}
-    for name, program in (("rust", RUST), ("caddy", CADDY)):
+    for name, program in (("rust", RUST), ("caddy", CADDY), ("candidate", CANDIDATE)):
         digest = hashlib.sha256()
         with open(program, "rb") as handle:
             for block in iter(lambda: handle.read(1024 * 1024), b""):
@@ -138,25 +139,27 @@ class Metadata(http.server.BaseHTTPRequestHandler):
         elif self.path == "/counts":
             with LOCK:
                 data = dict(COUNTS)
-            for name in ("rust", "caddy"):
+            for name in ("rust", "caddy", "candidate"):
                 log = (ROOT / (name + ".log")).read_bytes().lower()
                 data[name + "_udp"] = log.count(b"connect-udp")
                 data[name + "_tcp"] = log.count(b"connect")
                 data[name + "_auth"] = log.count(b"authentication failed")
-            data.update(closed_udp=0, closed_up=0, closed_down=0, budget_drops=0)
-            for line in (ROOT / "caddy.log").read_bytes().splitlines():
-                try:
-                    event = json.loads(line)
-                except (ValueError, UnicodeError):
-                    continue
-                if event.get("msg") == "tunnel closed" and event.get("kind") == "udp":
-                    data["closed_udp"] += 1
-                    data["closed_up"] += event.get("bytes_up", 0)
-                    data["closed_down"] += event.get("bytes_down", 0)
-                if event.get("msg") == "UDP payloads dropped by per-user traffic budget":
-                    data["budget_drops"] += event.get("dropped", 0)
+            for server in ("caddy", "candidate"):
+                for field in ("closed_udp", "closed_up", "closed_down", "budget_drops"):
+                    data[server + "_" + field] = 0
+                for line in (ROOT / (server + ".log")).read_bytes().splitlines():
+                    try:
+                        event = json.loads(line)
+                    except (ValueError, UnicodeError):
+                        continue
+                    if event.get("msg") == "tunnel closed" and event.get("kind") == "udp":
+                        data[server + "_closed_udp"] += 1
+                        data[server + "_closed_up"] += event.get("bytes_up", 0)
+                        data[server + "_closed_down"] += event.get("bytes_down", 0)
+                    if event.get("msg") == "UDP payloads dropped by per-user traffic budget":
+                        data[server + "_budget_drops"] += event.get("dropped", 0)
             body = json.dumps(data).encode()
-        elif self.path in ("/ca.der", "/rust.mobileconfig", "/caddy.mobileconfig"):
+        elif self.path in ("/ca.der", "/rust.mobileconfig", "/caddy.mobileconfig", "/candidate.mobileconfig"):
             body = (ROOT / self.path[1:]).read_bytes()
         else:
             return self.send_error(404)
@@ -196,7 +199,7 @@ def main():
     tls.load_cert_chain(ROOT/"cert.pem", ROOT/"key.pem")
     origin.socket = tls.wrap_socket(origin.socket, server_side=True)
     threading.Thread(target=origin.serve_forever, daemon=True).start()
-    for port in (14200, 14201):
+    for port in (14200, 14201, 14202):
         import time
         for attempt in range(200):
             if any(p.poll() is not None for p in jobs):
