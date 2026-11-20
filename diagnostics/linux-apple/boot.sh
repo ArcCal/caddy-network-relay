@@ -8,6 +8,13 @@ case "$arch" in
     *) exit 2 ;;
 esac
 (cd "$image" && shasum -a 256 --check SHA256SUMS)
+# The signed kernel and release binaries stay in the verified original image.
+# Append only the origin fixture that also serves a 64 MiB response.
+overlay=$(mktemp -d "$RUNNER_TEMP/origin-overlay.XXXXXX")
+mkdir "$overlay/srv"
+cp diagnostics/linux-apple/guest.py "$overlay/srv/guest.py"
+(cd "$overlay" && printf '%s\n' srv/guest.py | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
+cat "$image/guest.gz" "$overlay/fixture.gz" > "$overlay/guest-with-bulk.gz"
 command -v "$cmd" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install qemu
 net=user,id=nic,restrict=on
 for mapping in tcp:18080 tcp:18443 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:14201; do
@@ -22,7 +29,7 @@ touch "$log"
 epoch=$(date +%s)
 initargs="rdinit=/bin/sh console=$console panic=-1 -- -c \"/bin/date -u -s @$epoch && exec /relay-init\""
 "$cmd" -machine "$machine" -accel tcg,thread=multi -cpu "$cpu" -smp 2 -m 2048 \
-  -kernel "$image/kernel" -initrd "$image/guest.gz" -append "$initargs" \
+  -kernel "$image/kernel" -initrd "$overlay/guest-with-bulk.gz" -append "$initargs" \
   -netdev "$net" -device virtio-net-pci,netdev=nic -object rng-random,filename=/dev/urandom,id=rng \
   -device virtio-rng-pci,rng=rng -display none -monitor none -serial "file:$log" -no-reboot \
   >"$RUNNER_TEMP/qemu.log" 2>&1 &

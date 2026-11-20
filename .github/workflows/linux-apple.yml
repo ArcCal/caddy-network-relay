@@ -1,26 +1,21 @@
-name: Apple clients against Linux Relay servers
+name: Native macOS four-stream bulk against Linux Relay servers
 'on':
   push:
     branches:
-    - audit/linux-apple-interop-20261120
+    - audit/linux-apple-bulk-20261120
 permissions:
   contents: read
   actions: read
 jobs:
   clients:
-    name: ${{ matrix.platform }} on ${{ matrix.runner }} to Linux ${{ matrix.arch }}
+    name: ${{ matrix.platform }} on ${{ matrix.runner }} to Linux ${{ matrix.arch
+      }}
     strategy:
       fail-fast: false
       matrix:
         include:
         - runner: xcode-27
           platform: macOS
-          arch: arm64
-        - runner: macos-15
-          platform: macOS
-          arch: amd64
-        - runner: xcode-27
-          platform: iOS
           arch: arm64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
@@ -44,16 +39,26 @@ jobs:
     - name: Boot the release Linux kernel with loopback-only port forwards
       run: bash diagnostics/linux-apple/boot.sh "${{ matrix.arch }}" "$RUNNER_TEMP/image"
     - name: Prepare Apple client
-      run: "set -euo pipefail\nsw_vers\nxcodebuild -version\nif [[ '${{ matrix.platform }}' == macOS ]]; then\n  xcrun swiftc -O -parse-as-library -target \"$(uname -m)-apple-macos14.0\" native-probe/diagnostics/RelayProbe.swift -o \"$RUNNER_TEMP/probe\"\nelse\n  xcrun simctl list devices available -j > \"$RUNNER_TEMP/devices.json\"\n  sim_id=$(python3 - \"$RUNNER_TEMP/devices.json\" <<'PY'\nimport\
-        \ json, re, sys\ndata=json.load(open(sys.argv[1]))['devices']\npairs=[(tuple(map(int,m.group(1).split('-'))),devices) for key,devices in data.items() if (m:=re.search(r'[.]iOS-([0-9]+(?:-[0-9]+)*)$',key))]\nprint(next(d['udid'] for _,devices in sorted(pairs,key=lambda item:item[0],reverse=True) for d in devices if d['isAvailable'] and 'iPhone' in d['name']))\nPY\n  )\n  xcrun simctl bootstatus\
-        \ \"$sim_id\" -b\n  sdk=$(xcrun --sdk iphonesimulator --show-sdk-path)\n  xcrun --sdk iphonesimulator swiftc -O -parse-as-library -sdk \"$sdk\" -target \"$(uname -m)-apple-ios17.0-simulator\" native-probe/diagnostics/RelayProbe.swift -o \"$RUNNER_TEMP/ios-probe\"\n  echo \"RELAY_SIMULATOR_ID=$sim_id\" >> \"$GITHUB_ENV\"\n  cat > \"$RUNNER_TEMP/probe\" <<'PROBE'\n#!/bin/bash\nexec xcrun simctl\
-        \ spawn \"$RELAY_SIMULATOR_ID\" \"$RUNNER_TEMP/ios-probe\" \"$@\"\nPROBE\n  chmod 700 \"$RUNNER_TEMP/probe\"\nfi\n"
-    - name: Native transfers, independent destination counts, authentication and trust controls
+      run: 'set -euo pipefail
+
+        sw_vers
+
+        xcodebuild -version
+
+        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" native-probe/diagnostics/RelayProbe.swift
+        -o "$RUNNER_TEMP/probe"
+
+        '
+    - name: Verify 64 MiB serial and four-stream transfers and control paths
       shell: bash
-      run: "python3 - <<'PY'\nimport os, runpy, subprocess\nt=os.environ['RUNNER_TEMP']\nhosts=runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']\nwith hosts():\n    subprocess.run(['python3','diagnostics/linux-apple/client.py',t+'/probe',t+'/evidence'],check=True)\nPY\n"
+      run: "python3 - <<'PY'\nimport os, runpy, subprocess\nt=os.environ['RUNNER_TEMP']\n\
+        hosts=runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']\n\
+        with hosts():\n    subprocess.run(['python3','diagnostics/linux-apple/client.py',t+'/probe',t+'/evidence'],check=True)\n\
+        PY\n"
     - name: Stop Linux fixture
       if: always()
-      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")" || true; fi
+      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
+        || true; fi
 
         '
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
