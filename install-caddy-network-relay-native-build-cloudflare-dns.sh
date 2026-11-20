@@ -954,8 +954,8 @@ cr_build() {
                            github.com/go-jose/go-jose/v3=./third_party/go-jose-v3 \
                            github.com/go-jose/go-jose/v4=./third_party/go-jose-v4 \
                            github.com/caddy-dns/cloudflare=../cloudflare-src; do
-            jq -e --arg module "${replacement%%=*}" --arg path "${replacement#*=}" \
-                'any(.Replace[]; .Old.Path == $module and .New.Path == $path)' \
+            jq -e --arg module_name "${replacement%%=*}" --arg path "${replacement#*=}" \
+                'any(.Replace[]; .Old.Path == $module_name and .New.Path == $path)' \
                 <<< "$overlay" >/dev/null || cr_die "Missing reviewed source replacement in Cloudflare build overlay: $replacement."
         done
         # Dependency resolution is complete: building may no longer edit it.
