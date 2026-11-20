@@ -129,6 +129,41 @@ def environment_record():
     return json.dumps(data).encode()
 
 
+class RelayCounts:
+    """Read complete new lines once. The immutable guest never rotates these logs."""
+    def __init__(self, root):
+        self.root = root
+        self.counters = collections.Counter()
+        self.offsets = collections.Counter()
+        self.lock = threading.Lock()
+
+    def snapshot(self):
+        with self.lock:
+            for name in ("rust", "caddy", "candidate"):
+                with (self.root / (name + ".log")).open("rb") as log:
+                    log.seek(self.offsets[name])
+                    for line in log:
+                        if not line.endswith(b"\n"):
+                            break
+                        self.offsets[name] += len(line)
+                        lower = line.lower()
+                        for field, word in (("_udp", b"connect-udp"), ("_tcp", b"connect"),
+                                            ("_auth", b"authentication failed")):
+                            self.counters[name + field] += lower.count(word)
+                        if name != "rust" and (b'tunnel closed' in lower or b'per-user traffic budget' in lower):
+                            try:
+                                event = json.loads(line)
+                            except (ValueError, UnicodeError):
+                                continue
+                            if event.get("msg") == "tunnel closed" and event.get("kind") == "udp":
+                                self.counters[name + "_closed_udp"] += 1
+                                self.counters[name + "_closed_up"] += event.get("bytes_up", 0)
+                                self.counters[name + "_closed_down"] += event.get("bytes_down", 0)
+                            if event.get("msg") == "UDP payloads dropped by per-user traffic budget":
+                                self.counters[name + "_budget_drops"] += event.get("dropped", 0)
+            return dict(self.counters)
+
+
 class Metadata(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
@@ -139,31 +174,7 @@ class Metadata(http.server.BaseHTTPRequestHandler):
         elif self.path == "/counts":
             with LOCK:
                 data = dict(COUNTS)
-            for name in ("rust", "caddy", "candidate"):
-                log = (ROOT / (name + ".log")).read_bytes().lower()
-                data[name + "_udp"] = log.count(b"connect-udp")
-                data[name + "_tcp"] = log.count(b"connect")
-                data[name + "_auth"] = log.count(b"authentication failed")
-            for server in ("caddy", "candidate"):
-                data[server + "_limits"] = []
-                for field in ("closed_udp", "closed_up", "closed_down", "budget_drops"):
-                    data[server + "_" + field] = 0
-                for line in (ROOT / (server + ".log")).read_bytes().splitlines():
-                    if line.startswith(b"fixture_datagram_limit "):
-                        fields = line.split()[1:]
-                        if len(fields) == 4 and all(f.isdigit() for f in fields):
-                            data[server + "_limits"].append([int(f) for f in fields])
-                        continue
-                    try:
-                        event = json.loads(line)
-                    except (ValueError, UnicodeError):
-                        continue
-                    if event.get("msg") == "tunnel closed" and event.get("kind") == "udp":
-                        data[server + "_closed_udp"] += 1
-                        data[server + "_closed_up"] += event.get("bytes_up", 0)
-                        data[server + "_closed_down"] += event.get("bytes_down", 0)
-                    if event.get("msg") == "UDP payloads dropped by per-user traffic budget":
-                        data[server + "_budget_drops"] += event.get("dropped", 0)
+            data.update(self.server.relay_counts.snapshot())
             body = json.dumps(data).encode()
         elif self.path in ("/ca.der", "/rust.mobileconfig", "/caddy.mobileconfig", "/candidate.mobileconfig"):
             body = (ROOT / self.path[1:]).read_bytes()
@@ -220,6 +231,7 @@ def main():
     print("Linux Relay fixture ready", os.uname().machine, flush=True)
     server = http.server.ThreadingHTTPServer((BIND, 18080), Metadata)
     server.environment_record = identity
+    server.relay_counts = RelayCounts(ROOT)
     server.serve_forever()
 
 

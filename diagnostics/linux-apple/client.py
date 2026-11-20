@@ -13,8 +13,15 @@ opener = build_opener(ProxyHandler({}))
 
 
 def fetch(path):
-    with opener.open("http://127.0.0.1:18080/" + path, timeout=10) as response:
-        return response.read()
+    for attempt in range(3):
+        try:
+            with opener.open("http://127.0.0.1:18080/" + path, timeout=15) as response:
+                return response.read()
+        except OSError:
+            if attempt == 2 or path != "counts":
+                raise
+            time.sleep(.3)
+
 
 
 def check(probe, out, secret_dir, server, size, phase, trial):
@@ -45,7 +52,6 @@ def check(probe, out, secret_dir, server, size, phase, trial):
     return {"case": case, "rc": child.returncode, "origin": diff("udp"), "expected_origin": expected,
             "received_ids": checked, "relay_events": diff(server + "_udp"), "size": size,
             "confirmed": bool(report) and diff("udp") == expected and diff(server + "_udp") > 0,
-            "rejected_lengths": after[server + "_limits"][len(before[server + "_limits"]):],
             "caddy_closed_sessions": diff(server + "_closed_udp"), "caddy_bytes_up": diff(server + "_closed_up"),
             "caddy_bytes_down": diff(server + "_closed_down"), "caddy_budget_drops": diff(server + "_budget_drops")}
 
