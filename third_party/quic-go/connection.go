@@ -167,7 +167,7 @@ type Conn struct {
 	maxPayloadSizeEstimate atomic.Uint32
 	// Oversized application datagrams can be the only traffic on a connection.
 	// Wake DPLPMTUD even when no smaller application packet is being sent.
-	datagramMTUProbeRequested atomic.Bool
+	requestedDatagramSize atomic.Uint32
 
 	initialStream       *initialCryptoStream
 	handshakeStream     *cryptoStream
@@ -903,7 +903,8 @@ func (c *Conn) maybeResetTimer() {
 	if !c.pacingDeadline.IsZero() && c.pacingDeadline.Before(deadline) {
 		deadline = c.pacingDeadline
 	}
-	if c.datagramMTUProbeRequested.Load() && c.handshakeConfirmed && c.mtuDiscoverer != nil {
+	if size := c.requestedDatagramSize.Load(); size != 0 && c.handshakeConfirmed && c.mtuDiscoverer != nil {
+		c.mtuDiscoverer.requestedDatagramSize = protocol.ByteCount(size)
 		if t := c.mtuDiscoverer.NextProbeTime(); !t.IsZero() {
 			// Respect congestion pacing instead of repeatedly waking on a past probe deadline.
 			if c.pacingDeadline.After(t) {
@@ -3071,7 +3072,13 @@ func (c *Conn) SendDatagram(p []byte) error {
 	)
 	if protocol.ByteCount(len(p)) > maxDataLen {
 		if protocol.ByteCount(len(p)) <= f.MaxDataLen(c.peerParams.MaxDatagramFrameSize, c.version) {
-			c.datagramMTUProbeRequested.Store(true)
+			// A datagram beyond our absolute ceiling can wake ordinary discovery,
+			// but must not replace a smaller, attainable size request.
+			if protocol.ByteCount(len(p)) <= estimateMaxPayloadSize(protocol.MaxPacketBufferSize) {
+				c.requestedDatagramSize.Store(uint32(len(p)))
+			} else {
+				c.requestedDatagramSize.CompareAndSwap(0, 1)
+			}
 			c.scheduleSending()
 		}
 		return &DatagramTooLargeError{MaxDatagramPayloadSize: int64(maxDataLen)}

@@ -52,7 +52,7 @@
         {
           "path": "connection.go",
           "upstream_sha256": "168593a4b6fec647f6e0d9ccab22676f463b36f240c0456760cc6ef659b6d6c7",
-          "local_sha256": "397fc613e67f1724f866d69dac1309bee297d8f2d182f38f1051c5715adf2612",
+          "local_sha256": "740256de462700876d05c9d24664a5ad26f34f5dec316207f67d866951e10908",
           "modified": true
         },
         {
@@ -970,7 +970,7 @@
         {
           "path": "mtu_discoverer.go",
           "upstream_sha256": "0b642741127fcd267635e6d426fe351619e67bc9750371111c44b7f59ff16f8f",
-          "local_sha256": "78127772fdfd4498b708b6ff3c25dd5bcaad3b1e1e8344849913d1540516169c",
+          "local_sha256": "e8e3af3c514da81253d09b010abac1456dd78d3521c4a990397883279bdac8d5",
           "modified": true
         },
         {

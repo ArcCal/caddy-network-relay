@@ -137,12 +137,17 @@ func (p datagramProbePath) SetReadBuffer(n int) error             { return p.con
 func (p datagramProbePath) SetWriteBuffer(n int) error            { return p.conn.SetWriteBuffer(n) }
 
 func TestIdleDatagramPathMTUDiscovery(t *testing.T) {
-	for _, limit := range []int{0, 1232} {
-		name := "larger_path"
-		if limit != 0 {
-			name = "minimum_ipv6_path"
-		}
-		t.Run(name, func(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		limit, payloadSize int
+	}{
+		{"larger_path", 0, 1200},
+		{"minimum_ipv6_path", 1232, 1200},
+		// 1400 bytes plus the HTTP/3 flow ID and the MASQUE context ID.
+		{"near_search_ceiling", 0, 1402},
+		{"minimum_ipv6_path_near_ceiling", 1232, 1402},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			sock, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -194,19 +199,19 @@ func TestIdleDatagramPathMTUDiscovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer cs.Close()
-			path := &datagramProbeConn{UDPConn: cs, limit: limit}
+			path := &datagramProbeConn{UDPConn: cs, limit: tc.limit}
 			client := &quic.Transport{Conn: datagramProbePath{conn: path}}
 			defer client.Close()
 			conn, err := client.Dial(ctx, sock.LocalAddr(), &tls.Config{ServerName: "relay.test", RootCAs: pki().pool, NextProtos: []string{"mtu-test"}}, &quic.Config{InitialPacketSize: 1200, EnableDatagrams: true})
 			if err != nil {
 				t.Fatal(err)
 			}
-			payload := bytes.Repeat([]byte{0xa5}, 1200)
+			payload := bytes.Repeat([]byte{0xa5}, tc.payloadSize)
 			var oversized *quic.DatagramTooLargeError
 			if err := conn.SendDatagram(payload); !errors.As(err, &oversized) {
-				t.Fatalf("expected initial 1200-byte path to reject 1200-byte payload: %v", err)
+				t.Fatalf("expected initial path to reject %d-byte payload: %v", len(payload), err)
 			}
-			if limit == 0 {
+			if tc.limit == 0 {
 				// No smaller application packets are sent to wake up probing.
 				deadline := time.Now().Add(2 * time.Second)
 				for {

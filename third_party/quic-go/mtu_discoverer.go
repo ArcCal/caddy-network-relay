@@ -78,7 +78,8 @@ const (
 // MTU discovery concludes once the interval min and max has been narrowed down to maxMTUDiff.
 
 type mtuFinder struct {
-	lastProbeTime monotime.Time
+	requestedDatagramSize protocol.ByteCount // last attainable application request, owned by the connection loop
+	lastProbeTime         monotime.Time
 
 	rttStats *utils.RTTStats
 
@@ -123,7 +124,17 @@ func (f *mtuFinder) init(start, max protocol.ByteCount) {
 }
 
 func (f *mtuFinder) done() bool {
-	return f.max()-f.min <= maxMTUDiff+1
+	upper := f.max()
+	gap := upper - f.min
+	if gap > maxMTUDiff+1 {
+		return false
+	}
+	// A small gap normally costs only a few bytes of stream throughput. For
+	// DATAGRAM it can make an entire payload undeliverable. Keep probing
+	// only if this request fits inside the remaining search interval.
+	// At a one-byte gap the midpoint cannot exceed the confirmed minimum.
+	return gap <= 1 || f.requestedDatagramSize <= estimateMaxPayloadSize(f.min) ||
+		f.requestedDatagramSize > estimateMaxPayloadSize(upper)
 }
 
 func (f *mtuFinder) max() protocol.ByteCount {

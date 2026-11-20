@@ -36,6 +36,8 @@ Local changes:
   Supported HTTP scheme names are compared and normalized using ASCII only.
 - quic-go: on a path-size rejection of an application DATAGRAM, wake bounded
   DPLPMTUD on its next probe deadline even without smaller application traffic.
+  If the last rejected payload fits inside the final search interval, continue
+  probing until the confirmed size admits it or the search is exhausted.
   Respect DF capability, disabled discovery, congestion pacing and probe loss.
 - quic-go/http3: normalize whitespace in an upstream ABNF comment; no behavior
   change, recorded in the source provenance manifest.
