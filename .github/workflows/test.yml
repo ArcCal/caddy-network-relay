@@ -37,14 +37,7 @@ jobs:
       - run: go vet ./...
       - run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Check pinned transport vulnerability records
-        run: |
-          mapfile -t transport_queries < <(jq -r '.snapshots[] | "\(.module)@\(.version)"' third_party/provenance.json)
-          go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 -mode=query -json "${transport_queries[@]}" > transport-vulnerabilities.json
-          # Advisories for a recorded upstream version fail unless provenance.json
-          # records them as reviewed for that snapshot (backported or not affected).
-          jq -s -e --slurpfile prov third_party/provenance.json \
-            '([.[] | select(has("osv")) | .osv.id] | unique) - [$prov[0].snapshots[] | .reviewed_advisories // {} | keys[]] | length == 0' \
-            transport-vulnerabilities.json
+        run: bash third_party/check-advisories.sh
       - run: python3 third_party/test_upstream.py
       - run: RELAY_STRESS_MB=16 go test -race -count=1 -timeout 40m ./...
       - run: shellcheck -S warning -e SC1111,SC1091 deploy/install.sh
