@@ -31,9 +31,8 @@ var errMalformed = errors.New("malformed capsule or datagram")
 // nil when the client ends the stream between capsules.
 func readCapsules(r io.Reader, deliver func([]byte)) error {
 	br := bufio.NewReaderSize(r, 16*1024)
-	// Native HTTP Datagrams still run this reader so Capsules can be mixed in.
-	// Allocate payload storage only when a nonempty context-zero Capsule needs
-	// it; native-only tunnels and skipped extensions need no 64 KiB buffer.
+	// Larger datagrams reuse a separate buffer. A delivery consumes the
+	// payload synchronously, before the next read reuses either buffer.
 	var buf []byte
 	for {
 		if _, err := br.Peek(1); err == io.EOF {
@@ -81,7 +80,16 @@ func readCapsules(r io.Reader, deliver func([]byte)) error {
 		if size > maxUDPPayload {
 			return errMalformed
 		}
-		if size > 0 && buf == nil {
+		if buf == nil && size > 0 {
+			if size <= uint64(br.Size()) {
+				payload, err := br.Peek(int(size))
+				if err != nil {
+					return truncated(err)
+				}
+				deliver(payload[:len(payload):len(payload)])
+				_, _ = br.Discard(int(size)) // Peek already buffered the full payload.
+				continue
+			}
 			buf = make([]byte, maxUDPPayload)
 		}
 		if _, err := io.ReadFull(br, buf[:size]); err != nil {

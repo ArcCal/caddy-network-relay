@@ -450,6 +450,11 @@ class StandaloneIdentityTests(unittest.TestCase):
     """Real processes and /proc; a compiled sleeper stands in for the server."""
 
     def test_same_namespace_instance_is_identified_but_a_container_copy_is_not(self):
+        probe = subprocess.run(['unshare', '-m', '--propagation', 'private', 'true'],
+                               env={**os.environ, 'LC_ALL': 'C'}, capture_output=True, text=True)
+        if probe.returncode and 'Operation not permitted' in probe.stderr:
+            self.skipTest('the host forbids creating a private mount namespace')
+        self.assertEqual(probe.returncode, 0, probe.stderr)
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
             (base / 'sleeper.c').write_text('#include <unistd.h>\nint main(void) { for (;;) pause(); }\n')
@@ -466,6 +471,8 @@ class StandaloneIdentityTests(unittest.TestCase):
                     return subprocess.run(['bash', '-c', 'source "$1"; BIN="$2"; CONFIG="$3"; cr_is_relay_pid "$4"',
                                            'test', str(SCRIPT), str(binary), config, str(pid)]).returncode == 0
                 self.assertTrue(identified(ours.pid))
+                self.assertIsNone(other.poll(), 'the foreign relay must still be running')
+                self.assertNotEqual(os.readlink(f'/proc/{other.pid}/ns/mnt'), os.readlink('/proc/self/ns/mnt'))
                 self.assertFalse(identified(other.pid), 'a process in another mount namespace is not ours')
             finally:
                 for process in (ours, other):
