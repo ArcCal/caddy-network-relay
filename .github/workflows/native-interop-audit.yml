@@ -65,7 +65,7 @@ jobs:
         run: '"$RUNNER_TEMP/measure" --udp-only --udp-boundaries --out "$RUNNER_TEMP/evidence/udp"'
       - name: Native parallel downloads with bounded stall observation
         if: always() && steps.builds.outcome == 'success'
-        run: '"$RUNNER_TEMP/measure" --tcp-download-watchdog --download-rounds 4 --out "$RUNNER_TEMP/evidence/parallel"'
+        run: '"$RUNNER_TEMP/measure" --server caddy --tcp-download-watchdog --download-rounds 4 --out "$RUNNER_TEMP/evidence/parallel"'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
