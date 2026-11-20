@@ -1,101 +1,77 @@
-"""Score a native Apple client against independently counted Linux TCP and UDP origins."""
-import base64
+"""Measure all individual echoes, including later packets after the first loss, on one flow."""
+
 import hashlib
 import json
-import plistlib
-import runpy
+from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from pathlib import Path
+import time
 from urllib.request import ProxyHandler, build_opener
 
 opener = build_opener(ProxyHandler({}))
+
+
 def fetch(path):
     with opener.open("http://127.0.0.1:18080/" + path, timeout=10) as response:
         return response.read()
 
-def run(kind, mode, operation, size, count, concurrency, negative=""):
-    label = f"{kind}-{mode}-{operation}-{size}-{concurrency}" + (f"-{negative}" if negative else "")
-    result = output / (label + ".json")
-    if result.exists():
-        raise ValueError("duplicate case " + label)
-    data = (bytes(range(256)) * (size // 256 + 1))[:size]
-    digest = hashlib.sha256(data).hexdigest()
-    settings = {"profile": str(private / (kind + ("-wrong" if negative == "password" else "") + ".mobileconfig")),
-                "mode": mode, "url": "https://relay.test:" + ("18553/" if operation == "udp" else "18443/") + str(size),
-                "expectedBytes": size, "expectedSHA256": digest, "count": count, "concurrency": concurrency,
-                "timeoutSeconds": 8 if operation == "udp" or negative else 75, "testRootDER": str(private/"ca.der"),
-                "trustRelay": negative != "certificate"}
-    if operation == "udp":
-        settings["operation"] = "udp"
-    if operation == "upload":
-        upload = private/"upload.bin"
-        upload.write_bytes(data)
-        settings.update(uploadFile=str(upload), uploadBytes=size, uploadSHA256=digest, expectedBytes=4096,
-                        expectedSHA256=hashlib.sha256(bytes(range(256))*16).hexdigest())
-    request = private/"settings.json"
+
+def check(probe, out, secret_dir, server, size, phase, trial):
+    delay = 0 if phase == "immediate" else 500
+    small = phase == "small"
+    case = f"{server}-{size}-{phase}-{trial}"
+    output = out / (case + ".json")
+    data = bytes(i % 256 for i in range(size))
+    settings = {"profile": str(secret_dir / (server + ".mobileconfig")), "mode": "h3", "operation": "udp",
+                "url": f"https://relay.test:18553/{size}", "expectedBytes": size,
+                "expectedSHA256": hashlib.sha256(data).hexdigest(), "count": 4, "concurrency": 1,
+                "timeoutSeconds": 8, "udpWarmupCount": int(small), "udpStartDelayMilliseconds": delay,
+                "testRootDER": str(secret_dir / "ca.der"), "trustRelay": True}
+    request = secret_dir / "settings.json"
     request.write_text(json.dumps(settings))
     before = json.loads(fetch("counts"))
-    child = subprocess.run([probe, str(request), str(result)], capture_output=True, timeout=190)
+    child = subprocess.run([probe, request, output], capture_output=True, timeout=35)
+    report = json.loads(output.read_text()) if output.exists() else {}
     after = json.loads(fetch("counts"))
-    report = json.loads(result.read_text()) if result.exists() else {}
-    samples = report.get("samples", [])
-    observed = after.get(operation,0) - before.get(operation,0)
-    key = kind + ("_udp" if operation == "udp" else "_tcp")
-    route = after.get(key,0) - before.get(key,0)
-    verified = sum(x.get("ok") is True for x in samples)
-    auth = after.get(kind + "_auth", 0) - before.get(kind + "_auth", 0)
-    if negative:
-        positive = f"{kind}-{mode}-" + ("udp-64-1" if operation == "udp" else "download-4096-1")
-        known_good = any(row["case"] == positive and row["ok"] for row in rows)
-        baseline = known_good and child.returncode != 0 and observed == 0 and verified == 0
-        if operation == "udp":
-            rejected = report.get("completed") is False and not any(s.get("ready") for s in report.get("state", []))
-        else:
-            rejected = expected_rejection(report, {"password": "credentials", "certificate": "trust"}[negative])
-        server_evidence = (route > 0 or auth > 0) if negative == "password" else (route == 0 and auth == 0)
-        ok = baseline and rejected and server_evidence
-    else:
-        ok = (child.returncode == 0 and report.get("completed") is True and verified == count
-              and observed == count and (mode == "direct" or route > 0))
-    row = {"case":label,"rc":child.returncode,"ok":bool(ok),"origin_count":observed,"relay_log_count":route,"auth_log_count":auth,
-           "checked_payloads":verified,"client_os":report.get("os"),"native_wall_seconds":report.get("wall_seconds")}
-    print(json.dumps(row),flush=True)
-    rows.append(row)
-    (output/"summary.json").write_text(json.dumps(rows,indent=2))
+    if server == "caddy":
+        limit = time.monotonic() + 2
+        while time.monotonic() < limit and after.get("closed_udp", 0) == before.get("closed_udp", 0):
+            time.sleep(.05)
+            after = json.loads(fetch("counts"))
+    diff = lambda key: after.get(key, 0) - before.get(key, 0)
+    expected = 4 + int(small)
+    checked = sorted(int(s["sample"]) for s in report.get("samples", []) if s.get("ok") is True)
+    return {"case": case, "rc": child.returncode, "origin": diff("udp"), "expected_origin": expected,
+            "received_ids": checked, "relay_events": diff(server + "_udp"), "size": size,
+            "confirmed": bool(report) and diff("udp") == expected and diff(server + "_udp") > 0,
+            "caddy_closed_sessions": diff("closed_udp"), "caddy_bytes_up": diff("closed_up"),
+            "caddy_bytes_down": diff("closed_down"), "caddy_budget_drops": diff("budget_drops")}
 
 
-expected_rejection = runpy.run_path("native-probe/diagnostics/run-native-probe.py")["expected_native_rejection"]
-probe = sys.argv[1]
-output = Path(sys.argv[2]).resolve()
-output.mkdir(parents=True, exist_ok=True)
-(output/"linux.json").write_bytes(fetch("environment"))
-rows=[]
-with tempfile.TemporaryDirectory() as directory:
-    private=Path(directory)
-    (private/"ca.der").write_bytes(fetch("ca.der"))
-    for server in ("rust","caddy"):
-        profile=fetch(server+".mobileconfig")
-        (private/(server+".mobileconfig")).write_bytes(profile)
-        cfg=plistlib.loads(profile)
-        hop=next(x for x in cfg["PayloadContent"] if x.get("PayloadType")=="com.apple.relay.managed")["Relays"][0]
-        headers=hop.setdefault("AdditionalHTTPHeaderFields",{})
-        for key in list(headers):
-            if key.lower() in ("authorization","proxy-authorization"):
-                del headers[key]
-        headers["Authorization"]="Basic "+base64.b64encode(b"alice:wrong-disposable-password").decode()
-        (private/(server+"-wrong.mobileconfig")).write_bytes(plistlib.dumps(cfg))
-        for mode in ("direct","h2","h3","auto"):
-            run(server,mode,"download",4096,2,1)
-            run(server,mode,"download",1048576,4,4)
-            run(server,mode,"upload",1048576,2,1)
-            for size in (62,63,64,1200,1350,1400):
-                run(server,mode,"udp",size,8,1)
-            if mode in ("h2","h3"):
-                for negative in ("password","certificate"):
-                    run(server,mode,"download",4096,1,1,negative)
-                    run(server,mode,"udp",64,1,1,negative)
-failed=sum(not r["ok"] for r in rows)
-print(f"{len(rows)} cases, {failed} failures")
-sys.exit(bool(failed))
+def main():
+    probe, out = Path(sys.argv[1]), Path(sys.argv[2])
+    out.mkdir(exist_ok=True)
+    (out / "linux.json").write_bytes(fetch("environment"))
+    rows = []
+    with tempfile.TemporaryDirectory() as tmp:
+        private = Path(tmp)
+        (private / "ca.der").write_bytes(fetch("ca.der"))
+        for kind in ("rust", "caddy"):
+            (private / (kind + ".mobileconfig")).write_bytes(fetch(kind + ".mobileconfig"))
+        for trial, servers in enumerate((("caddy", "rust"), ("rust", "caddy")), 1):
+            for server in servers:
+                for size in (64, 1200, 1350, 1400):
+                    for phase in ("immediate", "delay", "small"):
+                        row = check(probe, out, private, server, size, phase, trial)
+                        rows.append(row)
+                        print(json.dumps(row), flush=True)
+                        (out / "trains.json").write_text(json.dumps(rows, indent=2))
+    # Missing replies are measured outcomes. Missing controls or origin arrivals
+    # invalidate the experiment, as does a failed 64-byte reference train.
+    return not (len(rows) == 48 and all(r["confirmed"] for r in rows)
+                and all(r["rc"] == 0 for r in rows if r["size"] == 64))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

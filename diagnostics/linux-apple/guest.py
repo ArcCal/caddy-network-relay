@@ -143,6 +143,18 @@ class Metadata(http.server.BaseHTTPRequestHandler):
                 data[name + "_udp"] = log.count(b"connect-udp")
                 data[name + "_tcp"] = log.count(b"connect")
                 data[name + "_auth"] = log.count(b"authentication failed")
+            data.update(closed_udp=0, closed_up=0, closed_down=0, budget_drops=0)
+            for line in (ROOT / "caddy.log").read_bytes().splitlines():
+                try:
+                    event = json.loads(line)
+                except (ValueError, UnicodeError):
+                    continue
+                if event.get("msg") == "tunnel closed" and event.get("kind") == "udp":
+                    data["closed_udp"] += 1
+                    data["closed_up"] += event.get("bytes_up", 0)
+                    data["closed_down"] += event.get("bytes_down", 0)
+                if event.get("msg") == "UDP payloads dropped by per-user traffic budget":
+                    data["budget_drops"] += event.get("dropped", 0)
             body = json.dumps(data).encode()
         elif self.path in ("/ca.der", "/rust.mobileconfig", "/caddy.mobileconfig"):
             body = (ROOT / self.path[1:]).read_bytes()

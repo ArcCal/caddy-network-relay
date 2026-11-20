@@ -1,0 +1,48 @@
+        let evidence = Evidence(root: root, origin: settings.url)
+        let initialMaximum = connection.maximumDatagramSize
+        let smallFirst = settings.udpWarmupCount == 1
+        let delay = settings.udpStartDelayMilliseconds ?? 0
+        try require((0...1000).contains(delay) && settings.count == 4 && settings.expectedBytes >= 2,
+                    "Invalid diagnostic UDP train")
+        func packet(_ number: Int) -> Data {
+            let length = number == 0 ? 64 : settings.expectedBytes
+            var bytes = Data((0..<length).map { UInt8(($0 + number * 13) % 256) })
+            bytes[0] = 0xa5
+            bytes[1] = UInt8(number)
+            return bytes
+        }
+        if connected {
+            func listen() {
+                connection.receiveMessage { data, _, complete, error in
+                    guard error == nil, complete, let data = data, data.count >= 2 else { return }
+                    let number = Int(data[1])
+                    if (0...4).contains(number) {
+                        evidence.put(String(format: "%03d", number),
+                                     ["ok": data == packet(number), "bytes": data.count,
+                                      "elapsed_seconds": ProcessInfo.processInfo.systemUptime - started])
+                    }
+                    listen()
+                }
+            }
+            listen()
+            if smallFirst {
+                connection.send(content: packet(0), completion: .contentProcessed { _ in })
+            }
+            let start = DispatchTime.now() + .milliseconds(delay)
+            for (offset, tick) in [0, 50, 250, 1000].enumerated() {
+                let content = packet(offset + 1)
+                queue.asyncAfter(deadline: start + .milliseconds(tick)) {
+                    connection.send(content: content, completion: .contentProcessed { _ in })
+                }
+            }
+            Thread.sleep(forTimeInterval: 3.0 + Double(delay) / 1000)
+        }
+        connection.cancel()
+        let received = evidence.result()
+        let valid = received.filter { $0["ok"] as? Bool == true }
+        let completed = connected && valid.count == (smallFirst ? 5 : 4)
+        try writeReport(["completed": completed, "samples": received, "state": state.result(),
+            "os": ProcessInfo.processInfo.operatingSystemVersionString, "mode": settings.mode,
+            "maximum_datagram_size_initial": initialMaximum, "start_delay_ms": delay, "small_first": smallFirst,
+            "expected_bytes": settings.expectedBytes, "wall_seconds": ProcessInfo.processInfo.systemUptime - started])
+        try require(completed, "UDP train contains missing or incorrect echoes")
