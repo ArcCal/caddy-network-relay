@@ -44,7 +44,7 @@ with tempfile.TemporaryDirectory() as name:
         cases.reverse()
     for index, (kind, mode, transport, concurrency) in enumerate(cases):
         file = root/(kind+("-copy.mobileconfig" if transport=="h2" else "-seed.mobileconfig"))
-        settings = dict(profile=str(file), mode=mode, url="https://relay.test:18443/"+str(size), expectedBytes=size,
+        settings = dict(profile=str(file), mode=mode, url="https://relay.test:18443/"+str(size)+"?trial="+str(index), expectedBytes=size,
                     expectedSHA256=expected, count=4, concurrency=concurrency, timeoutSeconds=360, testRootDER=str(ca), trustRelay=True)
         request=root/"settings.json"; request.write_text(json.dumps(settings)); output=out/(str(index)+"-"+kind+"-"+mode+".json")
         before=json.loads(fetch("counts"))
@@ -73,10 +73,13 @@ with tempfile.TemporaryDirectory() as name:
         received=after.get("download",0)-before.get("download",0)
         route=after.get(kind+"_tcp",0)-before.get(kind+"_tcp",0)
         elapsed=body.get("wall_seconds")
+        per_body = [{side: after.get(f"body_{index}_{sample:03}_{side}", 0) for side in ("guest", "forward", "unknown")} for sample in range(4)]
+        expected_side = "guest" if mode == "auto" else "forward"
+        matched = sum(r[expected_side] == 1 and sum(r.values()) == 1 for r in per_body)
         good=(p.returncode==0 and body.get("completed") is True and verified==received==4
-              and (route>=4 if mode=="auto" else route==0) and elapsed is not None and elapsed<=180)
+              and matched==4 and (route>=1 if mode=="auto" else route==0) and elapsed is not None and elapsed<=180)
         row=dict(transport=transport,concurrency=concurrency,target=kind,mode=mode,trial=index,os=body.get("os"),origin=received,relay_events=route,verified=verified,
-                 elapsed=elapsed,rc=p.returncode,accepted=good,task_observations=len(apple),
+                 per_body=per_body,matched_route=matched,elapsed=elapsed,rc=p.returncode,accepted=good,task_observations=len(apple),
                  completed_by_360=bool(p.returncode==0 and verified==received==4 and elapsed is not None and elapsed<=360))
         rows.append(row); print(json.dumps(row),flush=True); (out/"summary.json").write_text(json.dumps(rows,indent=2))
 assert len(rows)==7 and all(r["accepted"] and r["task_observations"] for r in rows)

@@ -29,3 +29,7 @@ sampling = '''        let samples = DispatchSource.makeTimerSource(queue: Dispat
         defer { samples.cancel() }
 '''
 path.write_text(source.replace(anchor, sampling + anchor))
+
+anchor = '            var request = URLRequest(url: settings.url)'
+assert path.read_text().count(anchor) == 1
+path.write_text(path.read_text().replace(anchor, anchor + '\n            request.setValue(id, forHTTPHeaderField: "X-Relay-Test-Sample")'))

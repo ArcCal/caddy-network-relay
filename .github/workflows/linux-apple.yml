@@ -1,8 +1,8 @@
-name: Measure Apple UDP message composition and H2 bulk alternatives
+name: Trace each Apple HTTP transfer through its actual Linux origin connection
 'on':
   push:
     branches:
-    - audit/apple-performance-alternatives-20261120
+    - audit/apple-per-request-interop-20261120
 permissions:
   contents: read
   actions: read
@@ -14,21 +14,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-        - platform: macOS
-          arch: amd64
-          runner: macos-15
-          study: udp
-          reverse: 'false'
-        - platform: macOS
-          arch: arm64
-          runner: xcode-27
-          study: udp
-          reverse: 'false'
-        - platform: iOS
-          arch: arm64
-          runner: xcode-27
-          study: udp
-          reverse: 'false'
         - platform: iOS
           arch: arm64
           runner: xcode-27
@@ -113,8 +98,7 @@ jobs:
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: apple-alternatives-${{ matrix.study }}-${{ matrix.platform }}-${{ matrix.arch
-          }}-${{ matrix.reverse }}
+        name: apple-request-${{ matrix.platform }}-${{ matrix.reverse }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7
     env:

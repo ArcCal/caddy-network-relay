@@ -115,10 +115,23 @@ class Origin(http.server.BaseHTTPRequestHandler):
                     BULK_WRITES[transfer] = written
 
     def do_GET(self):
-        if self.path not in ("/4096", "/1048576", "/8388608", "/67108864"):
+        path, _, trial = self.path.partition("?trial=")
+        if path not in ("/4096", "/1048576", "/8388608", "/67108864"):
             return self.send_error(404)
+        sample = self.headers.get("X-Relay-Test-Sample", "")
+        if trial:
+            if trial not in tuple(map(str, range(7))) or sample not in ("000", "001", "002", "003"):
+                return self.send_error(400)
+            peer = self.client_address[0]
+            if peer in ("127.0.0.1", "10.0.2.15"):
+                route = "guest"
+            elif peer == "10.0.2.2":
+                route = "forward"
+            else:
+                route = "unknown"
+            count(f"body_{trial}_{sample}_{route}")
         count("download")
-        self.reply(int(self.path[1:]))
+        self.reply(int(path[1:]))
 
     def do_POST(self):
         size = int(self.headers.get("Content-Length", "-1"))
