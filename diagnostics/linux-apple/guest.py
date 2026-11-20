@@ -166,6 +166,9 @@ def start_capture_origins():
         def handle(self):
             data, channel = self.request
             if self.server.counter == "capture_dns":
+                question = bytes.fromhex("123401000001000000000000") + b"\x05relay\x04test\x00\x00\x01\x00\x01"
+                if data == question:
+                    count("capture_dns_fixture")
                 if len(data) < 12:
                     return
                 data = data[:2] + bytes([data[2] | 128]) + data[3:]

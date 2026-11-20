@@ -107,12 +107,14 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                 status = capture.run(port)
                 after = json.loads(fetch("counts"))
                 expected = {"capture_tcp4": 1, "capture_tcp6": 1, "capture_udp4": 3,
-                            "capture_udp6": 3, "capture_dns": 1}
+                            "capture_udp6": 3, "capture_dns_fixture": 1}
                 observed = {key: after.get(key, 0) - before.get(key, 0) for key in expected}
                 if observed != expected:
                     raise RuntimeError("Linux capture origin counts differ: " + str(observed))
-                return {"ok": True, **status, **observed}
+                return {"ok": True, **status, **observed,
+                        "all_system_dns_queries": after.get("capture_dns", 0) - before.get("capture_dns", 0)}
             finally:
+                ongoing = sys.exc_info()[1]
                 if product=="rs": child.send_signal(2)
                 else: stop.touch()
                 try:child.wait(timeout=25)
@@ -125,7 +127,14 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                         if marker.is_file() and marker.read_text()==json.loads(settings.read_text())["ownershipToken"]:
                             shutil.rmtree(folder)
                 if child.returncode!=0:
-                    raise RuntimeError(f"{product} exited {child.returncode}")
+                    stage = type(ongoing).__name__ + ": " + str(ongoing) if ongoing else "no prior exception"
+                    events = []
+                    if report.exists():
+                        events = [row["status"].split("(")[0] for row in json.loads(report.read_text()).get("events", [])]
+                    counts = json.loads(fetch("counts"))
+                    origin = {key: counts.get(key, 0) - before.get(key, 0) for key in counts
+                              if key.startswith("capture_")} if "before" in locals() else {}
+                    raise RuntimeError(f"{product} exit {child.returncode}; {stage}; phases={events}; origins={origin}")
                 if product!="rs":
                     final=json.loads(report.read_text()); assert final["finished"] and final["status"]=="stopped"
 
