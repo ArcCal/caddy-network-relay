@@ -102,7 +102,7 @@ class Origin(http.server.BaseHTTPRequestHandler):
             size -= chunk
 
     def do_GET(self):
-        if self.path not in ("/4096", "/1048576", "/8388608"):
+        if self.path not in ("/4096", "/1048576", "/8388608", "/67108864"):
             return self.send_error(404)
         count("download")
         self.reply(int(self.path[1:]))
