@@ -1,0 +1,98 @@
+name: iPhone Simulator Relay audit
+on:
+  push:
+    branches: [audit/ios-simulator-20261120]
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: 33ee4fce386f85d862fc9081a5e79633a19b7940
+          path: rust-server
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: abb966352880c7521cbd9a1e23e9c2f6e70906b0
+          sparse-checkout: diagnostics
+          path: native-probe
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Build reviewed servers and native probe
+        id: builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          git rev-parse HEAD
+          git -C rust-server rev-parse HEAD
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/reviewed-go"
+          GOTOOLCHAIN=local GOROOT="$RUNNER_TEMP/reviewed-go" go build -mod=readonly -tags http2legacy,relay_tls9846_v1 -o "$RUNNER_TEMP/caddy" ./cmd/caddy
+          cargo build --locked --release --manifest-path rust-server/Cargo.toml --bin network-relay
+          xcrun simctl list runtimes
+          xcrun simctl list devices available -j > "$RUNNER_TEMP/simulator-devices.json"
+          python3 - "$RUNNER_TEMP/simulator-devices.json" "$RUNNER_TEMP/device-id" <<'PYDEVICE'
+          import json, sys
+          from pathlib import Path
+          data = json.loads(Path(sys.argv[1]).read_text())['devices']
+          versions = sorted((key for key in data if '.iOS-' in key), key=lambda key: tuple(map(int,key.split('.iOS-')[1].split('-'))), reverse=True)
+          for version in versions:
+              phones = [d for d in data[version] if d['isAvailable'] and 'iPhone' in d['name']]
+              if phones:
+                  chosen = next((d for d in phones if d['state'] == 'Booted'), phones[0])
+                  print(version, chosen['name'], chosen['udid'])
+                  Path(sys.argv[2]).write_text(chosen['udid'])
+                  break
+          else:
+              raise SystemExit('No available iPhone simulator on this Xcode image')
+          PYDEVICE
+          sim_id=$(cat "$RUNNER_TEMP/device-id")
+          xcrun simctl bootstatus "$sim_id" -b
+          sdk=$(xcrun --sdk iphonesimulator --show-sdk-path)
+          xcrun --sdk iphonesimulator swiftc -O -parse-as-library -sdk "$sdk" -target "$(uname -m)-apple-ios17.0-simulator" native-probe/diagnostics/RelayProbe.swift -o "$RUNNER_TEMP/ios-relay-probe"
+          echo "RELAY_SIMULATOR_ID=$sim_id" >> "$GITHUB_ENV"
+          cat > "$RUNNER_TEMP/relay-probe" <<'PROBE'
+          #!/bin/bash
+          exec xcrun simctl spawn "$RELAY_SIMULATOR_ID" "$RUNNER_TEMP/ios-relay-probe" "$@"
+          PROBE
+          chmod 700 "$RUNNER_TEMP/relay-probe"
+          shasum -a 256 "$RUNNER_TEMP/ios-relay-probe"
+          openssl_bin="$(brew --prefix openssl@3)/bin"
+          test -x "$openssl_bin/openssl"
+          echo "$openssl_bin" >> "$GITHUB_PATH"
+          cat > "$RUNNER_TEMP/measure" <<'SCRIPT'
+          #!/bin/bash
+          exec python3 native-probe/diagnostics/run-native-probe.py --source "$PWD/rust-server" --rust-binary "$PWD/rust-server/target/release/network-relay" --caddy-binary "$RUNNER_TEMP/caddy" --probe "$RUNNER_TEMP/relay-probe" "$@"
+          SCRIPT
+          chmod 700 "$RUNNER_TEMP/measure"
+      - name: Native H2 and H3 downloads and uploads
+        if: steps.builds.outcome == 'success'
+        run: '"$RUNNER_TEMP/measure" --out "$RUNNER_TEMP/evidence/bulk"'
+      - name: Native UDP boundaries with both servers
+        if: always() && steps.builds.outcome == 'success'
+        run: '"$RUNNER_TEMP/measure" --udp-only --udp-boundaries --out "$RUNNER_TEMP/evidence/udp"'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: ios-simulator-relay
+          path: ${{ runner.temp }}/evidence
+          retention-days: 7
