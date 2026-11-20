@@ -1,4 +1,7 @@
 """Use the actual Mac product transports with two guest Linux servers."""
+import concurrent.futures
+import hashlib
+import http.client
 import base64
 import shutil
 import json
@@ -70,6 +73,35 @@ def traffic(port, ctx):
             k=reply[3]; alen={1:4,4:16}.get(k,1+reply[4]); pos=4+alen
             assert struct.unpack("!H",reply[pos:pos+2])[0] == 18553 and reply[pos+2:] == payload
 
+def bulk_requests(port, ctx, style, size):
+    expected = hashlib.sha256(bytes(range(256))*(size//256)).digest()
+    def connection():
+        raw = socks(port,1,b"\x03\x09localhost",18443)[0]
+        raw.settimeout(90)
+        return ctx.wrap_socket(raw,server_hostname="relay.test")
+    def request(stream, keep):
+        stream.sendall(f'GET /{size} HTTP/1.1\r\nHost: relay.test\r\nConnection: {keep}\r\n\r\n'.encode("ascii"))
+        response=http.client.HTTPResponse(stream)
+        response.begin()
+        assert response.status==200 and int(response.getheader("Content-Length"))==size
+        received=0; digest=hashlib.sha256()
+        with response:
+            while block:=response.read(64*1024):
+                digest.update(block); received+=len(block)
+        if received!=size or digest.digest()!=expected: raise ValueError("Transfer digest or byte count")
+    def separate(_):
+        with connection() as stream: request(stream,"close")
+    before=time.monotonic()
+    if style=="reuse-inner":
+        with connection() as stream:
+            for i in range(4): request(stream,"close" if i==3 else "keep-alive")
+    elif style=="fresh-inner":
+        for i in range(4): separate(i)
+    else:
+        active={"concurrent-two":2,"concurrent-four":4}[style]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=active) as pool: list(pool.map(separate,range(4)))
+    return {"style":style,"elapsed":time.monotonic()-before,"bytes_each":size,"hashes":4,"sha256":expected.hex()}
+
 def case(product,server,relayport,mode,secret,ca,ctx,out):
     with tempfile.TemporaryDirectory() as private:
         root=Path(private)
@@ -81,11 +113,11 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
             settings.write_text(f'uri_template = "https://127.0.0.1:{relayport}/.well-known/masque/udp/{{target_host}}/{{target_port}}/"\n'
               f'username = "alice"\npassword = {json.dumps(secret)}\nserver_name = "relay.test"\ntransport = "{mode}"\n'
               f'mode = "socks"\nprobe_target = "127.0.0.1:18553"\n[socks]\nlisten = ["127.0.0.1:{port}"]\n')
-            args=[str(bins/product),"--config",str(settings),"--ca-file",str(ca),"--duration","55"]
+            args=[str(bins/product),"--config",str(settings),"--ca-file",str(ca),"--duration","500"]
         else:
             settings=root/"settings.json"
             settings.write_text(json.dumps(dict(serverPort=relayport,socksPort=port,probePort=18443,mode=mode,
-                password=secret,seconds=55,stopFile=str(stop),reportFile=str(report),ownershipToken=secrets.token_hex(16))))
+                password=secret,seconds=500,stopFile=str(stop),reportFile=str(report),ownershipToken=secrets.token_hex(16))))
             args=[str(bins/product),str(settings)]
         with (root/"log").open("w") as log, subprocess.Popen(args,stdout=log,stderr=log) as child:
             try:
@@ -104,9 +136,19 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                     raise RuntimeError(f"admission timeout or child exit {child.poll()}: {state}")
                 before=json.loads(fetch("counts"))
                 traffic(port,ctx)
+                styles=["fresh-inner","reuse-inner","concurrent-two","concurrent-four"]
+                if (product=="rs") ^ (mode=="h3"): styles.reverse()
+                arms=[]
+                for round in range(2):
+                    for style in styles if round==0 else reversed(styles):
+                        sample=bulk_requests(port,ctx,style,1048576)
+                        sample["round"]=round
+                        arms.append(sample)
                 after=json.loads(fetch("counts"))
-                assert after.get("udp",0)-before.get("udp",0)>=4 and after.get("download",0)-before.get("download",0)==1
-                return {"ok":True,"origin_udp":after["udp"]-before.get("udp",0),"origin_download":1}
+                udp=after.get("udp",0)-before.get("udp",0)
+                downloads=after.get("download",0)-before.get("download",0)
+                assert udp>=4 and downloads==33
+                return {"ok":True,"origin_udp":udp,"origin_download":downloads,"bulk":arms}
             finally:
                 if product=="rs": child.send_signal(2)
                 else: stop.touch()

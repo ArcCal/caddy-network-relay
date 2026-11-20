@@ -1,14 +1,14 @@
-name: Release NF, RS and TUN against the final Linux candidate
+name: Compare warm, serial and concurrent HTTPS on NF, RS and TUN
 'on':
   push:
     branches:
-    - audit/final-product-interop-20261120
+    - audit/product-throughput-alternatives-20261120
 permissions:
   contents: read
   actions: read
 jobs:
   products:
-    name: NF, RS and TUN against both Linux arm64 servers
+    name: Three macOS transports against both Linux backends
     runs-on: xcode-27
     timeout-minutes: 75
     steps:
@@ -46,7 +46,7 @@ jobs:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: ArcCal/network-relay
-        ref: 274fc9678cd8db65eb9607489ccd732a6a753d07
+        ref: da3b68dc4f8dc678f23857af2e5634245d31f319
         path: clients
         persist-credentials: false
     - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
@@ -69,6 +69,6 @@ jobs:
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: macos-products-to-linux-arm64
+        name: product-throughput-arm64
         path: ${{ runner.temp }}/evidence
         retention-days: 7
