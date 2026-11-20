@@ -9,14 +9,16 @@ case "$arch" in
 esac
 (cd "$image" && shasum -a 256 --check SHA256SUMS)
 # The signed kernel and release binaries stay in the verified original image.
-# Append only the origin fixture that also serves a 64 MiB response.
+# Append only the loopback test fixture. The archived Linux binaries stay intact.
 overlay=$(mktemp -d "$RUNNER_TEMP/origin-overlay.XXXXXX")
 mkdir "$overlay/srv"
 cp diagnostics/linux-apple/guest.py "$overlay/srv/guest.py"
 (cd "$overlay" && printf '%s\n' srv/guest.py | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
 cat "$image/guest.gz" "$overlay/fixture.gz" > "$overlay/guest-with-bulk.gz"
 command -v "$cmd" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install qemu
-net=user,id=nic,restrict=on
+# libslirp restricted mode drops every guest UDP reply, including forwarded
+# loopback ports. The guest permits only a host route to the forwarding gateway.
+net=user,id=nic,ipv6=off
 for mapping in tcp:18080 tcp:18443 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:14201; do
     protocol=${mapping%:*}
     port=${mapping#*:}
@@ -36,16 +38,43 @@ initargs="rdinit=/bin/sh console=$console panic=-1 -- -c \"/bin/date -u -s @$epo
 pid=$!
 echo "$pid" > "$RUNNER_TEMP/guest.pid"
 for ((attempt=0; attempt<240; attempt++)); do
-    if curl -fsS --max-time 2 http://127.0.0.1:18080/environment > "$RUNNER_TEMP/linux.json" 2>/dev/null; then
+    if curl -fsS --max-time 2 --noproxy '*' http://127.0.0.1:18080/ca.der > "$RUNNER_TEMP/guest-ca.der" 2>/dev/null; then
+        curl -fsS --noproxy '*' --max-time 15 http://127.0.0.1:18080/environment > "$RUNNER_TEMP/linux.json"
         python3 - "$RUNNER_TEMP/linux.json" "$arch" <<'PY'
 import json,sys
 x=json.load(open(sys.argv[1])); print(x); assert x['system']=='Linux' and x['machine']=={'arm64':'aarch64','amd64':'x86_64'}[sys.argv[2]]
 PY
-        curl -fsS --max-time 5 http://127.0.0.1:18080/ca.der > "$RUNNER_TEMP/guest-ca.der"
         openssl x509 -inform DER -in "$RUNNER_TEMP/guest-ca.der" -out "$RUNNER_TEMP/guest-ca.pem"
         curl --noproxy '*' --fail --silent --show-error --max-time 15 --cacert "$RUNNER_TEMP/guest-ca.pem" \
              --resolve relay.test:18443:127.0.0.1 https://relay.test:18443/4096 -o "$RUNNER_TEMP/verified-origin"
         test "$(wc -c < "$RUNNER_TEMP/verified-origin")" -eq 4096
+        python3 - "$RUNNER_TEMP" <<'UDP'
+import json, os, socket, sys
+from pathlib import Path
+from urllib.request import build_opener, ProxyHandler
+opener = build_opener(ProxyHandler({}))
+def observed():
+    with opener.open("http://127.0.0.1:18080/counts", timeout=12) as response:
+        return json.load(response).get("udp", 0)
+before = observed()
+sizes = [63, 1200, 1350]
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as channel:
+    channel.connect(("127.0.0.1", 18553))
+    channel.settimeout(10)
+    for size in sizes:
+        body = os.urandom(size)
+        channel.send(body)
+        if channel.recv(65535) != body:
+            raise RuntimeError("Direct Linux UDP payload mismatch")
+after = observed()
+if after - before != len(sizes):
+    raise RuntimeError("Direct Linux UDP count mismatch")
+evidence = Path(sys.argv[1]) / "evidence"
+evidence.mkdir(exist_ok=True)
+(evidence / "transport-preflight.json").write_text(json.dumps(
+    {"direct_tls_bytes": 4096, "direct_udp_sizes": sizes, "udp_origin_datagrams": after-before}))
+print("Verified TLS and direct, byte-complete UDP over the Linux port forwards", sizes)
+UDP
         exit 0
     fi
     kill -0 "$pid" || break

@@ -117,16 +117,24 @@ class Origin(http.server.BaseHTTPRequestHandler):
         self.reply(4096, (size, digest.hexdigest()))
 
 
+def environment_record():
+    data = {"system": os.uname().sysname, "machine": os.uname().machine, "kernel": os.uname().release}
+    for name, program in (("rust", RUST), ("caddy", CADDY)):
+        digest = hashlib.sha256()
+        with open(program, "rb") as handle:
+            for block in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(block)
+        data[name] = digest.hexdigest()
+    return json.dumps(data).encode()
+
+
 class Metadata(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
     def do_GET(self):
         if self.path == "/environment":
-            data = {"system": os.uname().sysname, "machine": os.uname().machine, "kernel": os.uname().release}
-            for name, program in (("rust", RUST), ("caddy", CADDY)):
-                data[name] = hashlib.sha256(Path(program).read_bytes()).hexdigest()
-            body = json.dumps(data).encode()
+            body = self.server.environment_record
         elif self.path == "/counts":
             with LOCK:
                 data = dict(COUNTS)
@@ -148,6 +156,19 @@ class Metadata(http.server.BaseHTTPRequestHandler):
 def main():
     assert os.uname().sysname == "Linux"
     os.umask(0o077)
+    if BIND == "0.0.0.0":
+        # Only loopback and the host forwarding gateway are reachable. There
+        # is no default gateway, DNS egress or IPv6 route outside this fixture.
+        addresses = json.loads(command("ip", "-j", "-4", "addr", "show"))
+        iface = next(link["ifname"] for link in addresses
+                     if any(a["local"] == "10.0.2.15" for a in link["addr_info"]))
+        command("ip", "-4", "route", "replace", "10.0.2.2/32", "dev", iface, "scope", "link")
+        command("ip", "-4", "route", "del", "10.0.2.0/24", "dev", iface)
+        command("ip", "-4", "route", "replace", "prohibit", "default")
+        if subprocess.run(["ip", "-4", "route", "get", "192.0.2.1"],
+                          capture_output=True).returncode == 0:
+            raise RuntimeError("Unexpected external guest route")
+    identity = environment_record()
     jobs = start_servers(credentials())
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.bind((BIND, 18553))
@@ -175,7 +196,9 @@ def main():
         else:
             raise RuntimeError("A Linux server failed to listen")
     print("Linux Relay fixture ready", os.uname().machine, flush=True)
-    http.server.ThreadingHTTPServer((BIND, 18080), Metadata).serve_forever()
+    server = http.server.ThreadingHTTPServer((BIND, 18080), Metadata)
+    server.environment_record = identity
+    server.serve_forever()
 
 
 if __name__ == "__main__":

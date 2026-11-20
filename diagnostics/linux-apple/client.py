@@ -53,7 +53,7 @@ def run(kind, mode, operation, size, count, concurrency, trial):
 
 probe = sys.argv[1]
 output = Path(sys.argv[2]).resolve()
-output.mkdir(parents=True)
+output.mkdir(parents=True, exist_ok=True)
 (output/"linux.json").write_bytes(fetch("environment"))
 rows=[]
 with tempfile.TemporaryDirectory() as directory:
