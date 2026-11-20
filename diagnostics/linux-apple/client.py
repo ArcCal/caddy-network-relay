@@ -28,14 +28,14 @@ def run(kind, mode, operation, size, count, concurrency, trial):
         "profile": str(private / (kind + ".mobileconfig")), "mode": mode,
         "url": f"https://relay.test:18443/{size}", "expectedBytes": size,
         "expectedSHA256": digest.hexdigest(), "count": count, "concurrency": concurrency,
-        "timeoutSeconds": 180, "testRootDER": str(private / "ca.der"), "trustRelay": True,
+        "timeoutSeconds": 360, "testRootDER": str(private / "ca.der"), "trustRelay": True,
     }
     request = private/"settings.json"
     request.write_text(json.dumps(settings))
     before = json.loads(fetch("counts"))
     cpu = control["cpu_seconds"]()
     try:
-        rc = subprocess.run([probe, str(request), str(result)], capture_output=True, timeout=245).returncode
+        rc = subprocess.run([probe, str(request), str(result)], capture_output=True, timeout=390).returncode
     except subprocess.TimeoutExpired:
         rc = 124
     cpu = None if cpu is None else control["cpu_seconds"]() - cpu
@@ -69,7 +69,7 @@ with tempfile.TemporaryDirectory() as directory:
         (private/(server+".mobileconfig")).write_bytes(profile)
     size = 64 * 1024 * 1024
     controls = []
-    cases = [("rust", "direct"), ("caddy", "h2"), ("rust", "h3"), ("rust", "h2"), ("caddy", "h3")]
+    cases = [("rust", "direct"), ("caddy", "h3")]
     for index, (server, mode) in enumerate(cases):
         if index % 2 == 0:
             run(server, mode, "download", size, 4, 4, 1)

@@ -70,15 +70,32 @@ def open_origin(port, size, trust, expected):
                     raise ValueError("Unexpected response status or length")
                 digest = hashlib.sha256()
                 total = 0
-                first = None
-                while data := response.read(64 * 1024):
-                    total += len(data)
-                    digest.update(data)
-                    if first is None:
-                        first = time.monotonic() - started
-                if total != size or digest.hexdigest() != expected:
-                    raise ValueError("Incorrect bulk payload")
-                return {"bytes": total, "first_64k_seconds": first, "elapsed": time.monotonic() - started}
+                first, error = None, None
+                marks = {}
+                try:
+                    while total < size:
+                        elapsed = time.monotonic() - started
+                        if elapsed >= 360:
+                            raise TimeoutError("transfer deadline")
+                        secure.settimeout(min(45, 360 - elapsed))
+                        chunk = response.read(64 * 1024)
+                        if not chunk:
+                            error = "short_body"
+                            break
+                        total += len(chunk)
+                        digest.update(chunk)
+                        elapsed = time.monotonic() - started
+                        if first is None:
+                            first = elapsed
+                        for mark in (60, 120, 180, 240, 300):
+                            if mark not in marks and elapsed >= mark:
+                                marks[mark] = total
+                except (OSError, http.client.HTTPException) as exc:
+                    error = type(exc).__name__
+                valid = total == size and digest.hexdigest() == expected
+                return {"ok": valid, "bytes": total, "first_64k_seconds": first, "elapsed": time.monotonic() - started,
+                        "bytes_at_checkpoint": marks, "error": error}
+
 
 
 @contextlib.contextmanager
@@ -100,7 +117,7 @@ def proxy(client, private, ca, fetch, kind, mode):
                       f'username = {json.dumps(username)}\npassword = {json.dumps(password)}\n'
                       f'server_name = "ingress.relay.test"\ntransport = "{mode}"\n'
                       f'mode = "socks"\nprobe_target = "127.0.0.1:18553"\n[socks]\nlisten = ["127.0.0.1:{port}"]\n')
-    with subprocess.Popen([client, "--config", config, "--ca-file", ca, "--duration", "240"],
+    with subprocess.Popen([client, "--config", config, "--ca-file", ca, "--duration", "410"],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as proc:
         try:
             limit = time.monotonic() + 35
@@ -151,7 +168,7 @@ def run(client, fetch, kind, mode, size):
         delivered = after.get("download", 0) - before.get("download", 0)
         route = after.get(kind + "_tcp", 0) - before.get(kind + "_tcp", 0)
         private_hits = after.get("private_download", 0) - before.get("private_download", 0)
-        return {"kind": kind, "mode": mode, "ok": delivered == 4 and private_hits == (0 if mode == "direct" else 4),
+        return {"kind": kind, "mode": mode, "ok": all(row["ok"] for row in samples) and delivered == 4 and private_hits == (0 if mode == "direct" else 4),
                 "guest_only_origin_count": private_hits,
                 "origin_count": delivered, "relay_log_count": route, "elapsed": elapsed, "samples": samples,
                 "guest_host_cpu_seconds": cpu}
