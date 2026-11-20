@@ -1,0 +1,61 @@
+name: Native Linux server comparison
+on:
+  push:
+    branches: [audit/linux-performance-20261120]
+permissions:
+  contents: read
+jobs:
+  compare:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 65
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: 69635082fc33ac004cf3fcf8d2308b9a51d7f391
+          path: baseline
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Validate real account repair on this disposable Linux host
+        run: |
+          cd deploy
+          sudo env CR_TEST_ACCOUNTS=1 python3 -m unittest -v test_native_cloudflare_installer.AccountRepairTests
+      - name: Build baseline and candidate with the same benchmark and compiler
+        run: |
+          set -euo pipefail
+          uname -sm
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/reviewed-go"
+          export GOTOOLCHAIN=local GOROOT="$RUNNER_TEMP/reviewed-go"
+          export GOFLAGS='-mod=readonly -tags=http2legacy,relay_tls9846_v1'
+          cp capsule_bench_test.go baseline/capsule_bench_test.go
+          (cd baseline && go test -c -o "$RUNNER_TEMP/before" .)
+          go test -c -o "$RUNNER_TEMP/after" .
+          sha256sum "$RUNNER_TEMP/before" "$RUNNER_TEMP/after"
+      - name: Compare Capsule allocation, verified TCP transfers and lossy UDP
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/evidence"
+          cpu=$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')
+          for pair in 1:before 2:after 3:after 4:before 5:after 6:before 7:before 8:after; do
+            num=${pair%:*}
+            name=${pair#*:}
+            cmd="$RUNNER_TEMP/$name"
+            GOMAXPROCS=1 taskset -c "$cpu" "$cmd" -test.run '^$' -test.bench '^BenchmarkCapsuleReader$' -test.benchmem -test.benchtime=400ms -test.cpu=1 > "$RUNNER_TEMP/evidence/$num-$name-bench.txt"
+            GOMAXPROCS=3 RELAY_STRESS_MB=32 "$cmd" -test.v -test.run '^Test(LargeTransfers|UDPOverLossyNetwork)$' -test.timeout 4m > "$RUNNER_TEMP/$num-raw.log"
+            grep -E '=== RUN|--- PASS:|MiB each way|datagrams came back|^PASS$' "$RUNNER_TEMP/$num-raw.log" > "$RUNNER_TEMP/evidence/$num-$name-bulk.txt"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: performance-${{ matrix.runner }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 7
