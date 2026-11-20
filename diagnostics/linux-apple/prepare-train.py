@@ -4,6 +4,9 @@ import sys
 
 source, out = map(Path, sys.argv[1:])
 text = source.read_text()
+size_guard = "settings.expectedBytes <= 1400 && settings.concurrency == 1"
+assert text.count(size_guard) == 1
+text = text.replace(size_guard, "settings.expectedBytes <= 1401 && settings.concurrency == 1")
 options = "    let udpWarmupCount: Int?"
 assert text.count(options) == 1
 text = text.replace(options, options + "\n    let udpStartDelayMilliseconds: Int?")

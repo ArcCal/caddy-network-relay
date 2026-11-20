@@ -68,7 +68,7 @@ for port in (14200, 14201, 14202):
                 if not secure.getpeercert():
                     raise RuntimeError("Linux relay did not present a verified certificate")
 before = observed()
-sizes = [63, 1200, 1350]
+sizes = [63, 1200, 1350, 1396, 1400, 1401]
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as channel:
     channel.connect(("127.0.0.1", 18553))
     channel.settimeout(10)
