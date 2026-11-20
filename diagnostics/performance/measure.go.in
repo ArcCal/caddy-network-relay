@@ -10,7 +10,7 @@ import (
     "sort"
     "sync/atomic"
 )
-var studyReaders=map[string]func(io.Reader,func([]byte))error{"original":study_original,"borrow":readCapsules,"exact":study_exact,"pool":study_pool}
+var studyReaders=map[string]func(io.Reader,func([]byte))error{"selected":readCapsules,"prior":study_borrow,"original":study_original,"borrow":readCapsules,"exact":study_exact,"pool":study_pool}
 func TestStudyReaders(t *testing.T){
     for name,read:=range studyReaders {t.Run(name,func(t *testing.T){
         for _,sizes:=range [][]int{{0,62,63,64,1200},{16383,16384,16385,maxUDPPayload,1},{72,8192,129,1232}} {
@@ -58,6 +58,26 @@ func TestStudyConnectionSetup(t *testing.T){
             if mode=="resume-h1"&&resumed.Load()==0 {t.Fatal("TLS resumption was not negotiated")}
             sort.Slice(times,func(i,j int)bool{return times[i]<times[j]})
             t.Logf("SETUP round=%d mode=%s ms=%.3f p50_ms=%.3f p95_ms=%.3f handshakes=%d resumes=%d",round,mode,float64(wall.Microseconds())/1000,float64(times[12].Microseconds())/1000,float64(times[22].Microseconds())/1000,hs.Load(),resumed.Load())
+        }
+    }
+}
+
+func TestLargeCapsuleRoundTrips(t *testing.T) {
+    port,_:=startRelay(t,nil,nil);host,p:=echoUDP(t)
+    ctx,cancel:=context.WithTimeout(context.Background(),2*time.Minute);defer cancel()
+    for _,v:=range versions {
+        // Native H3 delivers an unreliable DATAGRAM subject to its path MTU.
+        // H1 and H2 deliver complete reliable Capsules on the test loopback.
+        if v.name=="h3" {continue}
+        for seq:=0;seq<24;seq++ {
+            u,done,err:=v.openUDP(ctx,client(port),host,p);if err!=nil{t.Fatal(err)}
+            for _,n:=range []int{63,1200,16384,32768,65507} {
+                body:=bytes.Repeat([]byte{byte(seq+1)},n);body[len(body)-1]=byte(n)
+                if err=u.Send(body);err!=nil{t.Fatal(err)}
+                rep,err:=u.Receive(ctx);if err!=nil||!bytes.Equal(body,rep){t.Fatalf("%s %d length=%d err=%v",v.name,n,len(rep),err)}
+            }
+            if err:=u.Close();err!=nil{t.Fatal(err)}
+            done()
         }
     }
 }

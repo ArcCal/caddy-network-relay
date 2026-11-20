@@ -1,9 +1,8 @@
-name: Validate borrowed small payloads and bounded reuse for large Capsules under
-  contention
+name: Compare large-only Capsule buffer reuse against the shipping reader
 'on':
   push:
     branches:
-    - audit/capsule-reuse-comparison-20261120
+    - audit/capsule-reuse-release-control-20261120
 permissions:
   contents: read
 jobs:
@@ -72,9 +71,18 @@ jobs:
         \  \"$RUNNER_TEMP/measure\" -test.run '^$' -test.bench '^BenchmarkStudyParallel$'\
         \ -test.benchmem -test.benchtime 300ms -test.cpu 1,4,16 >> parallel.txt\n\
         done\n"
+    - name: Counterbalance shipping and candidate in separate processes
+      shell: bash
+      run: "set -euo pipefail\ncd \"$RUNNER_TEMP/evidence\"\ncpu=$(python3 -c 'import\
+        \ os; print(min(os.sched_getaffinity(0)))')\nfor variant in prior selected\
+        \ selected prior selected prior prior selected prior selected selected prior;\
+        \ do\n  printf 'reader=%s\n' \"$variant\" >> serial.txt\n  STUDY_READER=\"\
+        $variant\" GOMAXPROCS=1 taskset -c \"$cpu\" \"$RUNNER_TEMP/measure\" -test.run\
+        \ '^$' -test.bench '^BenchmarkStudyReader$' -test.benchmem -test.benchtime\
+        \ 400ms >> serial.txt\ndone\n"
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: large-reuse-${{ matrix.arch }}
+        name: large-control-${{ matrix.arch }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7

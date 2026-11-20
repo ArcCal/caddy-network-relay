@@ -11,20 +11,25 @@ var largeCapsuleBuffers = make(chan *[maxUDPPayload]byte, 4)
     source=original[:start]+decl+original[start:]
     old="\t\t\tbuf = make([]byte, maxUDPPayload)"
     assert source.count(old)==1 and source.count(marker)==1
-    return source.replace(old,'''			var large *[maxUDPPayload]byte
+    once="\tvar buf []byte\n"
+    assert source.count(once)==1
+    source=source.replace(once, once+'''	var large *[maxUDPPayload]byte
+	defer func() {
+		if large != nil {
+			clear(large[:])
 			select {
+			case largeCapsuleBuffers <- large:
+			default:
+			}
+		}
+	}()
+''')
+    return source.replace(old,'''			select {
 			case large = <-largeCapsuleBuffers:
 			default:
 				large = new([maxUDPPayload]byte)
 			}
-			buf = large[:]
-			defer func() {
-				clear(large[:])
-				select {
-				case largeCapsuleBuffers <- large:
-				default:
-				}
-			}()''').replace("deliver(buf[:size])","deliver(buf[:size:size])")
+			buf = large[:]''').replace("deliver(buf[:size])","deliver(buf[:size:size])")
 
 if __name__=="__main__":
     path=Path("udp.go")
