@@ -1,5 +1,5 @@
 name: Apple clients against Linux Relay servers
-true:
+'on':
   push:
     branches:
     - audit/linux-apple-interop-20261120
