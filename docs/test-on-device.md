@@ -136,7 +136,7 @@ go-jose/v4 replacements listed in [the source provenance](../third_party/README.
 (Paste the password when prompted; on the VPS, `sed -n 's|.*<string>Basic \(.*\)</string>|\1|p' /etc/caddy/relay/relay.example.com-iphone.mobileconfig | base64 -d | cut -d: -f2-` shows it. **Quit proxy software such as Clash/Stash on the Mac first**, or you will be testing them instead.)
 
 - All 7 lines `ok`: the cloud firewall, DNS and certificate are all right.
-- Only the two `HTTP/3` lines FAIL: **the cloud firewall does not allow UDP 443**. iPhones then fall back to HTTP/2, which works but is somewhat slower; allow it and test again.
+- If only the two HTTP/3 checks fail, check that UDP 443 is reachable from this network and that the server listens on it. An H2 URL can still carry traffic over TCP 443.
 
 ## 4. Downloading the profiles
 
@@ -211,8 +211,8 @@ Reading the log:
 
 | You see | Meaning |
 |---|---|
-| Requests with `"proto":"HTTP/3.0"` or `"proto":"connect-udp"` | The device is using HTTP/3; UDP tunnels work |
-| Only `"proto":"HTTP/2.0"` | The device fell back to HTTP/2, most likely because UDP 443 is blocked (by the cloud firewall or the network the device is on) |
+| Requests with `"proto":"HTTP/3.0"` or `"proto":"connect-udp"` | The request used HTTP/3. An authenticated request with `"udp":true` identifies CONNECT-UDP. An echo from the target confirms payload delivery |
+| Only `"proto":"HTTP/2.0"` | The request used HTTP/2. Check whether the installed profile is H2-only before investigating UDP 443 |
 | `relay authentication failed` | The password in the profile does not match the server's: the password was changed without regenerating the profile, or an old file is installed |
 | `"authenticated":false` and no `Authorization` | Not from the device but from a scanner; that is normal |
 | Nothing at all, yet the device is online | The profile is not in effect: the domain is not in the list (the basic profile only has Google/AI/X and the like), or two profiles are installed and fight each other. Keep only one |
@@ -226,6 +226,8 @@ Reading the log:
 | Works on the iPhone but not the Mac (or the other way round) | Two devices can share the profile for the same domain and user; check whether the other one has another relay/VPN installed that is competing |
 | Suddenly stops working after a while | `systemctl status caddy`; for failed certificate renewals, look at `journalctl -u caddy \| grep -i acme` |
 | You want to stop using the relay | Remove the profile on the device (Settings → VPN & Device Management → this profile → Remove) |
+
+For a transport comparison, use the same device, profile settings, destination and network. Record request and reply sizes separately for UDP. For large downloads record the byte count, elapsed time and final digest, including whether a transfer was still progressing at the cutoff. [Profile options and measured limitations](../README.md#choosing-h2-or-h3-for-an-apple-profile).
 
 ## 9. After testing
 

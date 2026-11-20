@@ -23,7 +23,7 @@ All source-build entry points fetch complete latest `main` into a private
 source, compiler work and build caches are removed when the run ends; runtime
 configuration, certificates, backups and generated artifacts are preserved.
 
-> This project has not yet been verified with real traffic from an actual iPhone/Mac (for the automated tests and protocol interoperability tests, see the [design document](docs/design.md#6-testing)).
+> The Linux x86-64 and arm64 server was tested with macOS clients and Apple's per-session Relay API on macOS and the iOS simulator. Installed profiles on a physical iPhone, mobile handover and production WAN performance still need on-device measurements. [Transport selection](#choosing-h2-or-h3-for-an-apple-profile) and [reproducible two-server audit](https://github.com/ArcCal/network-relay/blob/main/docs/audit-2026-11-20.md).
 
 ---
 
@@ -298,7 +298,7 @@ systemctl daemon-reload && deluser --system caddy
 |---|---|
 | The script says "does not point to this machine" | DNS has not taken effect yet, or the A record is wrong. `dig +short DOMAIN` must equal the server's public IP |
 | The script sits at "Waiting for the certificate" and the self-check finally fails | (1) The cloud firewall does not allow TCP 80/443; (2) Cloudflare's orange cloud is on; (3) more than 5 certificates were issued for the same domain within a week (`journalctl -u caddy` shows `rateLimited`) |
-| The TCP self-checks all pass, but UDP/HTTP/3 fails | The cloud firewall does not allow **UDP 443**. iPhones then fall back to HTTP/2, which works but is somewhat slower |
+| The TCP self-checks all pass, but UDP/HTTP/3 fails | Check UDP 443 on the cloud firewall, the host and the client network. A profile that includes an H2 URL can use TCP 443. Compare payload delivery and timing on the affected path |
 | Ports in use | nginx/apache/the old relay is running on the machine. This plugin needs TCP 80, 443 and UDP 443 to itself; for the old Rust version use `--replace-network-relay` |
 | "The apt caddy package is installed" | Run `apt remove caddy` first. The Caddy this script installs is `/usr/local/bin/caddy`, and its service is also named `caddy` |
 | Nothing on the device goes through the relay | (1) Two profiles are installed and fight each other: keep only one; (2) the site you opened is not in the list (the basic profile only has Google/AI/X and the like); (3) the password was changed but the profile was not reinstalled |
@@ -485,6 +485,8 @@ caddy network-relay profile --host relay.example.com --user iphone
 
 The profile identifier is `com.github.arccal.network-relay.<domain>.<user>` (the same as in the old Rust version), so a new profile for the same domain and user replaces the old one when it is installed.
 
+#### Choosing H2 or H3 for an Apple profile
+
 The native Apple H2 Relay path on the two tested macOS versions and the iOS
 27.2 simulator dropped outgoing 63-byte UDP payloads before the Linux origin.
 A 63-byte response to a 64-byte request arrived intact. Where the relay's QUIC
@@ -499,7 +501,7 @@ copy operation for existing unsigned, single-hop Caddy profiles.
 [Apple UDP measurements](https://github.com/ArcCal/caddy-network-relay/actions/runs/44779707156).
 [Large TCP comparisons](https://github.com/ArcCal/caddy-network-relay/actions/runs/44788649886).
 [Origin route and digest for each body](https://github.com/ArcCal/caddy-network-relay/actions/runs/44794629320).
-[Using an existing profile](https://github.com/ArcCal/network-relay/blob/da3b68dc4f8dc678f23857af2e5634245d31f319/docs/config.md#choosing-a-transport-for-an-existing-apple-profile).
+[Using an existing profile](https://github.com/ArcCal/network-relay/blob/main/docs/config.md#choosing-a-transport-for-an-existing-apple-profile).
 
 ### `check`
 

@@ -160,8 +160,11 @@ The QUIC receive-budget fixture checks retained buffers, overlaps, FIN,
 cancellation, reset, shutdown and configuration propagation.
 
 Go ignores replace directives in dependencies. Builds must use this repository
-as the main module or repeat both replacements in the main module. These
-extensions require the patched APIs in both snapshots. Deployment instructions
+as the main module or reproduce all four replacements from `go.mod` in the
+main module. The transport extensions use the local quic-go and x/net APIs,
+and the two JOSE replacements carry separate security reviews. The advisory
+check queries each snapshot's original module and version and accepts only
+the review entries for that snapshot. Deployment instructions
 use the repository-root build. Review the upstream diff when updating versions,
 rerun the upstream transport test suites and dependency vulnerability scanning,
 and retire these patches when equivalent upstream APIs become available.

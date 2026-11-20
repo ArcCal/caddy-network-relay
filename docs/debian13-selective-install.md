@@ -144,6 +144,8 @@ profile remain for diagnosis and the installer exits nonzero. After fixing
 DNS or cloud firewall settings, rerun `caddy network-relay check --server
 relay.example.com --user iphone`; it prompts for the account password.
 
+A successful readiness check covers the CLI's own H2 probes. If a device loses 63-byte outgoing UDP payloads on native H2, compare an H3-only copy of its private profile on a path with UDP 443 available. Keep its credentials, certificate settings and domain selection. [Transport options for an existing profile](https://github.com/ArcCal/network-relay/blob/main/docs/config.md#choosing-a-transport-for-an-existing-apple-profile).
+
 ## Installed files and failure behavior
 
 | Path | Purpose |

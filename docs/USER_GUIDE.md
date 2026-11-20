@@ -613,6 +613,8 @@ is described above and in its deployment guide.
 | Bad credentials get an ordinary response | Actual account versus installed profile | Cover behavior is intentional, not tunnel admission |
 | H2 works, H3 fails | Provider/host UDP 443, client network UDP policy | Keep deliberate H2-only operation while diagnosing QUIC |
 | TCP works, H2 UDP fails | Extended CONNECT/build mode, target policy | Use documented build/service environment and permitted UDP probe |
+| Native Apple H2 loses a 63-byte UDP request | Compare 62, 63 and 64 bytes in each direction at a controlled echo origin | If UDP 443 works, compare an H3-only copy of the same profile. A 64-byte request with a 63-byte reply passed on H2 |
+| Large concurrent downloads stall on native H3 | Compare the same files on H2 and H3 using one endpoint | Record elapsed time, received bytes and a digest. In the iOS simulator some Caddy H2 downloads also exceeded 180 seconds. [Profile options and measurements](../README.md#choosing-h2-or-h3-for-an-apple-profile) |
 | Loopback passes, remote fails | Public DNS/address/firewall | Test from another network; local check does not test ingress boundary |
 | Webpage works but relay use uncertain | Match list and temporary sampled request logs | Observe a matched destination; test unmatched/excluded controls |
 | Profile captures everything | Empty match list, unsupported FQDN-only fields | Remove/regenerate explicit supported selection and reinstall |
@@ -633,6 +635,7 @@ later build.
 
 | Evidence | Established coverage | Remaining boundary |
 | --- | --- | --- |
+| [November 20 interoperability audit](https://github.com/ArcCal/network-relay/blob/main/docs/audit-2026-11-20.md) | Linux x86-64 and arm64, three macOS clients, real global TUN routes and separate native Apple H2/H3 checks | Per-session Apple API calls on a runner and iOS simulator do not measure an installed device profile on the user's WAN |
 | [Production readiness](production-readiness.md) | Local race/protocol/fault/MTU/resource checks, independent clients, upstream transport checks and limited native systemd observations | Complete Apple acceptance, arbitrary WAN paths and production capacity |
 | [Hardening report](production-hardening-report.md) | Recorded 1,000-account synthetic H3 run, real Debian systemd process checks and selected rollback faults | Not a production RAM estimate or every download/ACME/device scenario |
 | [Selective installer validation](debian13-selective-validation.md) | 48 local installer/domain/profile checks, real Caddy profile generation/adaptation, source payload verification | Fresh public VPS/ACME and physical Apple routing not executed; recorded toolchain snapshot predates current Go 1.26.11 selection |

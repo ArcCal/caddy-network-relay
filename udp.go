@@ -28,11 +28,11 @@ var errMalformed = errors.New("malformed capsule or datagram")
 // payloads of DATAGRAM capsules with context ID 0 to deliver. Unknown
 // capsules, and datagrams with other context IDs, are skipped without
 // buffering them, so they are not subject to the UDP size limit. It returns
-// nil when the client ends the stream between capsules.
+// nil when the client ends the stream between capsules. deliver may use the
+// payload only until it returns. A caller that retains it must make a copy.
 func readCapsules(r io.Reader, deliver func([]byte)) error {
 	br := bufio.NewReaderSize(r, 16*1024)
-	// Larger datagrams reuse a separate buffer. A delivery consumes the
-	// payload synchronously, before the next read reuses either buffer.
+	// Borrow the reader buffer until a payload first needs the larger buffer.
 	var buf []byte
 	for {
 		if _, err := br.Peek(1); err == io.EOF {
