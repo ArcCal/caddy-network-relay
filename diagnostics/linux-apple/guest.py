@@ -38,7 +38,7 @@ def credentials():
             "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     command("openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
             "-keyout", "key.pem", "-out", "cert.csr", "-subj", "/CN=relay.test")
-    (ROOT / "extensions").write_text("subjectAltName=DNS:relay.test,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth\n"
+    (ROOT / "extensions").write_text("subjectAltName=DNS:relay.test,DNS:ingress.relay.test,IP:10.0.2.15,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth\n"
                                      "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\n")
     command("openssl", "x509", "-req", "-in", "cert.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
             "-out", "cert.pem", "-days", "1", "-extfile", "extensions")
@@ -68,7 +68,7 @@ def start_servers(secret):
             (ROOT / "caddy.json").write_text(json.dumps(cfg))
             args = [binary, "run", "--config", str(ROOT / "caddy.json")]
         profile = ROOT / (name + ".mobileconfig")
-        command(*cli, "profile", "--host", "127.0.0.1", "--port", str(port), "--user", "alice", "--out", str(profile),
+        command(*cli, "profile", "--host", "ingress.relay.test", "--port", str(port), "--user", "alice", "--out", str(profile),
                 *(["--password-stdin"] if name == "caddy" else []), password=secret)
         log = (ROOT / (name + ".log")).open("wb")
         child = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
@@ -142,6 +142,7 @@ class Metadata(http.server.BaseHTTPRequestHandler):
                 log = (ROOT / (name + ".log")).read_bytes().lower()
                 data[name + "_udp"] = log.count(b"connect-udp")
                 data[name + "_tcp"] = log.count(b"connect")
+                data[name + "_auth"] = log.count(b"authentication failed")
             body = json.dumps(data).encode()
         elif self.path in ("/ca.der", "/rust.mobileconfig", "/caddy.mobileconfig"):
             body = (ROOT / self.path[1:]).read_bytes()

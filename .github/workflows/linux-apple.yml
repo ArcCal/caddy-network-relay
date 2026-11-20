@@ -51,10 +51,7 @@ jobs:
         '
     - name: Verify 64 MiB serial and four-stream transfers and control paths
       shell: bash
-      run: "python3 - <<'PY'\nimport os, runpy, subprocess\nt=os.environ['RUNNER_TEMP']\n\
-        hosts=runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']\n\
-        with hosts():\n    subprocess.run(['python3','diagnostics/linux-apple/client.py',t+'/probe',t+'/evidence'],check=True)\n\
-        PY\n"
+      run: python3 diagnostics/linux-apple/native-run.py
     - name: Stop Linux fixture
       if: always()
       run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
