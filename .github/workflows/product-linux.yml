@@ -1,8 +1,8 @@
-name: Installed macOS packet tunnel through Linux Relay servers
+name: Full macOS TUN controller, real helper and Linux dual-stack origins
 'on':
   push:
     branches:
-    - audit/global-tun-linux-20261120
+    - audit/tun-controller-linux-20261120
 permissions:
   contents: read
   actions: read
@@ -28,6 +28,12 @@ jobs:
         path: ${{ runner.temp }}/image
         github-token: ${{ github.token }}
         run-id: 44746990303
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: production-pair-arm64
+        path: ${{ runner.temp }}/final-linux
+        github-token: ${{ github.token }}
+        run-id: 44760250937
     - name: Boot the release Linux kernel with loopback-only port forwards
       run: bash diagnostics/linux-apple/boot.sh arm64 "$RUNNER_TEMP/image"
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -52,8 +58,13 @@ jobs:
         \napp=\"$TUN_PROJECT/dist/Network Relay Tun.app\"\ncleanup() { sudo /bin/bash\
         \ \"$app/Contents/Resources/uninstall-helper.sh\"; }\ntrap cleanup EXIT\n\
         sudo /bin/bash \"$app/Contents/Resources/install-helper.sh\" \"$(id -u)\"\n\
-        python3 - <<'PYHOST'\nimport os, runpy, subprocess\nt=os.environ['RUNNER_TEMP']\n\
-        with runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']():\n\
+        diagnostic_app=\"$RUNNER_TEMP/controller/Network Relay Tun.app\"\nmkdir -p\
+        \ \"$RUNNER_TEMP/controller\"\nditto \"$app\" \"$diagnostic_app\"\nexport\
+        \ GLOBAL_CONTROLLER_BIN=\"$diagnostic_app/Contents/MacOS/NetworkRelayTun\"\
+        \ninstall -m 755 \"$RUNNER_TEMP/products/tun\" \"$GLOBAL_CONTROLLER_BIN\"\n\
+        codesign --force --sign - --timestamp=none \"$diagnostic_app\"\ncodesign --verify\
+        \ --strict \"$diagnostic_app\"\npython3 - <<'PYHOST'\nimport os, runpy, subprocess\n\
+        t=os.environ['RUNNER_TEMP']\nwith runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']():\n\
         \    subprocess.run(['python3','diagnostics/linux-apple/products.py',t+'/products',t+'/evidence'],check=True)\n\
         PYHOST\ntrap - EXIT\ncleanup\n"
     - name: Stop Linux fixture

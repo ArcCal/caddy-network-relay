@@ -17,4 +17,14 @@ setup = """
                 return
             }
 """
-output.write_text(text.replace(point, point + setup))
+text = text.replace(point, point + setup)
+point = "        var endpointHost: NWEndpoint.Host {"
+assert text.count(point) == 1
+# Only the two QEMU ingress sockets are bound on loopback. The application
+# controller, helper bypass, ordinary targets and TLS identity are unmodified.
+text = text.replace(point, point + """
+            if host == "198.51.100.254" && (port == 14200 || port == 14201) {
+                return .ipv4(IPv4Address("127.0.0.1")!)
+            }
+""")
+output.write_text(text)

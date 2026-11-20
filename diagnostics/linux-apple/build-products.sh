@@ -28,8 +28,8 @@ MAP
     files=("$modules/NativeClient.swift" "$app/TunnelController.swift" "$app/Store.swift" "$app/NetworkChanges.swift" "$app/AboutInformation.swift")
     if [[ $product == tun ]]; then
         main="$modules/TunHistory.swift"
-        sed -e 's/NetworkRelayNFModel/NetworkRelayTunModel/g' -e '/let controller = TunnelController.shared/a\
-            controller.setGlobalTUN(false)
+        sed -e 's/NetworkRelayNFModel/NetworkRelayTunModel/g' -e 's/serverIP: "127.0.0.1"/serverIP: "198.51.100.254"/g' -e '/let controller = TunnelController.shared/a\
+            controller.setGlobalTUN(true)
 ' "$history" > "$main"
         files+=("$app/HostSession.swift")
     fi

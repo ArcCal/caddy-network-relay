@@ -175,10 +175,10 @@ def start_capture_origins():
             count(self.server.counter)
             channel.sendto(data, self.client_address)
 
-    for host, prefix, version in (("198.51.100.42", 32, 4), ("2001:db8::42", 128, 6), ("192.0.2.53", 32, 4)):
+    for host, prefix, version in (("198.51.100.42", 32, 4), ("2001:db8::42", 128, 6), ("1.1.1.1", 32, 4), ("8.8.8.8", 32, 4)):
         command("ip", "-" + str(version), "addr", "add", f"{host}/{prefix}", "dev", "lo")
         family = socket.AF_INET if version == 4 else socket.AF_INET6
-        ports = [(53, socketserver.ThreadingUDPServer, EchoUDP, "capture_dns")] if host == "192.0.2.53" else [
+        ports = [(53, socketserver.ThreadingUDPServer, EchoUDP, "capture_dns")] if host in ("1.1.1.1", "8.8.8.8") else [
             (443, socketserver.ThreadingTCPServer, EchoTCP, "capture_tcp" + str(version)),
             (443, socketserver.ThreadingUDPServer, EchoUDP, "capture_udp" + str(version))]
         for port, base, handler, counter in ports:

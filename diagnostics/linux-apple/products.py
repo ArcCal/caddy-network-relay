@@ -1,6 +1,6 @@
 """Use the actual Mac product transports with two guest Linux servers."""
 import base64
-import capture
+import runpy
 import shutil
 import json
 import os
@@ -16,6 +16,8 @@ import traceback
 import time
 from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
+
+controller_capture = runpy.run_path(str(Path(__file__).with_name("controller-capture.py")))
 
 direct = build_opener(ProxyHandler({}))
 def fetch(path):
@@ -97,6 +99,7 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
         stop=root/"stop"; report=root/"report.json"
         timing = {"server": server, "transport": mode}
         started = time.monotonic()
+        prior = controller_capture["original"]()
         if product=="rs":
             settings=root/"client.toml"
             settings.write_text(f'uri_template = "https://127.0.0.1:{relayport}/.well-known/masque/udp/{{target_host}}/{{target_port}}/"\n'
@@ -107,7 +110,7 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
             settings=root/"settings.json"
             settings.write_text(json.dumps(dict(serverPort=relayport,socksPort=port,probePort=18443,mode=mode,
                 password=secret,seconds=55,stopFile=str(stop),reportFile=str(report),ownershipToken=secrets.token_hex(16))))
-            args=[str(bins/product),str(settings)]
+            args=[os.environ["GLOBAL_CONTROLLER_BIN"],str(settings)]
         with (root/"log").open("w") as log, subprocess.Popen(args,stdout=log,stderr=log) as child:
             try:
                 until=time.monotonic()+35
@@ -125,11 +128,11 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                     raise RuntimeError(f"admission timeout or child exit {child.poll()}: {state}")
                 before=json.loads(fetch("counts"))
                 timing["connected"] = round(time.monotonic() - started, 2)
-                status = capture.run(port)
+                status = controller_capture["exercise"](prior, lambda: json.loads(report.read_bytes())["status"])
                 timing["restored"] = round(time.monotonic() - started, 2)
                 after = json.loads(fetch("counts"))
-                expected = {"capture_tcp4": 1, "capture_tcp6": 1, "capture_udp4": 3,
-                            "capture_udp6": 3, "capture_dns_fixture": 1}
+                expected = {"capture_tcp4": 3, "capture_tcp6": 3, "capture_udp4": 9,
+                            "capture_udp6": 9, "capture_dns_fixture": 3}
                 observed = {key: after.get(key, 0) - before.get(key, 0) for key in expected}
                 if observed != expected:
                     raise RuntimeError("Linux capture origin counts differ: " + str(observed))
@@ -150,12 +153,15 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                 finally:
                     timing["final"] = lifecycle_snapshot(report, secret)
                     timing["child_returncode"] = child.returncode
+                    timing["restoration"] = controller_capture["restored"](prior)
                     (out / (server + "-" + mode + "-lifecycle.json")).write_text(json.dumps(timing, indent=2))
                     if product in ("nf","tun"):
                         folder=Path.home()/"Library/Application Support"/("NetworkRelayNF" if product=="nf" else "NetworkRelayTun")
                         marker=folder/"diagnostic-owner"
                         if marker.is_file() and marker.read_text()==json.loads(settings.read_text())["ownershipToken"]:
                             shutil.rmtree(folder)
+                if not all(timing["restoration"].values()):
+                    raise RuntimeError("The application did not restore routes and DNS")
                 if child.returncode!=0:
                     stage = type(ongoing).__name__ + ": " + str(ongoing) if ongoing else "no prior exception"
                     events = []
