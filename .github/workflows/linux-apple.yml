@@ -68,8 +68,7 @@ jobs:
         \ -o \"$RUNNER_TEMP/ios-probe\"\n  echo \"RELAY_SIMULATOR_ID=$sim_id\" >>\
         \ \"$GITHUB_ENV\"\n  cat > \"$RUNNER_TEMP/probe\" <<'PROBE'\n#!/bin/bash\n\
         exec xcrun simctl spawn \"$RELAY_SIMULATOR_ID\" \"$RUNNER_TEMP/ios-probe\"\
-        \ \"$@\"\nPROBE\n  chmod 700 \"$RUNNER_TEMP/probe\"\nfi\n\nif [[ -n ${sim_id:-}\
-        \ ]]; then xcrun simctl spawn \"$sim_id\" /usr/bin/true; fi\n"
+        \ \"$@\"\nPROBE\n  chmod 700 \"$RUNNER_TEMP/probe\"\nfi\n"
     - name: Compare immediate, idle and small-first transmissions to an isolated echo
         peer
       shell: bash
