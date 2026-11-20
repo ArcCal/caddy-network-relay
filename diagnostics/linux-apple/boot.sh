@@ -17,8 +17,12 @@ for mapping in tcp:18080 tcp:18443 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:1
 done
 log="$RUNNER_TEMP/guest-console.log"
 touch "$log"
+# The minimal guest may start without an RTC driver. Establish the runner's
+# real UTC before the fixture issues its one-day certificate.
+epoch=$(date +%s)
+initargs="rdinit=/bin/sh console=$console panic=-1 -- -c \"/bin/date -u -s @$epoch && exec /relay-init\""
 "$cmd" -machine "$machine" -accel tcg,thread=multi -cpu "$cpu" -smp 2 -m 2048 \
-  -kernel "$image/kernel" -initrd "$image/guest.gz" -append "rdinit=/relay-init console=$console panic=-1" \
+  -kernel "$image/kernel" -initrd "$image/guest.gz" -append "$initargs" \
   -netdev "$net" -device virtio-net-pci,netdev=nic -object rng-random,filename=/dev/urandom,id=rng \
   -device virtio-rng-pci,rng=rng -display none -monitor none -serial "file:$log" -no-reboot \
   >"$RUNNER_TEMP/qemu.log" 2>&1 &
@@ -30,6 +34,11 @@ for ((attempt=0; attempt<240; attempt++)); do
 import json,sys
 x=json.load(open(sys.argv[1])); print(x); assert x['system']=='Linux' and x['machine']=={'arm64':'aarch64','amd64':'x86_64'}[sys.argv[2]]
 PY
+        curl -fsS --max-time 5 http://127.0.0.1:18080/ca.der > "$RUNNER_TEMP/guest-ca.der"
+        openssl x509 -inform DER -in "$RUNNER_TEMP/guest-ca.der" -out "$RUNNER_TEMP/guest-ca.pem"
+        curl --noproxy '*' --fail --silent --show-error --max-time 15 --cacert "$RUNNER_TEMP/guest-ca.pem" \
+             --resolve relay.test:18443:127.0.0.1 https://relay.test:18443/4096 -o "$RUNNER_TEMP/verified-origin"
+        test "$(wc -c < "$RUNNER_TEMP/verified-origin")" -eq 4096
         exit 0
     fi
     kill -0 "$pid" || break

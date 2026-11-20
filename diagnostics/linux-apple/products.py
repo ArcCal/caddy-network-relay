@@ -1,5 +1,6 @@
 """Use the actual Mac product transports with two guest Linux servers."""
 import base64
+import shutil
 import json
 import os
 import plistlib
@@ -29,7 +30,7 @@ def full(sock, n):
     return bytes(data)
 
 def socks(port, cmd, address, destination):
-    conn = socket.create_connection(("127.0.0.1",port),timeout=5)
+    conn = socket.create_connection(("127.0.0.1",port),timeout=15)
     try:
         conn.sendall(b"\x05\x01\x00")
         assert full(conn,2) == b"\x05\x00"
@@ -93,8 +94,10 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                     if product=="rs":
                         with socket.socket() as probe:
                             if probe.connect_ex(("127.0.0.1",port))==0:break
-                    elif report.exists() and json.loads(report.read_text())["status"]=="connected":
-                        break
+                    elif report.exists():
+                        state=json.loads(report.read_text())["status"]
+                        if state=="connected":break
+                        if state.startswith("failed("):raise RuntimeError(state)
                     time.sleep(.2)
                 else:
                     state=json.loads(report.read_text())["status"] if report.exists() else "no report"
@@ -107,13 +110,41 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
             finally:
                 if product=="rs": child.send_signal(2)
                 else: stop.touch()
-                try:child.wait(timeout=15)
+                try:child.wait(timeout=25)
                 except subprocess.TimeoutExpired:
                     child.kill(); child.wait(); raise
+                finally:
+                    if product in ("nf","tun"):
+                        folder=Path.home()/"Library/Application Support"/("NetworkRelayNF" if product=="nf" else "NetworkRelayTun")
+                        marker=folder/"diagnostic-owner"
+                        if marker.is_file() and marker.read_text()==json.loads(settings.read_text())["ownershipToken"]:
+                            shutil.rmtree(folder)
                 if child.returncode!=0:
                     raise RuntimeError(f"{product} exited {child.returncode}")
                 if product!="rs":
                     final=json.loads(report.read_text()); assert final["finished"] and final["status"]=="stopped"
+
+def remove_anchor(ca, fingerprint):
+    keychain="/Library/Keychains/System.keychain"
+    parts=["sudo","security"]
+    # Preserve other administrative trust entries on this disposable machine.
+    current=ca.parent/"trust-current.plist"
+    reduced=ca.parent/"trust-without-fixture.plist"
+    check=ca.parent/"trust-check.plist"
+    try:
+        subprocess.run(parts+["trust-settings-export","-d",current],check=True,timeout=20,capture_output=True)
+        trust=plistlib.loads(current.read_bytes())
+        entries=trust["trustList"]
+        owned=[key for key in entries if key.upper()==fingerprint]
+        if len(owned)!=1:raise RuntimeError("Fixture trust entry could not be uniquely identified")
+        del entries[owned[0]]
+        reduced.write_bytes(plistlib.dumps(trust))
+        subprocess.run(parts+["trust-settings-import","-d",reduced],check=True,timeout=35,capture_output=True)
+        subprocess.run(parts+["trust-settings-export","-d",check],check=True,timeout=20,capture_output=True)
+        if plistlib.loads(check.read_bytes())["trustList"]!=entries:
+            raise RuntimeError("Administrative trust cleanup could not be verified")
+    finally:
+        subprocess.run(parts+["delete-certificate","-Z",fingerprint,keychain],check=True,timeout=30,capture_output=True)
 
 if __name__=="__main__":
     os.umask(0o077)
@@ -140,6 +171,10 @@ if __name__=="__main__":
                         rows.append(row);print(json.dumps(row),flush=True)
                         (result/"summary.json").write_text(json.dumps(rows,indent=2))
         finally:
-            try:subprocess.run(["sudo","security","remove-trusted-cert","-d",ca],check=True,timeout=50)
-            finally:subprocess.run(["sudo","security","delete-certificate","-Z",fingerprint,"/Library/Keychains/System.keychain"],check=True,timeout=30)
+            try:
+                remove_anchor(ca,fingerprint)
+                (result/"trust-cleanup.json").write_text(json.dumps({"removed":True}))
+            except Exception as exc:
+                (result/"trust-cleanup.json").write_text(json.dumps({"removed":False,"error":type(exc).__name__}))
+                raise
     sys.exit(any(not row['ok'] for row in rows))
