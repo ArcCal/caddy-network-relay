@@ -1,0 +1,63 @@
+package networkrelay
+import (
+    "testing"
+    "time"
+    "bytes"
+    "io"
+    "os"
+    "context"
+    "crypto/tls"
+    "sort"
+    "sync/atomic"
+)
+var studyReaders=map[string]func(io.Reader,func([]byte))error{"original":study_original,"borrow":readCapsules,"exact":study_exact,"pool":study_pool}
+func TestStudyReaders(t *testing.T){
+    for name,read:=range studyReaders {t.Run(name,func(t *testing.T){
+        for _,sizes:=range [][]int{{0,62,63,64,1200},{16383,16384,16385,maxUDPPayload,1},{72,8192,129,1232}} {
+            var b []byte; want:=make([][]byte,0,len(sizes))
+            for i,n:=range sizes {p:=bytes.Repeat([]byte{byte(i+1)},n);want=append(want,p);b=appendDatagramCapsule(b,p)}
+            i:=0; if err:=read(bytes.NewReader(b),func(p []byte){if i>=len(want)||!bytes.Equal(p,want[i]){t.Fatal("payload")};i++});err!=nil||i!=len(want){t.Fatalf("incomplete normal path %v %d",err,i)}
+        }
+    })}
+}
+func BenchmarkStudyReader(b *testing.B){
+    read:=studyReaders[os.Getenv("STUDY_READER")]; if read==nil {b.Fatal("missing reader")}
+    for _,c:=range []struct{name string;sizes []int}{
+        {"Idle",nil},{"Small",[]int{1200}},{"Large",[]int{maxUDPPayload}},{"Mixed",[]int{63,1200,16385,65527,64,1200}},
+        {"Train",[]int{1200,1200,1200,1200,1200,1200,1200,1200}}} {
+        var data []byte; for _,n:=range c.sizes {data=appendDatagramCapsule(data,make([]byte,n))}
+        b.Run(c.name,func(b *testing.B){b.ReportAllocs();for b.Loop(){if err:=read(bytes.NewReader(data),func([]byte){});err!=nil{b.Fatal(err)}}})
+    }
+}
+func TestStudyConnectionSetup(t *testing.T){
+    port,_:=startRelay(t,nil,nil);dst:=echoTCP(t);ctx,cancel:=context.WithTimeout(context.Background(),3*time.Minute);defer cancel()
+    payload:=bytes.Repeat([]byte{0x89,0x12},2048)
+    for round:=0;round<4;round++ {
+        order:=[]string{"fresh-h1","resume-h1","shared-h2","shared-h3","fresh-h2","fresh-h3"}
+        if round%2!=0 {for i,j:=0,len(order)-1;i<j;i,j=i+1,j-1 {order[i],order[j]=order[j],order[i]}}
+        for _,mode:=range order {
+            c:=client(port);var hs,resumed atomic.Int64
+            c.TLS.VerifyConnection=func(s tls.ConnectionState)error{hs.Add(1);if s.DidResume{resumed.Add(1)};return nil}
+            if mode=="resume-h1"{c.TLS.ClientSessionCache=tls.NewLRUClientSessionCache(8)}
+            since:=time.Now();var h2 *h2Conn;var h3 *h3Conn;var e error
+            if mode=="shared-h2"{h2,e=c.dialH2(ctx)};if mode=="shared-h3"{h3,e=c.dialH3(ctx)};if e!=nil{t.Fatal(e)}
+            var times []time.Duration
+            for n:=0;n<24;n++ {s0:=time.Now();var str stream;var release func()
+                switch mode {case "shared-h2":str,e=c.openTCPH2(ctx,h2,dst);case "shared-h3":str,e=c.openTCPH3(ctx,h3,dst)
+                case "fresh-h2":str,release,e=versions[1].openTCP(ctx,c,dst)
+                case "fresh-h3":str,release,e=versions[0].openTCP(ctx,c,dst)
+                default:str,e=c.openTCPH1(ctx,dst)}
+                if e!=nil{t.Fatalf("%s %d: %v",mode,n,e)}
+                if _,e=str.Write(payload);e!=nil{t.Fatal(e)}
+                if e=str.CloseWrite();e!=nil{t.Fatal(e)}
+                result,e:=io.ReadAll(str);if e!=nil||!bytes.Equal(result,payload){t.Fatalf("bad echo %s %v %d",mode,e,len(result))}
+                str.Close();if release!=nil{release()};times=append(times,time.Since(s0))
+            }
+            wall:=time.Since(since);if h2!=nil{h2.Close()};if h3!=nil{h3.Close()}
+            if (h2!=nil||h3!=nil)&&hs.Load()!=1 {t.Fatalf("expected one shared handshake, got %d",hs.Load())}
+            if mode=="resume-h1"&&resumed.Load()==0 {t.Fatal("TLS resumption was not negotiated")}
+            sort.Slice(times,func(i,j int)bool{return times[i]<times[j]})
+            t.Logf("SETUP round=%d mode=%s ms=%.3f p50_ms=%.3f p95_ms=%.3f handshakes=%d resumes=%d",round,mode,float64(wall.Microseconds())/1000,float64(times[12].Microseconds())/1000,float64(times[22].Microseconds())/1000,hs.Load(),resumed.Load())
+        }
+    }
+}

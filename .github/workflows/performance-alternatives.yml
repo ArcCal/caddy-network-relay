@@ -1,0 +1,51 @@
+name: Compare Linux Capsule allocation and authenticated connection setup alternatives
+on:
+  push:
+    branches: [audit/performance-alternatives-20261120]
+permissions:
+  contents: read
+jobs:
+  linux:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, arch: amd64}
+          - {runner: ubuntu-22.04-arm, arch: arm64}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with: {persist-credentials: false}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with: {go-version: '1.27.4', cache: false}
+      - name: Build reviewed binaries and test normal UDP and TLS paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/evidence"
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/reviewed-go"
+          export GOROOT="$RUNNER_TEMP/reviewed-go" GOTOOLCHAIN=local GOFLAGS='-mod=readonly -tags=http2legacy,relay_tls9846_v1'
+          python3 diagnostics/performance/capsules.py
+          cp diagnostics/performance/measure.go.in study_measure_test.go
+          "$GOROOT/bin/gofmt" -w study_{readers,measure}_test.go
+          "$GOROOT/bin/go" test -race -count=1 -run '^TestStudyReaders$' .
+          "$GOROOT/bin/go" test -c -o "$RUNNER_TEMP/measure" .
+      - name: Compare readers and connection strategies under equal trust and payload checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/evidence"
+          cpu=$(python3 -c 'import os; print(min(os.sched_getaffinity(0)))')
+          for seq in 'original borrow exact pool' 'pool exact borrow original' 'exact original pool borrow' 'borrow pool original exact'; do
+            for kind in $seq; do
+              STUDY_READER="$kind" GOMAXPROCS=1 taskset -c "$cpu" "$RUNNER_TEMP/measure" -test.run '^$' -test.bench '^BenchmarkStudyReader$' -test.benchmem -test.benchtime 300ms >> "$kind.txt"
+            done
+          done
+          "$RUNNER_TEMP/measure" -test.v -test.run '^TestStudyConnectionSetup$' > setup.txt 2>&1 || { tail -35 setup.txt; exit 1; }
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: caddy-alternatives-${{ matrix.arch }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 7
