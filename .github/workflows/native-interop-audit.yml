@@ -1,0 +1,120 @@
+name: Native NF and RS client interoperability
+on:
+  push:
+    branches: [audit/macos-client-interop-20261120]
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: 33ee4fce386f85d862fc9081a5e79633a19b7940
+          path: rust-server
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: abb966352880c7521cbd9a1e23e9c2f6e70906b0
+          sparse-checkout: diagnostics
+          path: native-probe
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Build reviewed servers and native probe
+        id: builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          git rev-parse HEAD
+          git -C rust-server rev-parse HEAD
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/reviewed-go"
+          GOTOOLCHAIN=local GOROOT="$RUNNER_TEMP/reviewed-go" go build -mod=readonly -tags http2legacy,relay_tls9846_v1 -o "$RUNNER_TEMP/caddy" ./cmd/caddy
+          cargo build --locked --release --manifest-path rust-server/Cargo.toml --bin network-relay
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+      - name: Build original NF transport and controller harness
+        if: steps.builds.outcome == 'success'
+        working-directory: rust-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release --lib --manifest-path network-relay-nf/Core/Cargo.toml
+          NF_MODULES="$RUNNER_TEMP/nf-history-modules"
+          mkdir -p "$NF_MODULES"
+          cp network-relay-nf/App/Sources/NetworkRelayNFBridge/include/NetworkRelayNFBridge.h "$NF_MODULES/"
+          cat > "$NF_MODULES/module.modulemap" <<'MAP'
+          module NetworkRelayNFBridge {
+              header "NetworkRelayNFBridge.h"
+              export *
+          }
+          MAP
+          xcrun swiftc -parse-as-library -swift-version 5 -O -target arm64-apple-macos27.0 \
+            -whole-module-optimization -emit-object -emit-module -module-name NetworkRelayNFModel \
+            -emit-module-path "$NF_MODULES/NetworkRelayNFModel.swiftmodule" \
+            network-relay-nf/App/Sources/NetworkRelayNFModel/*.swift -o "$NF_MODULES/NetworkRelayNFModel.o"
+          xcrun swiftc -parse-as-library -swift-version 5 -O -target arm64-apple-macos27.0 \
+            -D NF_HISTORY_DIAGNOSTIC -I "$NF_MODULES" -Xcc "-fmodule-map-file=$NF_MODULES/module.modulemap" \
+            -L network-relay-nf/Core/target/release -lnetwork_relay_nf_core -framework Network -framework Security -framework AppKit \
+            "$NF_MODULES/NetworkRelayNFModel.o" \
+            network-relay-nf/App/Sources/NetworkRelayNF/NativeClient.swift \
+            network-relay-nf/App/Sources/NetworkRelayNF/TunnelController.swift \
+            network-relay-nf/App/Sources/NetworkRelayNF/Store.swift \
+            network-relay-nf/App/Sources/NetworkRelayNF/NetworkChanges.swift \
+            network-relay-nf/App/Sources/NetworkRelayNF/AboutInformation.swift \
+            "$GITHUB_WORKSPACE/native-probe/diagnostics/RelayProbe.swift" -o nf-history-probe
+      - name: Native NF H2 and H3 against both real servers
+        working-directory: rust-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, runpy
+          from pathlib import Path
+          run = runpy.run_path(str(Path(os.environ['GITHUB_WORKSPACE'])/'native-probe/diagnostics/run-native-probe.py'))['run_nf_history']
+          root = Path.cwd()
+          run(root, root / 'target/release/network-relay', Path(os.environ['RUNNER_TEMP']) / 'caddy', root / 'nf-history-probe',
+              Path(os.environ['RUNNER_TEMP']) / 'native-relay-evidence', Path(os.environ['RUNNER_TEMP']) / 'nf-history-cleanup')
+          PY
+      - name: Clean up owned fixture trust anchor
+        if: always()
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, runpy
+          from pathlib import Path
+          cleanup = runpy.run_path('native-probe/diagnostics/run-native-probe.py')['cleanup_nf_history_ca']
+          cleanup(Path(os.environ['RUNNER_TEMP']) / 'nf-history-cleanup')
+          PY
+      - name: Native Rust client TCP TLS QUIC and SOCKS matrix
+        if: always() && steps.builds.outcome == 'success'
+        working-directory: rust-server
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --manifest-path network-relay-rs/Cargo.toml --bin network-relay-rs
+          python3 network-relay-rs/scripts/test-interop.py --rust-server "$PWD/target/release/network-relay" --caddy "$RUNNER_TEMP/caddy" --client "$PWD/network-relay-rs/target/debug/network-relay-rs" --results "$RUNNER_TEMP/rs-interop.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-relay-apps
+          path: |
+            ${{ runner.temp }}/native-relay-evidence
+            ${{ runner.temp }}/rs-interop.json
+          retention-days: 7
