@@ -1,6 +1,6 @@
 name: Validate borrowed small payloads and bounded reuse for large Capsules under
   contention
-true:
+'on':
   push:
     branches:
     - audit/capsule-reuse-comparison-20261120
