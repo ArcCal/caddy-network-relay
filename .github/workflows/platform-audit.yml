@@ -1,0 +1,180 @@
+name: Candidate platform coverage
+'on':
+  push:
+    branches:
+    - audit/platform-coverage-20261120
+permissions:
+  contents: read
+jobs:
+  build:
+    name: build ${{ matrix.os }}/${{ matrix.arch }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        include:
+        - os: linux
+          arch: amd64
+        - os: linux
+          arch: arm64
+        - os: darwin
+          arch: arm64
+        - os: darwin
+          arch: amd64
+      fail-fast: false
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      with:
+        go-version-file: go.mod
+    - name: Prepare reviewed TLS source
+      run: |
+        echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+        python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+        echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+        echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+        echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
+    - name: Build
+      env:
+        CGO_ENABLED: '0'
+        GOOS: ${{ matrix.os }}
+        GOARCH: ${{ matrix.arch }}
+      run: |
+        go build -tags http2legacy,relay_tls9846_v1 -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
+        info=$(go version -m caddy)
+            awk -F '\t' '
+                $2 == "build" && $3 ~ /^-tags=/ {
+                    value=substr($3, 7); gsub(/^"|"$/, "", value)
+                    count=split(value, tags, /[,[:space:]]+/)
+                    for (i=1; i<=count; i++) if (tags[i] == "relay_tls9846_v1") found=1
+                }
+                END { exit !found }
+            ' <<< "$info" || { echo 'Missing reviewed TLS policy build tag: relay_tls9846_v1.' >&2; exit 1; }
+        for replacement in golang.org/x/net=./third_party/x-net \
+                           github.com/quic-go/quic-go=./third_party/quic-go \
+                           github.com/go-jose/go-jose/v3=./third_party/go-jose-v3 \
+                           github.com/go-jose/go-jose/v4=./third_party/go-jose-v4; do
+          awk -F '\t' -v module="${replacement%%=*}" -v path="${replacement#*=}" '
+            ($2 == "dep" || $2 == "mod") && $3 == module { pending=1; next }
+            pending { if ($2 == "=>" && $3 == path) found=1; pending=0 }
+            END { exit !found }
+          ' <<< "$info" || { echo "missing replacement: $replacement" >&2; exit 1; }
+        done
+        name=caddy-network-relay-audit-${{ matrix.os }}-${{ matrix.arch }}
+        tar -czf "$name.tar.gz" caddy
+        sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+  build-cloudflare:
+    name: build linux/${{ matrix.arch }} with Cloudflare DNS
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        arch:
+        - amd64
+        - arm64
+      fail-fast: false
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        path: caddy-network-relay-src
+        persist-credentials: false
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: caddy-dns/cloudflare
+        ref: a8737d095ad5a48ca031cea6ab704057dbc2d250
+        path: cloudflare-src
+        persist-credentials: false
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      with:
+        go-version-file: caddy-network-relay-src/go.mod
+    - name: Prepare reviewed TLS source
+      run: |
+        echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+        python3 caddy-network-relay-src/deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+        echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+        echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+        echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
+    - name: Build
+      working-directory: caddy-network-relay-src
+      env:
+        CGO_ENABLED: '0'
+        GOOS: linux
+        GOARCH: ${{ matrix.arch }}
+      run: |
+        grep -Eq 'ID:[[:space:]]*"dns\.providers\.cloudflare"' ../cloudflare-src/cloudflare.go
+        cp go.mod build-plugins.mod
+        cp go.sum build-plugins.sum
+        printf 'package main\n\nimport _ "github.com/caddy-dns/cloudflare"\n' > cmd/caddy/cloudflare_dns_build.go
+        go mod edit -modfile build-plugins.mod -replace github.com/caddy-dns/cloudflare=../cloudflare-src
+        go get -modfile build-plugins.mod github.com/caddy-dns/cloudflare@v0.0.0
+        go build -modfile build-plugins.mod -mod=readonly -tags http2legacy,relay_tls9846_v1 -trimpath -ldflags '-s -w' -o caddy ./cmd/caddy
+        info=$(go version -m caddy)
+            awk -F '\t' '
+                $2 == "build" && $3 ~ /^-tags=/ {
+                    value=substr($3, 7); gsub(/^"|"$/, "", value)
+                    count=split(value, tags, /[,[:space:]]+/)
+                    for (i=1; i<=count; i++) if (tags[i] == "relay_tls9846_v1") found=1
+                }
+                END { exit !found }
+            ' <<< "$info" || { echo 'Missing reviewed TLS policy build tag: relay_tls9846_v1.' >&2; exit 1; }
+        for replacement in github.com/caddy-dns/cloudflare=../cloudflare-src \
+                           golang.org/x/net=./third_party/x-net \
+                           github.com/quic-go/quic-go=./third_party/quic-go \
+                           github.com/go-jose/go-jose/v3=./third_party/go-jose-v3 \
+                           github.com/go-jose/go-jose/v4=./third_party/go-jose-v4; do
+          awk -F '\t' -v module="${replacement%%=*}" -v path="${replacement#*=}" '
+            ($2 == "dep" || $2 == "mod") && $3 == module { pending=1; next }
+            pending { if ($2 == "=>" && $3 == path) found=1; pending=0 }
+            END { exit !found }
+          ' <<< "$info" || { echo "missing replacement: $replacement" >&2; exit 1; }
+        done
+        if [[ $GOARCH == amd64 ]]; then
+          modules=$(./caddy list-modules)
+          for module in network_relay http.handlers.network_relay dns.providers.cloudflare; do
+            grep -Fxq -- "$module" <<< "$modules" || { echo "missing Caddy module: $module" >&2; exit 1; }
+          done
+        fi
+        name=caddy-network-relay-cloudflare-audit-linux-${{ matrix.arch }}
+        tar -czf "../$name.tar.gz" caddy
+        (cd .. && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
+  variants:
+    name: Rust variants on ${{ matrix.runner }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        runner:
+        - ubuntu-22.04
+        - ubuntu-22.04-arm
+    timeout-minutes: 65
+    env:
+      CARGO_BUILD_JOBS: 3
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: 33ee4fce386f85d862fc9081a5e79633a19b7940
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+      with:
+        toolchain: stable
+    - name: Build and run the variant binaries
+      run: |-
+        set -euo pipefail
+        export CARGO_TARGET_DIR="$RUNNER_TEMP/variants"
+        cargo build --release --locked --manifest-path network-relay-vless/Cargo.toml --bins
+        cargo build --release --locked --manifest-path network-relay-cf-masque/Cargo.toml --bins
+        for program in network-relay-vless network-relay-cf-masque; do
+          "$CARGO_TARGET_DIR/release/$program" --version
+        done
+        cargo test --locked --manifest-path network-relay-vless/Cargo.toml
+        python3 network-relay-cf-masque/scripts/prepare-client-tests.py
+        cargo test --locked --manifest-path network-relay-cf-masque/Cargo.toml --workspace --all-features -- --test-threads=1
+        cargo check --locked --manifest-path network-relay-cf-masque/examples/reuse/Cargo.toml
