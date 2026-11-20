@@ -8,7 +8,7 @@ start = text.index('        let evidence = Evidence(', text.index('    static fu
 end = text.index('    }\n    static func main()', start)
 part = r'''        let evidence = Evidence(root: root, origin: settings.url)
         let fields = settings.url.path.split(separator: "/")
-        guard fields.count == 3, let size = Int(fields[0]), let expected = UInt8(fields[1]), let tail = UInt8(fields[2]),
+        guard fields.count == 4, let size = Int(fields[0]), let expected = UInt8(fields[1]), let tail = UInt8(fields[2]),
               (62...64).contains(size), (62...64).contains(Int(expected)) else { throw ProbeError(message: "Bad fixture arguments") }
         var payload = Data((0..<size).map { UInt8(($0 * 13 + 7) & 255) })
         payload.replaceSubrange(0..<5, with: Data([0x52, 0x4c, 0x59, 0x55, expected]))
@@ -25,9 +25,26 @@ part = r'''        let evidence = Evidence(root: root, origin: settings.url)
                 if let error { evidence.put("error", ["error": String(describing: error)]) }
                 done.signal()
             }
-            connection.send(content: payload, completion: .contentProcessed { error in
-                evidence.put("send", ["sent": error == nil]); sent.signal()
-            })
+            if String(fields[3]) == "split" {
+                let context = NWConnection.ContentContext(identifier: "single-udp-message")
+                let prefix = Data(payload.prefix(31))
+                let suffix = Data(payload.dropFirst(31))
+                connection.batch {
+                    connection.send(content: prefix, contentContext: context, isComplete: false,
+                                    completion: .contentProcessed { error in
+                        if let error { evidence.put("prefix_error", ["error": String(describing: error)]) }
+                    })
+                    connection.send(content: suffix, contentContext: context, isComplete: true,
+                                    completion: .contentProcessed { error in
+                        evidence.put("send", ["sent": error == nil])
+                        sent.signal()
+                    })
+                }
+            } else {
+                connection.send(content: payload, completion: .contentProcessed { error in
+                    evidence.put("send", ["sent": error == nil]); sent.signal()
+                })
+            }
             _ = sent.wait(timeout: .now() + 3)
             _ = done.wait(timeout: .now() + 3)
         }

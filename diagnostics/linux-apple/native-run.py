@@ -18,7 +18,7 @@ with origin_name():
         subprocess.run(["sudo", "dscacheutil", "-flushcache"], check=True)
     try:
         configure(after)
-        subprocess.run(["python3", "diagnostics/linux-apple/profile-download.py", private / "probe", private / "evidence"],
+        subprocess.run(["python3", "diagnostics/linux-apple/" + os.environ["RELAY_STUDY_SCRIPT"], private / "probe", private / "evidence"],
                        check=True)
     finally:
         if hosts.read_bytes() != after:

@@ -34,11 +34,18 @@ with tempfile.TemporaryDirectory() as name:
         hop = compare["PayloadContent"][0]["Relays"][0]
         hop["HTTP2RelayURL"] = hop.pop("HTTP3RelayURL")
         assert compare == plistlib.loads(selected.read_bytes()) and source.read_bytes() == original
-    cases = [("rust","direct"), *((t,"auto") for t in targets), *((t,"auto") for t in reversed(targets)), ("rust","direct")]
-    for index, (kind, mode) in enumerate(cases):
-        file = root/(kind+"-copy.mobileconfig")
+    cases = [
+        ("candidate", "direct", "h2", 4), ("candidate", "auto", "h2", 4),
+        ("candidate", "auto", "h2", 2), ("rust", "auto", "h2", 4),
+        ("candidate", "auto", "h3", 4), ("candidate", "direct", "h2", 2),
+        ("candidate", "auto", "h2", 4),
+    ]
+    if os.environ["RELAY_BULK_REVERSE"] == "true":
+        cases.reverse()
+    for index, (kind, mode, transport, concurrency) in enumerate(cases):
+        file = root/(kind+("-copy.mobileconfig" if transport=="h2" else "-seed.mobileconfig"))
         settings = dict(profile=str(file), mode=mode, url="https://relay.test:18443/"+str(size), expectedBytes=size,
-                    expectedSHA256=expected, count=4, concurrency=4, timeoutSeconds=360, testRootDER=str(ca), trustRelay=True)
+                    expectedSHA256=expected, count=4, concurrency=concurrency, timeoutSeconds=360, testRootDER=str(ca), trustRelay=True)
         request=root/"settings.json"; request.write_text(json.dumps(settings)); output=out/(str(index)+"-"+kind+"-"+mode+".json")
         before=json.loads(fetch("counts"))
         task_dir=root/f"tasks-{index}"; task_dir.mkdir()
@@ -68,8 +75,8 @@ with tempfile.TemporaryDirectory() as name:
         elapsed=body.get("wall_seconds")
         good=(p.returncode==0 and body.get("completed") is True and verified==received==4
               and (route>=4 if mode=="auto" else route==0) and elapsed is not None and elapsed<=180)
-        row=dict(target=kind,mode=mode,trial=index,os=body.get("os"),origin=received,relay_events=route,verified=verified,
+        row=dict(transport=transport,concurrency=concurrency,target=kind,mode=mode,trial=index,os=body.get("os"),origin=received,relay_events=route,verified=verified,
                  elapsed=elapsed,rc=p.returncode,accepted=good,task_observations=len(apple),
                  completed_by_360=bool(p.returncode==0 and verified==received==4 and elapsed is not None and elapsed<=360))
         rows.append(row); print(json.dumps(row),flush=True); (out/"summary.json").write_text(json.dumps(rows,indent=2))
-assert len(rows)==6 and all(r["accepted"] and r["task_observations"] for r in rows)
+assert len(rows)==7 and all(r["accepted"] and r["task_observations"] for r in rows)
