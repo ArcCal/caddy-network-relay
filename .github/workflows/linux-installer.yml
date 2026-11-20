@@ -1,0 +1,30 @@
+name: Native Linux installer ownership and recovery
+on:
+  push:
+    branches: [audit/linux-installer-validation-20261120]
+permissions:
+  contents: read
+jobs:
+  installers:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-22.04, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: 7c9bf8d63a2d3b42803c26809f4cd6caa039a0a0
+          path: rust-relay
+          persist-credentials: false
+      - name: Test real systemd ownership, namespace identity and account repair
+        run: |
+          set -euo pipefail
+          audit="$PWD/diagnostics/validate-native-installers.py"
+          sudo systemd-run --wait --collect --pipe --setenv=NR_TEST_ACCOUNTS=1 /usr/bin/python3 "$audit" "$PWD/rust-relay/tests"
+          sudo systemd-run --wait --collect --pipe --setenv=CR_TEST_ACCOUNTS=1 /usr/bin/python3 "$audit" "$PWD/deploy"
