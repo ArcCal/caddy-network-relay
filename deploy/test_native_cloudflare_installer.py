@@ -465,15 +465,33 @@ class StandaloneIdentityTests(unittest.TestCase):
             ours = subprocess.Popen(args)
             other = subprocess.Popen(['unshare', '-m', '--propagation', 'private', *args])
             try:
-                time.sleep(0.3)
+                deadline = time.monotonic() + 5
+                for process in (ours, other):
+                    executable = Path(f'/proc/{process.pid}/exe')
+                    while process.poll() is None and executable.resolve() != binary:
+                        if time.monotonic() >= deadline:
+                            self.fail('stand-in did not enter the target executable')
+                        time.sleep(0.02)
+                    self.assertIsNone(process.poll())
+                self.assertNotEqual(os.readlink(f'/proc/{ours.pid}/ns/mnt'),
+                                    os.readlink(f'/proc/{other.pid}/ns/mnt'))
 
-                def identified(pid):
-                    return subprocess.run(['bash', '-c', 'source "$1"; BIN="$2"; CONFIG="$3"; cr_is_relay_pid "$4"',
-                                           'test', str(SCRIPT), str(binary), config, str(pid)]).returncode == 0
+                lines = Path(f'/proc/{ours.pid}/cgroup').read_text().splitlines()
+                group = next((line.split(':', 2)[2] for line in lines
+                              if line.startswith('0::') or ':name=systemd:' in line), '')
+                units = [part for part in group.split('/') if part.endswith(('.service', '.scope'))]
+                unit = units[-1] if units else ''
+                service = unit.removesuffix('.service') if unit.endswith('.service') else 'caddy-network-relay'
+
+                def identified(pid, owner=service):
+                    return subprocess.run(['bash', '-c', 'source "$1"; BIN="$2"; CONFIG="$3"; SERVICE="$4"; '
+                                           'cr_is_relay_pid "$5"', 'test', str(SCRIPT), str(binary),
+                                           config, owner, str(pid)]).returncode == 0
+
                 self.assertTrue(identified(ours.pid))
-                self.assertIsNone(other.poll(), 'the foreign relay must still be running')
-                self.assertNotEqual(os.readlink(f'/proc/{other.pid}/ns/mnt'), os.readlink('/proc/self/ns/mnt'))
                 self.assertFalse(identified(other.pid), 'a process in another mount namespace is not ours')
+                if unit.endswith('.service'):
+                    self.assertFalse(identified(ours.pid, service + '-other'))
             finally:
                 for process in (ours, other):
                     process.kill()
