@@ -133,7 +133,7 @@ def remove_anchor(ca, fingerprint):
     check=ca.parent/"trust-check.plist"
     try:
         subprocess.run(parts+["trust-settings-export","-d",current],check=True,timeout=20,capture_output=True)
-        trust=plistlib.loads(current.read_bytes())
+        trust=plistlib.loads(subprocess.check_output(["sudo", "/bin/cat", str(current)], timeout=10))
         entries=trust["trustList"]
         owned=[key for key in entries if key.upper()==fingerprint]
         if len(owned)!=1:raise RuntimeError("Fixture trust entry could not be uniquely identified")
@@ -141,14 +141,14 @@ def remove_anchor(ca, fingerprint):
         reduced.write_bytes(plistlib.dumps(trust))
         subprocess.run(parts+["trust-settings-import","-d",reduced],check=True,timeout=35,capture_output=True)
         subprocess.run(parts+["trust-settings-export","-d",check],check=True,timeout=20,capture_output=True)
-        if plistlib.loads(check.read_bytes())["trustList"]!=entries:
+        if plistlib.loads(subprocess.check_output(["sudo", "/bin/cat", str(check)], timeout=10))["trustList"]!=entries:
             raise RuntimeError("Administrative trust cleanup could not be verified")
     finally:
         subprocess.run(parts+["delete-certificate","-Z",fingerprint,keychain],check=True,timeout=30,capture_output=True)
 
 if __name__=="__main__":
     os.umask(0o077)
-    bins=Path(sys.argv[1]).resolve(); result=Path(sys.argv[2]); result.mkdir()
+    bins=Path(sys.argv[1]).resolve(); result=Path(sys.argv[2]); result.mkdir(exist_ok=True)
     rows=[]
     (result/"environment.json").write_bytes(fetch("environment"))
     with tempfile.TemporaryDirectory() as folder:
