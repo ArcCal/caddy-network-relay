@@ -1,0 +1,91 @@
+name: Native baseline and candidate comparison
+on:
+  push:
+    branches: [audit/native-abba-20261120]
+permissions:
+  contents: read
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 100
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: 33ee4fce386f85d862fc9081a5e79633a19b7940
+          path: rust-server
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: abb966352880c7521cbd9a1e23e9c2f6e70906b0
+          sparse-checkout: diagnostics
+          path: native-probe
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: 69635082fc33ac004cf3fcf8d2308b9a51d7f391
+          path: caddy-baseline
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: bc6940aeb1c5f7b4f9eac08d790a4a9dac6e77c9
+          path: rust-baseline
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: '1.27.4'
+          cache: false
+      - name: Build reviewed servers and native probe
+        id: builds
+        shell: bash
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          git rev-parse HEAD
+          git -C rust-server rev-parse HEAD
+          python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/reviewed-go"
+          GOTOOLCHAIN=local GOROOT="$RUNNER_TEMP/reviewed-go" go build -mod=readonly -tags http2legacy,relay_tls9846_v1 -o "$RUNNER_TEMP/caddy" ./cmd/caddy
+          (cd caddy-baseline && GOTOOLCHAIN=local GOROOT="$RUNNER_TEMP/reviewed-go" go build -mod=readonly -tags http2legacy,relay_tls9846_v1 -o "$RUNNER_TEMP/old-caddy" ./cmd/caddy)
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/rust-build"
+          cargo build --locked --release --manifest-path rust-baseline/Cargo.toml --bin network-relay
+          cp "$CARGO_TARGET_DIR/release/network-relay" "$RUNNER_TEMP/old-rust"
+          cargo build --locked --release --manifest-path rust-server/Cargo.toml --bin network-relay
+          cp "$CARGO_TARGET_DIR/release/network-relay" "$RUNNER_TEMP/new-rust"
+          if cmp -s "$RUNNER_TEMP/old-rust" "$RUNNER_TEMP/new-rust" || cmp -s "$RUNNER_TEMP/old-caddy" "$RUNNER_TEMP/caddy"; then exit 1; fi
+          shasum -a 256 "$RUNNER_TEMP/old-rust" "$RUNNER_TEMP/new-rust" "$RUNNER_TEMP/old-caddy" "$RUNNER_TEMP/caddy"
+          xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" native-probe/diagnostics/RelayProbe.swift -o "$RUNNER_TEMP/relay-probe"
+          openssl_bin="$(brew --prefix openssl@3)/bin"
+          test -x "$openssl_bin/openssl"
+          echo "$openssl_bin" >> "$GITHUB_PATH"
+      - name: Measure the same native bulk matrix in ABBA order
+        if: steps.builds.outcome == 'success'
+        run: |
+          set -u
+          failures=0
+          for arm in a1 b1 b2 a2; do
+            case "$arm" in
+              a*) rust="$RUNNER_TEMP/old-rust"; caddy="$RUNNER_TEMP/old-caddy"; source="$PWD/rust-baseline" ;;
+              b*) rust="$RUNNER_TEMP/new-rust"; caddy="$RUNNER_TEMP/caddy"; source="$PWD/rust-server" ;;
+            esac
+            python3 native-probe/diagnostics/run-native-probe.py --source "$source" --rust-binary "$rust" --caddy-binary "$caddy" --probe "$RUNNER_TEMP/relay-probe" --out "$RUNNER_TEMP/evidence/$arm" || failures=1
+          done
+          exit "$failures"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: native-relay-abba
+          path: ${{ runner.temp }}/evidence
+          retention-days: 7
