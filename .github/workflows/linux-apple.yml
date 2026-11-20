@@ -1,91 +1,66 @@
-name: Bounded large-transfer completion and intermediate byte counts on the same Mac
-'on':
+name: Matched native and virtualized Linux four-stream Relay downloads
+on:
   push:
-    branches:
-    - audit/bulk-completion-20261120
+    branches: [audit/linux-execution-throughput-20261120]
 permissions:
   contents: read
   actions: read
 jobs:
-  clients:
-    name: ${{ matrix.platform }} on ${{ matrix.runner }} to Linux ${{ matrix.arch
-      }}
+  compare:
     strategy:
       fail-fast: false
       matrix:
         include:
-        - runner: xcode-27
-          platform: macOS
-          arch: arm64
+          - {runner: ubuntu-24.04, arch: amd64, emulator: qemu-system-x86}
+          - {runner: ubuntu-22.04-arm, arch: arm64, emulator: qemu-system-arm}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
+    timeout-minutes: 85
     steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        persist-credentials: false
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        repository: ArcCal/network-relay
-        ref: abb966352880c7521cbd9a1e23e9c2f6e70906b0
-        sparse-checkout: diagnostics
-        path: native-probe
-        persist-credentials: false
-    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-      with:
-        name: linux-${{ matrix.arch }}-guest
-        path: ${{ runner.temp }}/image
-        github-token: ${{ github.token }}
-        run-id: 44747890260
-    - name: Boot the release Linux kernel with loopback-only port forwards
-      run: bash diagnostics/linux-apple/boot.sh "${{ matrix.arch }}" "$RUNNER_TEMP/image"
-    - name: Prepare Apple client
-      run: 'set -euo pipefail
-
-        sw_vers
-
-        xcodebuild -version
-
-        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" native-probe/diagnostics/RelayProbe.swift
-        -o "$RUNNER_TEMP/probe"
-
-        '
-    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-      with:
-        name: network-relay-rs-macos-arm64
-        path: ${{ runner.temp }}/rs-package
-        repository: ArcCal/network-relay
-        github-token: ${{ github.token }}
-        run-id: 44748756161
-    - name: Verify the release RS command line client
-      run: 'set -euo pipefail
-
-        cd "$RUNNER_TEMP/rs-package"
-
-        shasum -a 256 --check network-relay-rs-*-macos-arm64.tar.gz.sha256
-
-        archives=(network-relay-rs-*-macos-arm64.tar.gz)
-
-        tar -xzf "${archives[0]}"
-
-        binaries=(network-relay-rs-*-macos-arm64/network-relay-rs)
-
-        codesign --verify --strict "${binaries[0]}"
-
-        echo "RS_CONTROL_BIN=$PWD/${binaries[0]}" >> "$GITHUB_ENV"
-
-        '
-    - name: Verify 64 MiB serial and four-stream transfers and control paths
-      shell: bash
-      run: python3 diagnostics/linux-apple/native-run.py
-    - name: Stop Linux fixture
-      if: always()
-      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
-        || true; fi
-
-        '
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      if: always()
-      with:
-        name: ${{ matrix.platform }}-${{ matrix.runner }}-linux-${{ matrix.arch }}
-        path: ${{ runner.temp }}/evidence
-        retention-days: 7
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: ad82fe823be9cc09d473a36c225f5113461877ee
+          sparse-checkout: network-relay-rs
+          path: product
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: linux-${{ matrix.arch }}-guest
+          path: ${{ runner.temp }}/image
+          github-token: ${{ github.token }}
+          run-id: 44747890260
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: production-pair-${{ matrix.arch }}
+          path: ${{ runner.temp }}/pair
+          github-token: ${{ github.token }}
+          run-id: 44760250937
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+      - name: Verify the release ELF files and build one locked production RS client for all paths
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get -qq update
+          sudo apt-get -y -qq install ${{ matrix.emulator }} cpio
+          (cd "$RUNNER_TEMP/image" && sha256sum -c SHA256SUMS)
+          (cd "$RUNNER_TEMP/pair" && sha256sum -c SHA256SUMS && chmod 755 caddy-candidate)
+          mkdir -p "$RUNNER_TEMP/linux"
+          (cd "$RUNNER_TEMP/linux" && gzip -dc "$RUNNER_TEMP/image/guest.gz" | cpio -idm --quiet --no-absolute-filenames 'srv/network-relay' './srv/network-relay')
+          test -x "$RUNNER_TEMP/linux/srv/network-relay"
+          cargo build --locked --release --manifest-path product/network-relay-rs/Cargo.toml --target-dir "$RUNNER_TEMP/rs-target"
+          echo "RS_CONTROL_BIN=$RUNNER_TEMP/rs-target/release/network-relay-rs" >> "$GITHUB_ENV"
+      - name: Exercise the same four-way transfer with native, translated and available accelerated Linux
+        env:
+          RELAY_ARCH: ${{ matrix.arch }}
+        run: python3 diagnostics/linux-apple/compare-execution.py
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: linux-execution-${{ matrix.arch }}
+          path: ${{ runner.temp }}/evidence
+          retention-days: 7

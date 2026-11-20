@@ -161,7 +161,12 @@ def run(client, fetch, kind, mode, size):
             started = time.monotonic()
             with concurrent.futures.ThreadPoolExecutor(max_workers=4) as workers:
                 jobs = [workers.submit(open_origin, port, size, trust, expected.hexdigest()) for _ in range(4)]
-                samples = [job.result() for job in jobs]
+                samples = []
+                for job in jobs:
+                    try:
+                        samples.append(job.result())
+                    except (OSError, EOFError, RuntimeError, ValueError, http.client.HTTPException) as exc:
+                        samples.append({"ok": False, "error": type(exc).__name__})
             elapsed = time.monotonic() - started
             cpu = None if cpu is None else cpu_seconds() - cpu
         after = json.loads(fetch("counts"))

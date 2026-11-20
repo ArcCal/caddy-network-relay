@@ -13,9 +13,10 @@ esac
 overlay=$(mktemp -d "$RUNNER_TEMP/origin-overlay.XXXXXX")
 mkdir "$overlay/srv"
 cp diagnostics/linux-apple/guest.py "$overlay/srv/guest.py"
-(cd "$overlay" && printf '%s\n' srv/guest.py | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
+install -m 755 "$RUNNER_TEMP/pair/caddy-candidate" "$overlay/srv/caddy"
+(cd "$overlay" && printf '%s\n' srv/guest.py srv/caddy | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
 cat "$image/guest.gz" "$overlay/fixture.gz" > "$overlay/guest-with-bulk.gz"
-command -v "$cmd" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install qemu
+command -v "$cmd" >/dev/null
 # libslirp restricted mode drops every guest UDP reply, including forwarded
 # loopback ports. The guest permits only a host route to the forwarding gateway.
 net=user,id=nic,ipv6=off
@@ -25,12 +26,17 @@ for mapping in tcp:18080 tcp:18443 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:1
     net+=",hostfwd=$protocol:127.0.0.1:$port-10.0.2.15:$port"
 done
 log="$RUNNER_TEMP/guest-console.log"
-touch "$log"
+: > "$log"
 # The minimal guest may start without an RTC driver. Establish the runner's
 # real UTC before the fixture issues its one-day certificate.
 epoch=$(date +%s)
 initargs="rdinit=/bin/sh console=$console panic=-1 -- -c \"/bin/date -u -s @$epoch && exec /relay-init\""
-"$cmd" -machine "$machine" -accel tcg,thread=multi -cpu "$cpu" -smp 2 -m 2048 \
+case "$RELAY_EXECUTION" in
+    tcg) accelerator=tcg,thread=multi ;;
+    kvm) accelerator=kvm; cpu=host ;;
+    *) exit 2 ;;
+esac
+"$cmd" -machine "$machine" -accel "$accelerator" -cpu "$cpu" -smp 2 -m 2048 \
   -kernel "$image/kernel" -initrd "$overlay/guest-with-bulk.gz" -append "$initargs" \
   -netdev "$net" -device virtio-net-pci,netdev=nic -object rng-random,filename=/dev/urandom,id=rng \
   -device virtio-rng-pci,rng=rng -display none -monitor none -serial "file:$log" -no-reboot \
