@@ -24,7 +24,10 @@ MAP
     "${swift[@]}" -whole-module-optimization -emit-object -emit-module -module-name "${model}Model" \
         -emit-module-path "$modules/${model}Model.swiftmodule" "$parent/App/Sources/${model}Model/"*.swift -o "$modules/model.o"
     main="$history"
-    files=("$app/NativeClient.swift" "$app/TunnelController.swift" "$app/Store.swift" "$app/NetworkChanges.swift" "$app/AboutInformation.swift")
+    # Keep every production TLS policy and hostname check. The disposable CA
+    # is trusted only by the SecTrust object for this test process.
+    python3 diagnostics/linux-apple/fixture-native-trust.py "$app/NativeClient.swift" "$modules/NativeClient.swift"
+    files=("$modules/NativeClient.swift" "$app/TunnelController.swift" "$app/Store.swift" "$app/NetworkChanges.swift" "$app/AboutInformation.swift")
     if [[ $product == tun ]]; then
         main="$modules/TunHistory.swift"
         sed -e 's/NetworkRelayNFModel/NetworkRelayTunModel/g' -e '/let controller = TunnelController.shared/a\

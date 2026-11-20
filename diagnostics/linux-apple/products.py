@@ -124,27 +124,11 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                 if product!="rs":
                     final=json.loads(report.read_text()); assert final["finished"] and final["status"]=="stopped"
 
-def remove_anchor(ca, fingerprint):
-    keychain="/Library/Keychains/System.keychain"
-    parts=["sudo","security"]
-    # Preserve other administrative trust entries on this disposable machine.
-    current=ca.parent/"trust-current.plist"
-    reduced=ca.parent/"trust-without-fixture.plist"
-    check=ca.parent/"trust-check.plist"
-    try:
-        subprocess.run(parts+["trust-settings-export","-d",current],check=True,timeout=20,capture_output=True)
-        trust=plistlib.loads(subprocess.check_output(["sudo", "/bin/cat", str(current)], timeout=10))
-        entries=trust["trustList"]
-        owned=[key for key in entries if key.upper()==fingerprint]
-        if len(owned)!=1:raise RuntimeError("Fixture trust entry could not be uniquely identified")
-        del entries[owned[0]]
-        reduced.write_bytes(plistlib.dumps(trust))
-        subprocess.run(parts+["trust-settings-import","-d",reduced],check=True,timeout=35,capture_output=True)
-        subprocess.run(parts+["trust-settings-export","-d",check],check=True,timeout=20,capture_output=True)
-        if plistlib.loads(subprocess.check_output(["sudo", "/bin/cat", str(check)], timeout=10))["trustList"]!=entries:
-            raise RuntimeError("Administrative trust cleanup could not be verified")
-    finally:
-        subprocess.run(parts+["delete-certificate","-Z",fingerprint,keychain],check=True,timeout=30,capture_output=True)
+def system_certificates():
+    result = subprocess.run(["security", "find-certificate", "-a", "-Z", "/Library/Keychains/System.keychain"],
+                            capture_output=True, check=True, timeout=20)
+    return sorted(line for line in result.stdout.splitlines() if line.startswith(b"SHA-256 hash:"))
+
 
 if __name__=="__main__":
     os.umask(0o077)
@@ -154,10 +138,10 @@ if __name__=="__main__":
     with tempfile.TemporaryDirectory() as folder:
         ca=Path(folder)/"fixture.pem"; ca.write_text(ssl.DER_cert_to_PEM_cert(fetch("ca.der")))
         ctx=ssl.create_default_context(cafile=str(ca))
-        fingerprint=subprocess.check_output(["openssl","x509","-in",ca,"-noout","-fingerprint","-sha1"],text=True).strip().split("=")[1].replace(":","")
-        present=subprocess.check_output(["security","find-certificate","-a","-Z","/Library/Keychains/System.keychain"],text=True)
-        assert fingerprint not in present
-        subprocess.run(["sudo","security","add-trusted-cert","-d","-r","trustRoot","-p","ssl","-s","relay.test","-k","/Library/Keychains/System.keychain",ca],check=True,timeout=30)
+        der = Path(folder) / "fixture.der"
+        der.write_bytes(fetch("ca.der"))
+        os.environ["RELAY_FIXTURE_CA_DER"] = str(der)
+        original_certificates = system_certificates()
         try:
             for kind,relayport in (("rust",14200),("caddy",14201)):
                 cfg=plistlib.loads(fetch(kind+".mobileconfig"))
@@ -170,11 +154,37 @@ if __name__=="__main__":
                         except Exception as err: row.update(ok=False,error=str(err).replace(secret,"<redacted>"))
                         rows.append(row);print(json.dumps(row),flush=True)
                         (result/"summary.json").write_text(json.dumps(rows,indent=2))
+            # A valid but unrelated root must reject the same verified Linux
+            # peer, with zero application data reaching either origin.
+            wrong_pem = Path(folder) / "unrelated.pem"
+            wrong_der = Path(folder) / "unrelated.der"
+            subprocess.run(["openssl", "req", "-x509", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256",
+                            "-nodes", "-subj", "/CN=Unrelated Fixture", "-days", "1", "-keyout",
+                            str(Path(folder) / "unrelated.key"), "-out", str(wrong_pem)],
+                           check=True, capture_output=True)
+            subprocess.run(["openssl", "x509", "-in", str(wrong_pem), "-outform", "DER", "-out", str(wrong_der)],
+                           check=True)
+            os.environ["RELAY_FIXTURE_CA_DER"] = str(wrong_der)
+            negatives = []
+            for prod in ("nf", "rs", "tun"):
+                positive = any(row["product"] == prod and row["server"] == "caddy" and
+                               row["transport"] == "h2" and row["ok"] for row in rows)
+                before = json.loads(fetch("counts"))
+                rejected = False
+                try:
+                    case(prod, "caddy", 14201, "h2", secret, wrong_pem, ctx, result)
+                except (OSError, RuntimeError):
+                    rejected = True
+                after = json.loads(fetch("counts"))
+                unchanged = all(before.get(key, 0) == after.get(key, 0) for key in ("udp", "download"))
+                negatives.append({"product": prod, "positive_control": positive,
+                                  "rejected": rejected, "origin_unchanged": unchanged})
+            (result / "negative-trust.json").write_text(json.dumps(negatives, indent=2))
+            if not all(row["positive_control"] and row["rejected"] and row["origin_unchanged"] for row in negatives):
+                raise RuntimeError("A Linux relay certificate negative control failed")
         finally:
-            try:
-                remove_anchor(ca,fingerprint)
-                (result/"trust-cleanup.json").write_text(json.dumps({"removed":True}))
-            except Exception as exc:
-                (result/"trust-cleanup.json").write_text(json.dumps({"removed":False,"error":type(exc).__name__}))
-                raise
+            if system_certificates() != original_certificates:
+                raise RuntimeError("The system keychain certificate list changed during the test")
+            (result / "trust-cleanup.json").write_text(json.dumps(
+                {"scope": "per-SecTrust private root; RS explicit CA", "system_certificates_unchanged": True}))
     sys.exit(any(not row['ok'] for row in rows))
