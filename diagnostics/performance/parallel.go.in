@@ -1,0 +1,40 @@
+package networkrelay
+
+import (
+    "bytes"
+    "io"
+    "sync"
+    "testing"
+)
+
+func TestStudyLargeReturn(t *testing.T) {
+    // Simultaneous independent readers must deliver only their own bytes.
+    const clients=32
+    ready:=make(chan struct{},clients); gate:=make(chan struct{}); var group sync.WaitGroup
+    for i:=0;i<clients;i++ {
+        group.Add(1)
+        go func(id byte){
+            defer group.Done()
+            p:=bytes.Repeat([]byte{id},maxUDPPayload)
+            wire:=appendDatagramCapsule(nil,p)
+            expected:=append([]byte(nil),p...)
+            if err:=readCapsules(bytes.NewReader(wire),func(got []byte){
+                ready<-struct{}{}; <-gate
+                if !bytes.Equal(got,expected) || cap(got)!=len(got) {t.Error("overlapping payload")}
+            });err!=nil {t.Error(err)}
+        }(byte(i+1))
+    }
+    for range clients {<-ready}; close(gate); group.Wait()
+    if len(largeCapsuleBuffers)!=cap(largeCapsuleBuffers) || cap(largeCapsuleBuffers)!=4 {t.Fatal("wrong idle bound")}
+    zeros:=make([]byte,maxUDPPayload)
+    for len(largeCapsuleBuffers)>0 {if !bytes.Equal((<-largeCapsuleBuffers)[:],zeros){t.Fatal("returned storage still holds prior payload")}}
+}
+func BenchmarkStudyParallel(b *testing.B) {
+    cases:=[]struct{name string; sizes []int}{{"Small",[]int{1200}},{"Large",[]int{maxUDPPayload}},{"Mixed",[]int{63,1200,16385,65527,64,1200}},{"Train",[]int{1200,1200,1200,1200,1200,1200,1200,1200}}}
+    for _,v:=range []struct{name string;read func(io.Reader,func([]byte))error}{{"borrow",study_borrow},{"hybrid",readCapsules}} {
+        for _,c:=range cases {
+            var buf []byte;for _,n:=range c.sizes{buf=appendDatagramCapsule(buf,make([]byte,n))}
+            b.Run(v.name+"/"+c.name,func(b *testing.B){b.ReportAllocs();b.RunParallel(func(pb *testing.PB){for pb.Next(){if err:=v.read(bytes.NewReader(buf),func([]byte){});err!=nil{b.Error(err)}}})})
+        }
+    }
+}
