@@ -39,7 +39,9 @@ def check(probe, out, secret_dir, server, size, phase, trial):
     request = secret_dir / "settings.json"
     request.write_text(json.dumps(settings))
     before = json.loads(fetch("counts"))
-    child = subprocess.run([probe, request, output], capture_output=True, timeout=35)
+    began = time.monotonic()
+    child = subprocess.run([probe, request, output], capture_output=True, timeout=150)
+    launcher_seconds = time.monotonic() - began
     report = json.loads(output.read_text()) if output.exists() else {}
     after = json.loads(fetch("counts"))
     if server in ("caddy", "candidate"):
@@ -50,7 +52,8 @@ def check(probe, out, secret_dir, server, size, phase, trial):
     diff = lambda key: after.get(key, 0) - before.get(key, 0)
     expected = 4 + int(small)
     checked = sorted(int(s["sample"]) for s in report.get("samples", []) if s.get("ok") is True)
-    return {"case": case, "rc": child.returncode, "origin": diff("udp"), "expected_origin": expected,
+    return {"case": case, "rc": child.returncode, "launcher_seconds": launcher_seconds,
+            "native_seconds": report.get("wall_seconds"), "origin": diff("udp"), "expected_origin": expected,
             "received_ids": checked, "relay_events": diff(server + "_udp"), "size": size,
             "confirmed": bool(report) and diff("udp") == expected and diff(server + "_udp") > 0,
             "caddy_closed_sessions": diff(server + "_closed_udp"), "caddy_bytes_up": diff(server + "_closed_up"),
