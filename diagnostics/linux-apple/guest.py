@@ -145,9 +145,15 @@ class Metadata(http.server.BaseHTTPRequestHandler):
                 data[name + "_tcp"] = log.count(b"connect")
                 data[name + "_auth"] = log.count(b"authentication failed")
             for server in ("caddy", "candidate"):
+                data[server + "_limits"] = []
                 for field in ("closed_udp", "closed_up", "closed_down", "budget_drops"):
                     data[server + "_" + field] = 0
                 for line in (ROOT / (server + ".log")).read_bytes().splitlines():
+                    if line.startswith(b"fixture_datagram_limit "):
+                        fields = line.split()[1:]
+                        if len(fields) == 4 and all(f.isdigit() for f in fields):
+                            data[server + "_limits"].append([int(f) for f in fields])
+                        continue
                     try:
                         event = json.loads(line)
                     except (ValueError, UnicodeError):

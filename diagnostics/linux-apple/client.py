@@ -45,6 +45,7 @@ def check(probe, out, secret_dir, server, size, phase, trial):
     return {"case": case, "rc": child.returncode, "origin": diff("udp"), "expected_origin": expected,
             "received_ids": checked, "relay_events": diff(server + "_udp"), "size": size,
             "confirmed": bool(report) and diff("udp") == expected and diff(server + "_udp") > 0,
+            "rejected_lengths": after[server + "_limits"][len(before[server + "_limits"]):],
             "caddy_closed_sessions": diff(server + "_closed_udp"), "caddy_bytes_up": diff(server + "_closed_up"),
             "caddy_bytes_down": diff(server + "_closed_down"), "caddy_budget_drops": diff(server + "_budget_drops")}
 
@@ -61,7 +62,7 @@ def main():
             (private / (kind + ".mobileconfig")).write_bytes(fetch(kind + ".mobileconfig"))
         for trial, servers in enumerate((("caddy", "candidate"), ("candidate", "caddy")), 1):
             for server in servers:
-                for size in (64, 1200, 1350, 1400):
+                for size in (64, 1396, 1400, 1401):
                     for phase in ("immediate", "delay", "small"):
                         row = check(probe, out, private, server, size, phase, trial)
                         rows.append(row)

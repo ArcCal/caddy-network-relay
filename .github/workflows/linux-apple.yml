@@ -1,8 +1,8 @@
-name: Controlled Linux DPLPMTUD candidate against native Apple UDP
+name: Compare exact UDP size targets inside the final acknowledged QUIC probe interval
 'on':
   push:
     branches:
-    - audit/udp-discovery-comparison-20261120
+    - audit/udp-datagram-size-20261120
 permissions:
   contents: read
   actions: read
@@ -33,7 +33,7 @@ jobs:
 
         overlay="$RUNNER_TEMP/probe-overlay/overlay.json"
 
-        go test -overlay="$overlay" -count=4 -run ''^Test(IdleDatagramPathMTUDiscovery|AuthenticatedDatagramProbeHint)$''
+        go test -overlay="$overlay" -count=4 -run ''^Test(IdleDatagramPathMTUDiscovery|AuthenticatedDatagramProbeHint|RequestedDatagramNearSearchCeiling)$''
         .
 
         mkdir "$RUNNER_TEMP/probe-arm"
