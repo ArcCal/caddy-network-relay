@@ -45,6 +45,12 @@ jobs:
     - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
       with:
         toolchain: stable
+    - name: Apply only the two audited TUN source changes before compiling
+      run: 'git -C clients apply --check "$PWD/diagnostics/linux-apple/physical-path.patch"
+
+        git -C clients apply "$PWD/diagnostics/linux-apple/physical-path.patch"
+
+        '
     - name: Build production clients and the native controller entry points
       run: 'bash diagnostics/linux-apple/build-products.sh "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
         "$RUNNER_TEMP/products"
