@@ -1,8 +1,8 @@
-name: Mac products against Linux servers
+name: Release NF, RS and TUN against the final Linux candidate
 'on':
   push:
     branches:
-    - audit/linux-client-products-20261120
+    - audit/final-product-interop-20261120
 permissions:
   contents: read
   actions: read
@@ -28,8 +28,21 @@ jobs:
         path: ${{ runner.temp }}/image
         github-token: ${{ github.token }}
         run-id: 44746990303
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: production-pair-arm64
+        path: ${{ runner.temp }}/final-linux
+        github-token: ${{ github.token }}
+        run-id: 44760250937
     - name: Boot the release Linux kernel with loopback-only port forwards
       run: bash diagnostics/linux-apple/boot.sh arm64 "$RUNNER_TEMP/image"
+    - name: Match the guest ELF to the native tested build
+      run: "python3 - <<'PYVERIFY'\nimport hashlib, json, os\nfrom pathlib import\
+        \ Path\nroot = Path(os.environ[\"RUNNER_TEMP\"])\nwith (root/\"final-linux/caddy-candidate\"\
+        ).open(\"rb\") as binary:\n    expected = hashlib.file_digest(binary, \"sha256\"\
+        ).hexdigest()\nif json.loads((root/\"linux.json\").read_bytes())[\"caddy\"\
+        ] != expected:\n    raise RuntimeError(\"The Linux guest is not serving the\
+        \ requested build\")\nPYVERIFY\n"
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: ArcCal/network-relay
@@ -40,12 +53,17 @@ jobs:
       with:
         toolchain: stable
     - name: Build production clients and the native controller entry points
-      run: bash diagnostics/linux-apple/build-products.sh "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift" "$RUNNER_TEMP/products"
+      run: bash diagnostics/linux-apple/build-products.sh "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
+        "$RUNNER_TEMP/products"
     - name: Test all three product transports on H2 and H3
-      run: "python3 - <<'PYHOST'\nimport os, runpy, subprocess\nt=os.environ['RUNNER_TEMP']\nwith runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']():\n    subprocess.run(['python3','diagnostics/linux-apple/products.py',t+'/products',t+'/evidence'],check=True)\nPYHOST"
+      run: "python3 - <<'PYHOST'\nimport os, runpy, subprocess\nt=os.environ['RUNNER_TEMP']\n\
+        with runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']():\n\
+        \    subprocess.run(['python3','diagnostics/linux-apple/products.py',t+'/products',t+'/evidence'],check=True)\n\
+        PYHOST"
     - name: Stop Linux fixture
       if: always()
-      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")" || true; fi
+      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
+        || true; fi
 
         '
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
