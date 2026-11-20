@@ -1,4 +1,4 @@
-name: Matched native and virtualized Linux four-stream Relay downloads
+name: Isolate KVM acceleration on a matched Linux four-stream download
 on:
   push:
     branches: [audit/linux-execution-throughput-20261120]
@@ -46,7 +46,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get -qq update
-          sudo apt-get -y -qq install ${{ matrix.emulator }} cpio
+          sudo apt-get -y -qq install ${{ matrix.emulator }} cpio acl
           (cd "$RUNNER_TEMP/image" && sha256sum -c SHA256SUMS)
           (cd "$RUNNER_TEMP/pair" && sha256sum -c SHA256SUMS && chmod 755 caddy-candidate)
           mkdir -p "$RUNNER_TEMP/linux"
@@ -54,13 +54,28 @@ jobs:
           test -x "$RUNNER_TEMP/linux/srv/network-relay"
           cargo build --locked --release --manifest-path product/network-relay-rs/Cargo.toml --target-dir "$RUNNER_TEMP/rs-target"
           echo "RS_CONTROL_BIN=$RUNNER_TEMP/rs-target/release/network-relay-rs" >> "$GITHUB_ENV"
+      - name: Permit the runner account to use its local KVM device for this job
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -c /dev/kvm && ( ! -r /dev/kvm || ! -w /dev/kvm ) ]]; then
+            getfacl -p /dev/kvm > "$RUNNER_TEMP/relay-kvm.acl"
+            sudo setfacl -m "u:$(id -u):rw" /dev/kvm
+          fi
       - name: Exercise the same four-way transfer with native, translated and available accelerated Linux
         env:
           RELAY_ARCH: ${{ matrix.arch }}
         run: python3 diagnostics/linux-apple/compare-execution.py
+      - name: Restore the runner-local KVM device permissions
+        if: always()
+        shell: bash
+        run: |
+          if [[ -f "$RUNNER_TEMP/relay-kvm.acl" ]]; then
+            sudo setfacl --restore="$RUNNER_TEMP/relay-kvm.acl"
+          fi
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: linux-execution-${{ matrix.arch }}
+          name: linux-kvm-${{ matrix.arch }}
           path: ${{ runner.temp }}/evidence
           retention-days: 7

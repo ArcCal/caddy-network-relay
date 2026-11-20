@@ -1,5 +1,6 @@
 """Keep the client, release servers, origin and transfer identical across Linux execution modes."""
 import hashlib
+import fcntl
 import json
 import os
 from pathlib import Path
@@ -86,10 +87,19 @@ def test(which, order):
         if guest.exists():
             stop(int(guest.read_text())); guest.unlink()
 
-modes = ["native", "tcg"]
-if os.path.exists("/dev/kvm") and os.access("/dev/kvm", os.R_OK | os.W_OK):
-    modes.append("kvm")
-availability = {"modes": modes, "dev_kvm": os.path.exists("/dev/kvm"), "arch": platform.machine()}
+modes = []
+try:
+    with open("/dev/kvm", "r+b", buffering=0) as handle:
+        version = fcntl.ioctl(handle.fileno(), 0xAE00, 0)  # KVM_GET_API_VERSION
+        vm = fcntl.ioctl(handle.fileno(), 0xAE01, 0)  # KVM_CREATE_VM
+        os.close(vm)
+    if version != 12:
+        raise RuntimeError("Unexpected KVM API version")
+    modes = ["native", "kvm", "tcg"]
+    reason = None
+except OSError as exc:
+    reason = {"operation": "open or create KVM VM", "errno": exc.errno}
+availability = {"modes": modes, "dev_kvm": os.path.exists("/dev/kvm"), "arch": platform.machine(), "unavailable": reason}
 (evidence / "modes.json").write_text(json.dumps(availability,indent=2))
 print(availability, flush=True)
 order = ["direct", "h2", "h3", "h3", "h2"]
