@@ -24,6 +24,8 @@ COUNTS = collections.Counter()
 LOCK = threading.Lock()
 BULK_WRITES = {}
 PIDS = {}
+CADDY_STUDY = {}
+SEQUENCE_LOCK = threading.Lock()
 
 
 def count(kind):
@@ -80,6 +82,9 @@ def start_servers(secret):
         if name == "nogso": env["QUIC_GO_DISABLE_GSO"] = "true"
         child = subprocess.Popen(args, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
         PIDS[name] = child.pid
+        if name == "caddy":
+            CADDY_STUDY.update(child=child, args=args, env=env, log=log, index=0)
+
         jobs.append(child)
     return jobs
 
@@ -149,6 +154,37 @@ def environment_record():
 class Metadata(http.server.BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
+
+    def do_POST(self):
+        if self.path != "/advance" or self.headers.get("Content-Length", "0") != "0":
+            return self.send_error(404)
+        # Fixed, local experiment: the requester cannot supply a command or path.
+        with SEQUENCE_LOCK:
+            order = Path("/srv/study-order").read_text().strip()
+            index = CADDY_STUDY["index"]
+            if order not in ("ABBA", "BAAB") or index >= len(order):
+                return self.send_error(409)
+            arm = order[index]
+            binary = CADDY if arm == "A" else CANDIDATE
+            prior=CADDY_STUDY["child"]
+            prior.terminate()
+            prior.wait(timeout=20)
+            args=[binary, *CADDY_STUDY["args"][1:]]
+            child=subprocess.Popen(args,cwd=ROOT,env=CADDY_STUDY["env"],stdout=CADDY_STUDY["log"],stderr=subprocess.STDOUT)
+            import time
+            for _ in range(150):
+                if child.poll() is not None: return self.send_error(503)
+                try:
+                    with socket.create_connection(("127.0.0.1",14201),timeout=.25):break
+                except OSError:time.sleep(.1)
+            else: return self.send_error(503)
+            path=Path(f"/proc/{child.pid}/exe")
+            digest=hashlib.sha256()
+            with path.open("rb") as src:
+                for block in iter(lambda:src.read(1024*1024),b""):digest.update(block)
+            CADDY_STUDY["index"]=index+1;CADDY_STUDY["child"]=child;PIDS["caddy"]=child.pid
+            body=json.dumps({"index":index,"arm":arm,"sha256":digest.hexdigest(),"port":14201}).encode()
+        self.send_response(200); self.send_header("Content-Length",str(len(body)));self.end_headers();self.wfile.write(body)
 
     def do_GET(self):
         if self.path == "/environment":

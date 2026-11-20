@@ -13,10 +13,11 @@ esac
 overlay=$(mktemp -d "$RUNNER_TEMP/origin-overlay.XXXXXX")
 mkdir "$overlay/srv"
 cp diagnostics/linux-apple/guest.py "$overlay/srv/guest.py"
+case "$RELAY_PHASE" in ABBA|BAAB) printf '%s\n' "$RELAY_PHASE" > "$overlay/srv/study-order";; *) exit 2;; esac
 (cd "$RUNNER_TEMP/probe-arm" && shasum -a 256 --check SHA256SUMS)
 install -m 755 "$RUNNER_TEMP/probe-arm/caddy-baseline" "$overlay/srv/caddy"
 install -m 755 "$RUNNER_TEMP/probe-arm/caddy-candidate" "$overlay/srv/caddy-candidate"
-(cd "$overlay" && printf '%s\n' srv/guest.py srv/caddy srv/caddy-candidate | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
+(cd "$overlay" && printf '%s\n' srv/guest.py srv/caddy srv/caddy-candidate srv/study-order | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
 cat "$image/guest.gz" "$overlay/fixture.gz" > "$overlay/guest-with-bulk.gz"
 command -v "$cmd" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install qemu
 # libslirp restricted mode drops every guest UDP reply, including forwarded

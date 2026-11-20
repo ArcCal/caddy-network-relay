@@ -1,8 +1,8 @@
-name: Apple CONNECT download frame size, Linux GSO and peer credit controls
+name: Clean Caddy H3 DATA size crossover on the same Linux listener and Apple endpoint
 'on':
   push:
     branches:
-    - audit/native-h3-frame-comparison-20261120
+    - audit/native-h3-fixed-port-20261120
 permissions:
   contents: read
   actions: read
@@ -30,58 +30,40 @@ jobs:
       with:
         go-version: 1.27.4
         cache: false
-    - name: Build the two measurement arms and repeat native Linux integrity and timing
-        controls
-      run: "set -euo pipefail\npython3 candidate/deploy/go-tls/prepare.py \"$(go env\
-        \ GOROOT)\" \"$RUNNER_TEMP/reviewed-go\"\nexport GOTOOLCHAIN=local GOROOT=\"\
-        $RUNNER_TEMP/reviewed-go\" GOFLAGS=\"-mod=readonly -tags=http2legacy,relay_tls9846_v1\"\
-        \nexport RELAY_STRESS_MB=64\nmkdir -p \"$RUNNER_TEMP/probe-arm\" \"$RUNNER_TEMP/native-evidence\"\
-        \ \"$RUNNER_TEMP/observer\"\npython3 study/diagnostics/linux-apple/frame-arm.py\
-        \ baseline stock\npython3 study/diagnostics/linux-apple/frame-arm.py candidate\
-        \ frame\nfor arm in baseline candidate; do\n    (cd \"$arm\" && \"$GOROOT/bin/gofmt\"\
-        \ -w h3.go client.go third_party/quic-go/{connection,stream}.go && RELAY_STUDY_NUMERIC=\"\
-        $RUNNER_TEMP/observer\" \"$GOROOT/bin/go\" test -race -count=1 -run '^Test(LargeTransfers|ReviewNativeCapsule63ByteBoundary|ConcurrentTunnels)$'\
-        \ . && \"$GOROOT/bin/go\" test -c -o \"$RUNNER_TEMP/$arm.test\" . && \"$GOROOT/bin/go\"\
-        \ build -trimpath -o \"$RUNNER_TEMP/probe-arm/caddy-$arm\" ./cmd/caddy)\n\
-        done\nfor arm in baseline candidate nogso nogso candidate baseline; do\n \
-        \   test_binary=$arm\n    if [[ \"$arm\" == nogso ]]; then export QUIC_GO_DISABLE_GSO=true;\
-        \ test_binary=baseline; else unset QUIC_GO_DISABLE_GSO; fi\n    \"$RUNNER_TEMP/$test_binary.test\"\
-        \ -test.run '^TestLargeTransfers$/^h3$' -test.v | tee -a \"$RUNNER_TEMP/native-evidence/$arm.log\"\
-        \n    grep -q '64 MiB each way' \"$RUNNER_TEMP/native-evidence/$arm.log\"\n\
-        done\n(cd \"$RUNNER_TEMP/probe-arm\" && sha256sum caddy-baseline caddy-candidate\
-        \ > SHA256SUMS)\n"
+    - name: Build the two measurement arms and repeat native Linux integrity and timing controls
+      run: "set -euo pipefail\npython3 candidate/deploy/go-tls/prepare.py \"$(go env GOROOT)\" \"$RUNNER_TEMP/reviewed-go\"\
+        \nexport GOTOOLCHAIN=local GOROOT=\"$RUNNER_TEMP/reviewed-go\" GOFLAGS=\"-mod=readonly -tags=http2legacy,relay_tls9846_v1\"\
+        \nexport RELAY_STRESS_MB=64\nmkdir -p \"$RUNNER_TEMP/probe-arm\" \"$RUNNER_TEMP/native-evidence\" \"$RUNNER_TEMP/observer\"\
+        \npython3 study/diagnostics/linux-apple/frame-arm.py baseline stock\npython3 study/diagnostics/linux-apple/frame-arm.py\
+        \ candidate frame\nfor arm in baseline candidate; do\n    (cd \"$arm\" && \"$GOROOT/bin/gofmt\" -w client.go && \"\
+        $GOROOT/bin/go\" test -race -count=1 -run '^Test(LargeTransfers|ReviewNativeCapsule63ByteBoundary|ConcurrentTunnels)$'\
+        \ . && \"$GOROOT/bin/go\" test -c -o \"$RUNNER_TEMP/$arm.test\" . && \"$GOROOT/bin/go\" build -trimpath -o \"$RUNNER_TEMP/probe-arm/caddy-$arm\"\
+        \ ./cmd/caddy)\ndone\n(cd \"$RUNNER_TEMP/probe-arm\" && sha256sum caddy-baseline caddy-candidate > SHA256SUMS)\n"
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: production-pair-${{ matrix.arch }}
         path: ${{ runner.temp }}/probe-arm
         retention-days: 7
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      if: always()
-      with:
-        name: native-frame-times-${{ matrix.arch }}
-        path: ${{ runner.temp }}/native-evidence
-        retention-days: 7
     strategy:
       fail-fast: false
       matrix:
         include:
-        - runner: ubuntu-24.04
-          arch: amd64
         - runner: ubuntu-22.04-arm
           arch: arm64
   clients:
-    name: ${{ matrix.platform }} on ${{ matrix.runner }} to Linux ${{ matrix.arch
-      }}
+    name: Native Apple fixed-port ${{ matrix.phase }}
     strategy:
       fail-fast: false
       matrix:
         include:
-        - runner: xcode-27
-          platform: macOS
+        - platform: macOS
+          runner: xcode-27
           arch: arm64
-        - runner: macos-15
-          platform: macOS
-          arch: amd64
+          phase: ABBA
+        - platform: macOS
+          runner: xcode-27
+          arch: arm64
+          phase: BAAB
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 85
     steps:
@@ -114,26 +96,24 @@ jobs:
 
         python3 diagnostics/linux-apple/prepare-progress.py "$RUNNER_TEMP/FrameProbe.swift"
 
-        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" "$RUNNER_TEMP/FrameProbe.swift"
-        -o "$RUNNER_TEMP/probe"
+        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" "$RUNNER_TEMP/FrameProbe.swift" -o "$RUNNER_TEMP/probe"
 
         '
-    - name: Measure four concurrent checked downloads, CPU, QUIC credit and per-stream
-        progress
+    - name: Measure four concurrent checked downloads, CPU, QUIC credit and per-stream progress
       shell: bash
       run: python3 diagnostics/linux-apple/native-run.py
     - name: Stop Linux fixture
       if: always()
-      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
-        || true; fi
+      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")" || true; fi
 
         '
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: ${{ matrix.platform }}-${{ matrix.runner }}-linux-${{ matrix.arch }}
+        name: clean-fixed-port-${{ matrix.phase }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7
     needs: candidate
     env:
       RELAY_FRAME_ARCH: ${{ matrix.arch }}
+      RELAY_PHASE: ${{ matrix.phase }}
