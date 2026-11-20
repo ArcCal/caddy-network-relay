@@ -10,6 +10,7 @@ import socket
 import ssl
 import subprocess
 import tempfile
+import time
 import threading
 
 ROOT = Path(tempfile.mkdtemp(prefix="relay-guest-"))
@@ -21,6 +22,8 @@ CANDIDATE = os.environ.get("CADDY_CANDIDATE", "/srv/caddy-candidate")
 BLOCK = bytes(range(256)) * 256
 COUNTS = collections.Counter()
 LOCK = threading.Lock()
+BULK_WRITES = {}
+PIDS = {}
 
 
 def count(kind):
@@ -49,7 +52,7 @@ def credentials():
 
 def start_servers(secret):
     jobs = []
-    for name, binary, port in (("rust", RUST, 14200), ("caddy", CADDY, 14201), ("candidate", CANDIDATE, 14202)):
+    for name, binary, port in (("rust", RUST, 14200), ("caddy", CADDY, 14201), ("candidate", CANDIDATE, 14202), ("nogso", CADDY, 14203)):
         cli = [binary] + (["network-relay"] if name != "rust" else [])
         account = command(*cli, "passwd", "--name", "alice", "--stdin", "--fast-hash", password=secret)
         if name == "rust":
@@ -72,7 +75,11 @@ def start_servers(secret):
         command(*cli, "profile", "--host", "ingress.relay.test", "--port", str(port), "--user", "alice", "--out", str(profile),
                 *(["--password-stdin"] if name != "rust" else []), password=secret)
         log = (ROOT / (name + ".log")).open("wb")
-        child = subprocess.Popen(args, cwd=ROOT, stdout=log, stderr=subprocess.STDOUT)
+        trace = ROOT / ("trace-" + name); trace.mkdir()
+        env = dict(os.environ, RELAY_STUDY_NUMERIC=str(trace))
+        if name == "nogso": env["QUIC_GO_DISABLE_GSO"] = "true"
+        child = subprocess.Popen(args, cwd=ROOT, env=env, stdout=log, stderr=subprocess.STDOUT)
+        PIDS[name] = child.pid
         jobs.append(child)
     return jobs
 
@@ -91,13 +98,23 @@ class Origin(http.server.BaseHTTPRequestHandler):
             self.send_header("X-Upload-Bytes", str(upload[0]))
             self.send_header("X-Upload-SHA256", upload[1])
         self.end_headers()
+        transfer = None
+        if size == 64 * 1024 * 1024:
+            with LOCK:
+                transfer = len(BULK_WRITES) + 1
+                BULK_WRITES[transfer] = 0
+        written = 0
         while size:
             chunk = min(size, len(BLOCK))
             self.wfile.write(BLOCK[:chunk])
             size -= chunk
+            written += chunk
+            if transfer is not None and written % (1024 * 1024) == 0:
+                with LOCK:
+                    BULK_WRITES[transfer] = written
 
     def do_GET(self):
-        if self.path not in ("/4096", "/1048576", "/8388608"):
+        if self.path not in ("/4096", "/1048576", "/8388608", "/67108864"):
             return self.send_error(404)
         count("download")
         self.reply(int(self.path[1:]))
@@ -136,10 +153,26 @@ class Metadata(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/environment":
             body = self.server.environment_record
+        elif self.path == "/progress":
+            with LOCK:
+                progress = dict(BULK_WRITES)
+            latest = {}
+            for path in ROOT.glob("trace-*/stream-*.jsonl"):
+                with path.open("rb") as f:
+                    f.seek(max(0, f.seek(0,2) - 4096)); lines=f.read().splitlines()
+                for line in reversed(lines):
+                    try: record=json.loads(line)
+                    except (ValueError, UnicodeError): continue
+                    latest[path.parent.name + "/" + path.name] = record; break
+            cpu = {}
+            for name,pid in PIDS.items():
+                stat=Path(f"/proc/{pid}/stat").read_text().rsplit(")",1)[1].split()
+                cpu[name]=(int(stat[11])+int(stat[12]))/os.sysconf("SC_CLK_TCK")
+            body=json.dumps({"writes":progress,"streams":latest,"cpu":cpu}).encode()
         elif self.path == "/counts":
             with LOCK:
                 data = dict(COUNTS)
-            for name in ("rust", "caddy", "candidate"):
+            for name in ("rust", "caddy", "candidate", "nogso"):
                 log = (ROOT / (name + ".log")).read_bytes().lower()
                 data[name + "_udp"] = log.count(b"connect-udp")
                 data[name + "_tcp"] = log.count(b"connect")
@@ -165,7 +198,7 @@ class Metadata(http.server.BaseHTTPRequestHandler):
                     if event.get("msg") == "UDP payloads dropped by per-user traffic budget":
                         data[server + "_budget_drops"] += event.get("dropped", 0)
             body = json.dumps(data).encode()
-        elif self.path in ("/ca.der", "/rust.mobileconfig", "/caddy.mobileconfig", "/candidate.mobileconfig"):
+        elif self.path in ("/ca.der", "/rust.mobileconfig", "/caddy.mobileconfig", "/candidate.mobileconfig", "/nogso.mobileconfig"):
             body = (ROOT / self.path[1:]).read_bytes()
         else:
             return self.send_error(404)
@@ -205,7 +238,7 @@ def main():
     tls.load_cert_chain(ROOT/"cert.pem", ROOT/"key.pem")
     origin.socket = tls.wrap_socket(origin.socket, server_side=True)
     threading.Thread(target=origin.serve_forever, daemon=True).start()
-    for port in (14200, 14201, 14202):
+    for port in (14200, 14201, 14202, 14203):
         import time
         for attempt in range(200):
             if any(p.poll() is not None for p in jobs):

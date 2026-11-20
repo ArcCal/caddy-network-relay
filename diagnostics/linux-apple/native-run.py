@@ -18,7 +18,7 @@ with origin_name():
         subprocess.run(["sudo", "dscacheutil", "-flushcache"], check=True)
     try:
         configure(after)
-        subprocess.run(["python3", "diagnostics/linux-apple/client.py", private / "probe", private / "evidence"],
+        subprocess.run(["python3", "diagnostics/linux-apple/compare-bulk.py", private / "probe", private / "evidence"],
                        check=True)
     finally:
         if hosts.read_bytes() != after:

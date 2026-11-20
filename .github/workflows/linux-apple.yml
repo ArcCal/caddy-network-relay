@@ -1,8 +1,8 @@
-name: Release candidates on real Linux x86-64 and arm64 against Apple UDP
+name: Apple CONNECT download frame size, Linux GSO and peer credit controls
 'on':
   push:
     branches:
-    - audit/confirmed-datagrams-20261120
+    - audit/native-h3-frame-comparison-20261120
 permissions:
   contents: read
   actions: read
@@ -13,7 +13,12 @@ jobs:
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
-        ref: 03ca4e3b451e4f49e3e67b9db7386402f0d1955f
+        sparse-checkout: diagnostics
+        path: study
+        persist-credentials: false
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: d7483b1fbe75b60af414ec043642b51ae5c43436
         path: baseline
         persist-credentials: false
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -25,20 +30,36 @@ jobs:
       with:
         go-version: 1.27.4
         cache: false
-    - name: Exercise exact production sources with the race detector and build both
-        release binaries
+    - name: Build the two measurement arms and repeat native Linux integrity and timing
+        controls
       run: "set -euo pipefail\npython3 candidate/deploy/go-tls/prepare.py \"$(go env\
         \ GOROOT)\" \"$RUNNER_TEMP/reviewed-go\"\nexport GOTOOLCHAIN=local GOROOT=\"\
         $RUNNER_TEMP/reviewed-go\" GOFLAGS=\"-mod=readonly -tags=http2legacy,relay_tls9846_v1\"\
-        \n(cd candidate && \"$GOROOT/bin/go\" test -race -count=4 -run '^TestIdleDatagramPathMTUDiscovery$'\
-        \ .)\nmkdir \"$RUNNER_TEMP/probe-arm\"\nfor revision in baseline candidate;\
-        \ do\n    (cd \"$revision\" && \"$GOROOT/bin/go\" build -trimpath -o \"$RUNNER_TEMP/probe-arm/caddy-$revision\"\
-        \ ./cmd/caddy)\ndone\n(cd \"$RUNNER_TEMP/probe-arm\" && sha256sum caddy-baseline\
-        \ caddy-candidate > SHA256SUMS)\n"
+        \nexport RELAY_STRESS_MB=64\nmkdir -p \"$RUNNER_TEMP/probe-arm\" \"$RUNNER_TEMP/native-evidence\"\
+        \ \"$RUNNER_TEMP/observer\"\npython3 study/diagnostics/linux-apple/frame-arm.py\
+        \ baseline stock\npython3 study/diagnostics/linux-apple/frame-arm.py candidate\
+        \ frame\nfor arm in baseline candidate; do\n    (cd \"$arm\" && \"$GOROOT/bin/gofmt\"\
+        \ -w h3.go client.go third_party/quic-go/{connection,stream}.go && RELAY_STUDY_NUMERIC=\"\
+        $RUNNER_TEMP/observer\" \"$GOROOT/bin/go\" test -race -count=1 -run '^Test(LargeTransfers|ReviewNativeCapsule63ByteBoundary|ConcurrentTunnels)$'\
+        \ . && \"$GOROOT/bin/go\" test -c -o \"$RUNNER_TEMP/$arm.test\" . && \"$GOROOT/bin/go\"\
+        \ build -trimpath -o \"$RUNNER_TEMP/probe-arm/caddy-$arm\" ./cmd/caddy)\n\
+        done\nfor arm in baseline candidate nogso nogso candidate baseline; do\n \
+        \   test_binary=$arm\n    if [[ \"$arm\" == nogso ]]; then export QUIC_GO_DISABLE_GSO=true;\
+        \ test_binary=baseline; else unset QUIC_GO_DISABLE_GSO; fi\n    \"$RUNNER_TEMP/$test_binary.test\"\
+        \ -test.run '^TestLargeTransfers$/^h3$' -test.v | tee -a \"$RUNNER_TEMP/native-evidence/$arm.log\"\
+        \n    grep -q '64 MiB each way' \"$RUNNER_TEMP/native-evidence/$arm.log\"\n\
+        done\n(cd \"$RUNNER_TEMP/probe-arm\" && sha256sum caddy-baseline caddy-candidate\
+        \ > SHA256SUMS)\n"
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       with:
         name: production-pair-${{ matrix.arch }}
         path: ${{ runner.temp }}/probe-arm
+        retention-days: 7
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: native-frame-times-${{ matrix.arch }}
+        path: ${{ runner.temp }}/native-evidence
         retention-days: 7
     strategy:
       fail-fast: false
@@ -62,7 +83,7 @@ jobs:
           platform: macOS
           arch: amd64
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 75
+    timeout-minutes: 85
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
@@ -89,15 +110,16 @@ jobs:
     - name: Prepare Apple client
       run: 'set -euo pipefail
 
-        python3 diagnostics/linux-apple/prepare-train.py native-probe/diagnostics/RelayProbe.swift
-        "$RUNNER_TEMP/Train.swift"
+        cp native-probe/diagnostics/RelayProbe.swift "$RUNNER_TEMP/FrameProbe.swift"
 
-        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" "$RUNNER_TEMP/Train.swift"
+        python3 diagnostics/linux-apple/prepare-progress.py "$RUNNER_TEMP/FrameProbe.swift"
+
+        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" "$RUNNER_TEMP/FrameProbe.swift"
         -o "$RUNNER_TEMP/probe"
 
         '
-    - name: Compare immediate, idle and small-first transmissions to an isolated echo
-        peer
+    - name: Measure four concurrent checked downloads, CPU, QUIC credit and per-stream
+        progress
       shell: bash
       run: python3 diagnostics/linux-apple/native-run.py
     - name: Stop Linux fixture
@@ -113,3 +135,5 @@ jobs:
         path: ${{ runner.temp }}/evidence
         retention-days: 7
     needs: candidate
+    env:
+      RELAY_FRAME_ARCH: ${{ matrix.arch }}
