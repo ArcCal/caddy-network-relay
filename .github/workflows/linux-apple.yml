@@ -1,53 +1,12 @@
-name: Release candidates on real Linux x86-64 and arm64 against Apple UDP
+name: Final Linux QUIC datagram change against native iOS simulator
 'on':
   push:
     branches:
-    - audit/confirmed-datagrams-20261120
+    - audit/confirmed-datagrams-ios-20261120
 permissions:
   contents: read
   actions: read
 jobs:
-  candidate:
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 40
-    steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        ref: 03ca4e3b451e4f49e3e67b9db7386402f0d1955f
-        path: baseline
-        persist-credentials: false
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        ref: d7483b1fbe75b60af414ec043642b51ae5c43436
-        path: candidate
-        persist-credentials: false
-    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
-      with:
-        go-version: 1.27.4
-        cache: false
-    - name: Exercise exact production sources with the race detector and build both
-        release binaries
-      run: "set -euo pipefail\npython3 candidate/deploy/go-tls/prepare.py \"$(go env\
-        \ GOROOT)\" \"$RUNNER_TEMP/reviewed-go\"\nexport GOTOOLCHAIN=local GOROOT=\"\
-        $RUNNER_TEMP/reviewed-go\" GOFLAGS=\"-mod=readonly -tags=http2legacy,relay_tls9846_v1\"\
-        \n(cd candidate && \"$GOROOT/bin/go\" test -race -count=4 -run '^TestIdleDatagramPathMTUDiscovery$'\
-        \ .)\nmkdir \"$RUNNER_TEMP/probe-arm\"\nfor revision in baseline candidate;\
-        \ do\n    (cd \"$revision\" && \"$GOROOT/bin/go\" build -trimpath -o \"$RUNNER_TEMP/probe-arm/caddy-$revision\"\
-        \ ./cmd/caddy)\ndone\n(cd \"$RUNNER_TEMP/probe-arm\" && sha256sum caddy-baseline\
-        \ caddy-candidate > SHA256SUMS)\n"
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: production-pair-${{ matrix.arch }}
-        path: ${{ runner.temp }}/probe-arm
-        retention-days: 7
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-        - runner: ubuntu-24.04
-          arch: amd64
-        - runner: ubuntu-22.04-arm
-          arch: arm64
   clients:
     name: ${{ matrix.platform }} on ${{ matrix.runner }} to Linux ${{ matrix.arch
       }}
@@ -56,11 +15,8 @@ jobs:
       matrix:
         include:
         - runner: xcode-27
-          platform: macOS
+          platform: iOS
           arch: arm64
-        - runner: macos-15
-          platform: macOS
-          arch: amd64
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     steps:
@@ -84,18 +40,29 @@ jobs:
       with:
         name: production-pair-${{ matrix.arch }}
         path: ${{ runner.temp }}/probe-arm
+        github-token: ${{ github.token }}
+        run-id: 44760250937
     - name: Boot the release Linux kernel with loopback-only port forwards
       run: bash diagnostics/linux-apple/boot.sh "${{ matrix.arch }}" "$RUNNER_TEMP/image"
     - name: Prepare Apple client
-      run: 'set -euo pipefail
-
-        python3 diagnostics/linux-apple/prepare-train.py native-probe/diagnostics/RelayProbe.swift
-        "$RUNNER_TEMP/Train.swift"
-
-        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" "$RUNNER_TEMP/Train.swift"
-        -o "$RUNNER_TEMP/probe"
-
-        '
+      run: "python3 diagnostics/linux-apple/prepare-train.py native-probe/diagnostics/RelayProbe.swift\
+        \ \"$RUNNER_TEMP/Train.swift\"\nset -euo pipefail\nsw_vers\nxcodebuild -version\n\
+        if [[ '${{ matrix.platform }}' == macOS ]]; then\n  xcrun swiftc -O -parse-as-library\
+        \ -target \"$(uname -m)-apple-macos14.0\" \"$RUNNER_TEMP/Train.swift\" -o\
+        \ \"$RUNNER_TEMP/probe\"\nelse\n  xcrun simctl list devices available -j >\
+        \ \"$RUNNER_TEMP/devices.json\"\n  sim_id=$(python3 - \"$RUNNER_TEMP/devices.json\"\
+        \ <<'PY'\nimport json, re, sys\ndata=json.load(open(sys.argv[1]))['devices']\n\
+        pairs=[(tuple(map(int,m.group(1).split('-'))),devices) for key,devices in\
+        \ data.items() if (m:=re.search(r'[.]iOS-([0-9]+(?:-[0-9]+)*)$',key))]\nprint(next(d['udid']\
+        \ for _,devices in sorted(pairs,key=lambda item:item[0],reverse=True) for\
+        \ d in devices if d['isAvailable'] and 'iPhone' in d['name']))\nPY\n  )\n\
+        \  xcrun simctl bootstatus \"$sim_id\" -b\n  sdk=$(xcrun --sdk iphonesimulator\
+        \ --show-sdk-path)\n  xcrun --sdk iphonesimulator swiftc -O -parse-as-library\
+        \ -sdk \"$sdk\" -target \"$(uname -m)-apple-ios17.0-simulator\" \"$RUNNER_TEMP/Train.swift\"\
+        \ -o \"$RUNNER_TEMP/ios-probe\"\n  echo \"RELAY_SIMULATOR_ID=$sim_id\" >>\
+        \ \"$GITHUB_ENV\"\n  cat > \"$RUNNER_TEMP/probe\" <<'PROBE'\n#!/bin/bash\n\
+        exec xcrun simctl spawn \"$RELAY_SIMULATOR_ID\" \"$RUNNER_TEMP/ios-probe\"\
+        \ \"$@\"\nPROBE\n  chmod 700 \"$RUNNER_TEMP/probe\"\nfi\n"
     - name: Compare immediate, idle and small-first transmissions to an isolated echo
         peer
       shell: bash
@@ -112,4 +79,3 @@ jobs:
         name: ${{ matrix.platform }}-${{ matrix.runner }}-linux-${{ matrix.arch }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7
-    needs: candidate
