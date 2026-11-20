@@ -485,6 +485,17 @@ caddy network-relay profile --host relay.example.com --user iphone
 
 The profile identifier is `com.github.arccal.network-relay.<domain>.<user>` (the same as in the old Rust version), so a new profile for the same domain and user replaces the old one when it is installed.
 
+The native Apple H2 Relay path on the two tested macOS versions and the iOS
+27.2 simulator dropped outgoing 63-byte UDP payloads before the Linux origin.
+A 63-byte response to a 64-byte request arrived intact. Where the relay's QUIC
+port is reachable, append `--no-http2` to the same profile command to select H3.
+For large TCP downloads that stall over H3, `--no-http3` selects H2. Keep all
+of the original domain rules and authentication options when regenerating a
+profile. The Network Relay checkout also provides a private transport-only
+copy operation for existing unsigned, single-hop Caddy profiles.
+[Apple measurements](https://github.com/ArcCal/caddy-network-relay/actions/runs/44779707156).
+[Using an existing profile](https://github.com/ArcCal/network-relay/blob/da3b68dc4f8dc678f23857af2e5634245d31f319/docs/config.md#choosing-a-transport-for-an-existing-apple-profile).
+
 ### `check`
 
 ```bash
