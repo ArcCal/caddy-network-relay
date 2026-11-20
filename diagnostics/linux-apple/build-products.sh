@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+set -euo pipefail
+source_root=$1
+history=$2
+out=$3
+mkdir -p "$out"
+cargo build --locked --release --manifest-path "$source_root/network-relay-rs/Cargo.toml" --bin network-relay-rs
+cp "$source_root/network-relay-rs/target/release/network-relay-rs" "$out/rs"
+for product in nf tun; do
+    case "$product" in nf) model=NetworkRelayNF ;; tun) model=NetworkRelayTun ;; esac
+    parent="$source_root/network-relay-$product"
+    cargo build --locked --release --manifest-path "$parent/Core/Cargo.toml" --lib
+    modules="$out/modules-$product"
+    mkdir -p "$modules"
+    cp "$parent/App/Sources/${model}Bridge/include/${model}Bridge.h" "$modules/"
+    cat > "$modules/module.modulemap" <<MAP
+module ${model}Bridge {
+    header "${model}Bridge.h"
+    export *
+}
+MAP
+    app="$parent/App/Sources/$model"
+    swift=(xcrun swiftc -parse-as-library -swift-version 5 -O -target arm64-apple-macos27.0)
+    "${swift[@]}" -whole-module-optimization -emit-object -emit-module -module-name "${model}Model" \
+        -emit-module-path "$modules/${model}Model.swiftmodule" "$parent/App/Sources/${model}Model/"*.swift -o "$modules/model.o"
+    main="$history"
+    files=("$app/NativeClient.swift" "$app/TunnelController.swift" "$app/Store.swift" "$app/NetworkChanges.swift" "$app/AboutInformation.swift")
+    if [[ $product == tun ]]; then
+        main="$modules/TunHistory.swift"
+        sed -e 's/NetworkRelayNFModel/NetworkRelayTunModel/g' -e '/let controller = TunnelController.shared/a\
+            controller.setGlobalTUN(false)
+' "$history" > "$main"
+        files+=("$app/HostSession.swift")
+    fi
+    "${swift[@]}" -D NF_HISTORY_DIAGNOSTIC -I "$modules" -Xcc "-fmodule-map-file=$modules/module.modulemap" \
+        -L "$parent/Core/target/release" "-lnetwork_relay_${product}_core" -framework Network -framework AppKit -framework Security \
+        "$modules/model.o" "${files[@]}" "$main" -o "$out/$product"
+done
