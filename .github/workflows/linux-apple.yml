@@ -1,8 +1,8 @@
-name: Native macOS four-stream bulk against Linux Relay servers
+name: Apple Relay and independent RS bulk on the same Mac and Linux guest
 'on':
   push:
     branches:
-    - audit/linux-apple-bulk-20261120
+    - audit/native-bulk-control-20261120
 permissions:
   contents: read
   actions: read
@@ -47,6 +47,31 @@ jobs:
 
         xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" native-probe/diagnostics/RelayProbe.swift
         -o "$RUNNER_TEMP/probe"
+
+        '
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: network-relay-rs-macos-arm64
+        path: ${{ runner.temp }}/rs-package
+        repository: ArcCal/network-relay
+        github-token: ${{ github.token }}
+        run-id: 44748756161
+    - name: Verify the release RS command line client
+      run: 'set -euo pipefail
+
+        cd "$RUNNER_TEMP/rs-package"
+
+        shasum -a 256 --check network-relay-rs-*-macos-arm64.tar.gz.sha256
+
+        archives=(network-relay-rs-*-macos-arm64.tar.gz)
+
+        tar -xzf "${archives[0]}"
+
+        binaries=(network-relay-rs-*-macos-arm64/network-relay-rs)
+
+        codesign --verify --strict "${binaries[0]}"
+
+        echo "RS_CONTROL_BIN=$PWD/${binaries[0]}" >> "$GITHUB_ENV"
 
         '
     - name: Verify 64 MiB serial and four-stream transfers and control paths

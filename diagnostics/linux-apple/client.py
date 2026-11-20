@@ -1,5 +1,7 @@
 """Score a native Apple client against independently counted Linux TCP and UDP origins."""
 import hashlib
+import os
+import runpy
 import json
 import subprocess
 import sys
@@ -31,10 +33,12 @@ def run(kind, mode, operation, size, count, concurrency, trial):
     request = private/"settings.json"
     request.write_text(json.dumps(settings))
     before = json.loads(fetch("counts"))
+    cpu = control["cpu_seconds"]()
     try:
         rc = subprocess.run([probe, str(request), str(result)], capture_output=True, timeout=245).returncode
     except subprocess.TimeoutExpired:
         rc = 124
+    cpu = None if cpu is None else control["cpu_seconds"]() - cpu
     after = json.loads(fetch("counts"))
     report = json.loads(result.read_text()) if result.exists() else {}
     samples = report.get("samples", [])
@@ -44,13 +48,14 @@ def run(kind, mode, operation, size, count, concurrency, trial):
     verified = sum(x.get("ok") is True for x in samples)
     ok = (rc == 0 and report.get("completed") is True and verified == count
           and observed == count and (mode == "direct" or route > 0))
-    row = {"case":label,"rc":rc,"ok":bool(ok),"origin_count":observed,"relay_log_count":route,
+    row = {"case":label,"rc":rc,"ok":bool(ok),"guest_host_cpu_seconds":cpu,"origin_count":observed,"relay_log_count":route,
            "checked_payloads":verified,"client_os":report.get("os"),"native_wall_seconds":report.get("wall_seconds")}
     print(json.dumps(row),flush=True)
     rows.append(row)
     (output/"summary.json").write_text(json.dumps(rows,indent=2))
 
 
+control = runpy.run_path("diagnostics/linux-apple/bulk-control.py")
 probe = sys.argv[1]
 output = Path(sys.argv[2]).resolve()
 output.mkdir(parents=True, exist_ok=True)
@@ -63,14 +68,19 @@ with tempfile.TemporaryDirectory() as directory:
         profile=fetch(server+".mobileconfig")
         (private/(server+".mobileconfig")).write_bytes(profile)
     size = 64 * 1024 * 1024
-    run("rust","direct","download",size,4,4,1)
-    # Alternate the order across trials to expose transient H3 progress stalls.
-    for trial, servers in enumerate((("caddy","rust"),("rust","caddy")),start=1):
-        for server in servers:
-            if trial == 1:
-                run(server,"h2","download",size,4,4,trial)
-                run(server,"h3","download",size,1,1,trial)
-            run(server,"h3","download",size,4,4,trial)
-failed=sum(not r["ok"] for r in rows)
+    controls = []
+    cases = [("rust", "direct"), ("caddy", "h2"), ("rust", "h3"), ("rust", "h2"), ("caddy", "h3")]
+    for index, (server, mode) in enumerate(cases):
+        if index % 2 == 0:
+            run(server, mode, "download", size, 4, 4, 1)
+        try:
+            result = control["run"](os.environ["RS_CONTROL_BIN"], fetch, server, mode, size)
+        except Exception as error:
+            result = {"kind": server, "mode": mode, "ok": False, "error_type": type(error).__name__}
+        controls.append(result)
+        (output / "independent-rs.json").write_text(json.dumps(controls, indent=2))
+        if index % 2 == 1:
+            run(server, mode, "download", size, 4, 4, 1)
+failed = sum(not row["ok"] for row in rows + controls)
 print(f"{len(rows)} cases, {failed} failures")
 sys.exit(bool(failed))

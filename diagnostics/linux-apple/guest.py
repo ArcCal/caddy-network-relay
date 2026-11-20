@@ -99,6 +99,8 @@ class Origin(http.server.BaseHTTPRequestHandler):
         if self.path not in ("/4096", "/1048576", "/8388608", "/67108864"):
             return self.send_error(404)
         count("download")
+        if self.server.server_address[1] == 18444:
+            count("private_download")
         self.reply(int(self.path[1:]))
 
     def do_POST(self):
@@ -179,11 +181,12 @@ def main():
             count("udp")
             udp.sendto(data, addr)
     threading.Thread(target=echo, daemon=True).start()
-    origin = http.server.ThreadingHTTPServer((BIND, 18443), Origin)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain(ROOT/"cert.pem", ROOT/"key.pem")
-    origin.socket = tls.wrap_socket(origin.socket, server_side=True)
-    threading.Thread(target=origin.serve_forever, daemon=True).start()
+    for address in ((BIND, 18443), ("127.0.0.1", 18444)):
+        origin = http.server.ThreadingHTTPServer(address, Origin)
+        origin.socket = tls.wrap_socket(origin.socket, server_side=True)
+        threading.Thread(target=origin.serve_forever, daemon=True).start()
     for port in (14200, 14201):
         import time
         for attempt in range(200):
