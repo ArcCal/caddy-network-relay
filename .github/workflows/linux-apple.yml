@@ -1,4 +1,4 @@
-name: Native Apple file and streaming consumers on a Linux Relay
+name: Direct TLS origin handshake controls with native Apple readers
 'on':
   push:
     branches:
@@ -72,7 +72,7 @@ jobs:
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: reader-${{ matrix.runner }}
+        name: tls-reader-${{ matrix.runner }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7
     env:

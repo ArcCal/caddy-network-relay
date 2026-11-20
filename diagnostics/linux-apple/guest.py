@@ -84,6 +84,33 @@ def start_servers(secret):
     return jobs
 
 
+class LegacyTLSOrigin(http.server.ThreadingHTTPServer):
+    def get_request(self):
+        try:
+            result = super().get_request()
+        except OSError:
+            count("legacy_handshake_error")
+            raise
+        count("legacy_accepted")
+        return result
+
+
+class WorkerTLSOrigin(http.server.ThreadingHTTPServer):
+    # Accept TCP first, then perform each independently verified TLS handshake
+    # in its request worker. Keep the listen backlog identical to the control.
+    def process_request_thread(self, request, client_address):
+        count("worker_accepted")
+        try:
+            request.settimeout(12)
+            secure = self.tls_context.wrap_socket(request, server_side=True)
+        except OSError:
+            count("worker_handshake_error")
+            self.shutdown_request(request)
+            return
+        secure.settimeout(None)
+        super().process_request_thread(secure, client_address)
+
+
 class Origin(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -233,11 +260,14 @@ def main():
             count("udp")
             udp.sendto(data, addr)
     threading.Thread(target=echo, daemon=True).start()
-    origin = http.server.ThreadingHTTPServer((BIND, 18443), Origin)
+    origin = LegacyTLSOrigin((BIND, 18443), Origin)
     tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     tls.load_cert_chain(ROOT/"cert.pem", ROOT/"key.pem")
     origin.socket = tls.wrap_socket(origin.socket, server_side=True)
     threading.Thread(target=origin.serve_forever, daemon=True).start()
+    worker = WorkerTLSOrigin((BIND, 18444), Origin)
+    worker.tls_context = tls
+    threading.Thread(target=worker.serve_forever, daemon=True).start()
     for port in (14200, 14201, 14202, 14203):
         import time
         for attempt in range(200):

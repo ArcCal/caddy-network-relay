@@ -22,7 +22,7 @@ command -v "$cmd" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install qemu
 # libslirp restricted mode drops every guest UDP reply, including forwarded
 # loopback ports. The guest permits only a host route to the forwarding gateway.
 net=user,id=nic,ipv6=off
-for mapping in tcp:18080 tcp:18443 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:14201 tcp:14202 udp:14202 tcp:14203 udp:14203; do
+for mapping in tcp:18080 tcp:18443 tcp:18444 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:14201 tcp:14202 udp:14202 tcp:14203 udp:14203; do
     protocol=${mapping%:*}
     port=${mapping#*:}
     net+=",hostfwd=$protocol:127.0.0.1:$port-10.0.2.15:$port"
