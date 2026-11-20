@@ -3,6 +3,7 @@ import base64
 import hashlib
 import json
 import plistlib
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -44,16 +45,28 @@ def run(kind, mode, operation, size, count, concurrency, negative=""):
     key = kind + ("_udp" if operation == "udp" else "_tcp")
     route = after.get(key,0) - before.get(key,0)
     verified = sum(x.get("ok") is True for x in samples)
-    ok = (child.returncode != 0 and observed == 0 and not report.get("completed",False) and bool(report)) if negative else (
-        child.returncode == 0 and report.get("completed") is True and verified == count and observed == count
-        and (mode == "direct" or route > 0))
-    row = {"case":label,"rc":child.returncode,"ok":bool(ok),"origin_count":observed,"relay_log_count":route,
+    auth = after.get(kind + "_auth", 0) - before.get(kind + "_auth", 0)
+    if negative:
+        positive = f"{kind}-{mode}-" + ("udp-64-1" if operation == "udp" else "download-4096-1")
+        known_good = any(row["case"] == positive and row["ok"] for row in rows)
+        baseline = known_good and child.returncode != 0 and observed == 0 and verified == 0
+        if operation == "udp":
+            rejected = report.get("completed") is False and not any(s.get("ready") for s in report.get("state", []))
+        else:
+            rejected = expected_rejection(report, {"password": "credentials", "certificate": "trust"}[negative])
+        server_evidence = (route > 0 or auth > 0) if negative == "password" else (route == 0 and auth == 0)
+        ok = baseline and rejected and server_evidence
+    else:
+        ok = (child.returncode == 0 and report.get("completed") is True and verified == count
+              and observed == count and (mode == "direct" or route > 0))
+    row = {"case":label,"rc":child.returncode,"ok":bool(ok),"origin_count":observed,"relay_log_count":route,"auth_log_count":auth,
            "checked_payloads":verified,"client_os":report.get("os"),"native_wall_seconds":report.get("wall_seconds")}
     print(json.dumps(row),flush=True)
     rows.append(row)
     (output/"summary.json").write_text(json.dumps(rows,indent=2))
 
 
+expected_rejection = runpy.run_path("native-probe/diagnostics/run-native-probe.py")["expected_native_rejection"]
 probe = sys.argv[1]
 output = Path(sys.argv[2]).resolve()
 output.mkdir(parents=True, exist_ok=True)

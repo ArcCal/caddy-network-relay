@@ -49,6 +49,7 @@ PY
              --resolve relay.test:18443:127.0.0.1 https://relay.test:18443/4096 -o "$RUNNER_TEMP/verified-origin"
         test "$(wc -c < "$RUNNER_TEMP/verified-origin")" -eq 4096
         python3 - "$RUNNER_TEMP" <<'UDP'
+import ssl
 import json, os, socket, sys
 from pathlib import Path
 from urllib.request import build_opener, ProxyHandler
@@ -56,6 +57,13 @@ opener = build_opener(ProxyHandler({}))
 def observed():
     with opener.open("http://127.0.0.1:18080/counts", timeout=12) as response:
         return json.load(response).get("udp", 0)
+trust = ssl.create_default_context(cafile=str(Path(sys.argv[1]) / "guest-ca.pem"))
+for port in (14200, 14201):
+    for identity in ("ingress.relay.test", "127.0.0.1"):
+        with socket.create_connection(("127.0.0.1", port), timeout=12) as connection:
+            with trust.wrap_socket(connection, server_hostname=identity) as secure:
+                if not secure.getpeercert():
+                    raise RuntimeError("Linux relay did not present a verified certificate")
 before = observed()
 sizes = [63, 1200, 1350]
 with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as channel:
