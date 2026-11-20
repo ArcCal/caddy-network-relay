@@ -1,5 +1,6 @@
 """Use the actual Mac product transports with two guest Linux servers."""
 import base64
+import capture
 import shutil
 import json
 import os
@@ -103,10 +104,14 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                     state=json.loads(report.read_text())["status"] if report.exists() else "no report"
                     raise RuntimeError(f"admission timeout or child exit {child.poll()}: {state}")
                 before=json.loads(fetch("counts"))
-                traffic(port,ctx)
-                after=json.loads(fetch("counts"))
-                assert after.get("udp",0)-before.get("udp",0)>=4 and after.get("download",0)-before.get("download",0)==1
-                return {"ok":True,"origin_udp":after["udp"]-before.get("udp",0),"origin_download":1}
+                status = capture.run(port)
+                after = json.loads(fetch("counts"))
+                expected = {"capture_tcp4": 1, "capture_tcp6": 1, "capture_udp4": 3,
+                            "capture_udp6": 3, "capture_dns": 1}
+                observed = {key: after.get(key, 0) - before.get(key, 0) for key in expected}
+                if observed != expected:
+                    raise RuntimeError("Linux capture origin counts differ: " + str(observed))
+                return {"ok": True, **status, **observed}
             finally:
                 if product=="rs": child.send_signal(2)
                 else: stop.touch()
@@ -163,7 +168,7 @@ if __name__=="__main__":
                 cfg=plistlib.loads(fetch(kind+".mobileconfig"))
                 h=next(p for p in cfg['PayloadContent'] if p.get('PayloadType')=='com.apple.relay.managed')['Relays'][0]['AdditionalHTTPHeaderFields']
                 secret=base64.b64decode(next(v for k,v in h.items() if k.lower() in ('authorization','proxy-authorization')).split()[1]).decode().split(':',1)[1]
-                for prod in ("nf","rs","tun"):
+                for prod in ("tun",):
                     for mode in ("h2","h3"):
                         row={"server":kind,"product":prod,"transport":mode}
                         try: row.update(case(prod,kind,relayport,mode,secret,ca,ctx,result))

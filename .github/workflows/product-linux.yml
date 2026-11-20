@@ -1,14 +1,14 @@
-name: Mac products against Linux servers
+name: Installed macOS packet tunnel through Linux Relay servers
 'on':
   push:
     branches:
-    - audit/linux-client-products-20261120
+    - audit/global-tun-linux-20261120
 permissions:
   contents: read
   actions: read
 jobs:
   products:
-    name: NF, RS and TUN against both Linux arm64 servers
+    name: Global TUN carries dual-stack TCP, UDP and DNS over real Linux relays
     runs-on: xcode-27
     timeout-minutes: 75
     steps:
@@ -33,24 +33,38 @@ jobs:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: ArcCal/network-relay
-        ref: 274fc9678cd8db65eb9607489ccd732a6a753d07
+        ref: 24e48aecd84bbf16a25030f4e59eb3b492998ef6
         path: clients
         persist-credentials: false
     - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
       with:
         toolchain: stable
     - name: Build production clients and the native controller entry points
-      run: bash diagnostics/linux-apple/build-products.sh "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift" "$RUNNER_TEMP/products"
-    - name: Test all three product transports on H2 and H3
-      run: "python3 - <<'PYHOST'\nimport os, runpy, subprocess\nt=os.environ['RUNNER_TEMP']\nwith runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']():\n    subprocess.run(['python3','diagnostics/linux-apple/products.py',t+'/products',t+'/evidence'],check=True)\nPYHOST"
+      run: 'bash diagnostics/linux-apple/build-products.sh "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
+        "$RUNNER_TEMP/products"
+
+        bash clients/network-relay-tun/build-macos.sh
+
+        '
+    - name: Route ordinary Mac sockets through the installed utun, production transport
+        and Linux origins
+      run: "set -euo pipefail\nexport TUN_PROJECT=\"$PWD/clients/network-relay-tun\"\
+        \napp=\"$TUN_PROJECT/dist/Network Relay Tun.app\"\ncleanup() { sudo /bin/bash\
+        \ \"$app/Contents/Resources/uninstall-helper.sh\"; }\ntrap cleanup EXIT\n\
+        sudo /bin/bash \"$app/Contents/Resources/install-helper.sh\" \"$(id -u)\"\n\
+        python3 - <<'PYHOST'\nimport os, runpy, subprocess\nt=os.environ['RUNNER_TEMP']\n\
+        with runpy.run_path('native-probe/diagnostics/run-native-probe.py')['origin_name']():\n\
+        \    subprocess.run(['python3','diagnostics/linux-apple/products.py',t+'/products',t+'/evidence'],check=True)\n\
+        PYHOST\ntrap - EXIT\ncleanup\n"
     - name: Stop Linux fixture
       if: always()
-      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")" || true; fi
+      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
+        || true; fi
 
         '
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: macos-products-to-linux-arm64
+        name: macos-active-tun-to-linux-arm64
         path: ${{ runner.temp }}/evidence
         retention-days: 7

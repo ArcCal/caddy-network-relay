@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import socketserver
 import ssl
 import subprocess
 import tempfile
@@ -153,6 +154,37 @@ class Metadata(http.server.BaseHTTPRequestHandler):
         self.wfile.write(body)
 
 
+def start_capture_origins():
+    class EchoTCP(socketserver.BaseRequestHandler):
+        def handle(self):
+            count(self.server.counter)
+            self.request.settimeout(12)
+            while data := self.request.recv(16384):
+                self.request.sendall(data)
+
+    class EchoUDP(socketserver.BaseRequestHandler):
+        def handle(self):
+            data, channel = self.request
+            if self.server.counter == "capture_dns":
+                if len(data) < 12:
+                    return
+                data = data[:2] + bytes([data[2] | 128]) + data[3:]
+            count(self.server.counter)
+            channel.sendto(data, self.client_address)
+
+    for host, prefix, version in (("198.51.100.42", 32, 4), ("2001:db8::42", 128, 6), ("192.0.2.53", 32, 4)):
+        command("ip", "-" + str(version), "addr", "add", f"{host}/{prefix}", "dev", "lo")
+        family = socket.AF_INET if version == 4 else socket.AF_INET6
+        ports = [(53, socketserver.ThreadingUDPServer, EchoUDP, "capture_dns")] if host == "192.0.2.53" else [
+            (443, socketserver.ThreadingTCPServer, EchoTCP, "capture_tcp" + str(version)),
+            (443, socketserver.ThreadingUDPServer, EchoUDP, "capture_udp" + str(version))]
+        for port, base, handler, counter in ports:
+            server_type = type("FixtureListener", (base,), {"address_family": family, "daemon_threads": True})
+            listener = server_type((host, port), handler)
+            listener.counter = counter
+            threading.Thread(target=listener.serve_forever, daemon=True).start()
+
+
 def main():
     assert os.uname().sysname == "Linux"
     os.umask(0o077)
@@ -168,6 +200,8 @@ def main():
         if subprocess.run(["ip", "-4", "route", "get", "192.0.2.1"],
                           capture_output=True).returncode == 0:
             raise RuntimeError("Unexpected external guest route")
+    if BIND == "0.0.0.0":
+        start_capture_origins()
     identity = environment_record()
     jobs = start_servers(credentials())
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
