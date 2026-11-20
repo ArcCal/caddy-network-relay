@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -66,17 +67,30 @@ def main():
         (private / "ca.der").write_bytes(fetch("ca.der"))
         for kind in ("candidate", "caddy"):
             (private / (kind + ".mobileconfig")).write_bytes(fetch(kind + ".mobileconfig"))
+        phase = os.environ["RELAY_TRAIN_PHASE"]
+        assert phase in ("immediate", "delay", "small")
         for trial, servers in enumerate((("caddy", "candidate"), ("candidate", "caddy")), 1):
-            for server in servers:
-                for size in (64, 1200, 1400):
-                    for phase in ("immediate", "delay", "small"):
+            for size in (64, 1200, 1400):
+                for server in servers:
+                    try:
                         row = check(probe, out, private, server, size, phase, trial)
-                        rows.append(row)
-                        print(json.dumps(row), flush=True)
-                        (out / "trains.json").write_text(json.dumps(rows, indent=2))
+                    except Exception as error:
+                        temp = Path(os.environ["RUNNER_TEMP"])
+                        pid = (temp / "guest.pid").read_text().strip()
+                        vm = subprocess.run(["ps", "-p", pid, "-o", "stat=,rss=,time="], capture_output=True, text=True)
+                        console = (temp / "guest-console.log").read_bytes().lower()
+                        details = {"server":server, "size":size, "phase":phase, "trial":trial,
+                                   "error":type(error).__name__, "message":str(error), "emulator":vm.stdout.strip(),
+                                   "kernel_events": {key:console.count(key.encode()) for key in
+                                       ("out of memory", "oom-kill", "killed process", "kernel panic", "no space left")}}
+                        (out / "fixture-failure.json").write_text(json.dumps(details, indent=2))
+                        raise
+                    rows.append(row)
+                    print(json.dumps(row), flush=True)
+                    (out / "trains.json").write_text(json.dumps(rows, indent=2))
     # Missing replies are measured outcomes. Missing controls or origin arrivals
     # invalidate the experiment, as does a failed 64-byte reference train.
-    return not (len(rows) == 36 and all(r["confirmed"] for r in rows)
+    return not (len(rows) == 12 and all(r["confirmed"] for r in rows)
                 and all(r["rc"] == 0 for r in rows if r["size"] == 64))
 
 

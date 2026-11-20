@@ -9,7 +9,7 @@ permissions:
 jobs:
   clients:
     name: ${{ matrix.platform }} on ${{ matrix.runner }} to Linux ${{ matrix.arch
-      }}
+      }} (${{ matrix.phase }})
     strategy:
       fail-fast: false
       matrix:
@@ -17,6 +17,15 @@ jobs:
         - runner: xcode-27
           platform: iOS
           arch: arm64
+          phase: immediate
+        - runner: xcode-27
+          platform: iOS
+          arch: arm64
+          phase: delay
+        - runner: xcode-27
+          platform: iOS
+          arch: arm64
+          phase: small
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 75
     steps:
@@ -42,8 +51,6 @@ jobs:
         path: ${{ runner.temp }}/probe-arm
         github-token: ${{ github.token }}
         run-id: 44760250937
-    - name: Boot the release Linux kernel with loopback-only port forwards
-      run: bash diagnostics/linux-apple/boot.sh "${{ matrix.arch }}" "$RUNNER_TEMP/image"
     - name: Prepare Apple client
       run: "python3 diagnostics/linux-apple/prepare-train.py native-probe/diagnostics/RelayProbe.swift\
         \ \"$RUNNER_TEMP/Train.swift\"\nset -euo pipefail\nsw_vers\nxcodebuild -version\n\
@@ -63,6 +70,8 @@ jobs:
         \ \"$GITHUB_ENV\"\n  cat > \"$RUNNER_TEMP/probe\" <<'PROBE'\n#!/bin/bash\n\
         exec xcrun simctl spawn \"$RELAY_SIMULATOR_ID\" \"$RUNNER_TEMP/ios-probe\"\
         \ \"$@\"\nPROBE\n  chmod 700 \"$RUNNER_TEMP/probe\"\nfi\n"
+    - name: Boot the release Linux kernel with loopback-only port forwards
+      run: bash diagnostics/linux-apple/boot.sh "${{ matrix.arch }}" "$RUNNER_TEMP/image"
     - name: Compare immediate, idle and small-first transmissions to an isolated echo
         peer
       shell: bash
@@ -76,6 +85,9 @@ jobs:
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: ${{ matrix.platform }}-${{ matrix.runner }}-linux-${{ matrix.arch }}
+        name: ${{ matrix.platform }}-${{ matrix.runner }}-linux-${{ matrix.arch }}-${{
+          matrix.phase }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7
+    env:
+      RELAY_TRAIN_PHASE: ${{ matrix.phase }}
