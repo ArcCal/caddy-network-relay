@@ -483,7 +483,11 @@ caddy network-relay profile --host relay.example.com --user iphone
 | `--no-http3` / `--no-http2` | Write only one kind of relay URL |
 | `-o` | Output file, default `DOMAIN-USER.mobileconfig`; mode 600, written atomically, refuses to overwrite a symbolic link |
 
-The profile identifier is `com.github.arccal.network-relay.<domain>.<user>` (the same as in the old Rust version), so a new profile for the same domain and user replaces the old one when it is installed.
+The profile identifier is `com.github.arccal.network-relay.<domain>.<user>`.
+Regenerating the same domain and user preserves the identifier so an installed
+profile can be replaced. Different domain/user pairs can collide at the dot
+separator when usernames contain dots. This also applies to DDM declarations.
+[Cross-server identifier checks](https://github.com/ArcCal/network-relay/blob/main/docs/audit-2026-11-20.md#historical-issues).
 
 #### Choosing H2 or H3 for an Apple profile
 
