@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ArcCal/network-relay
-          ref: 7c9bf8d63a2d3b42803c26809f4cd6caa039a0a0
+          ref: 24e48aecd84bbf16a25030f4e59eb3b492998ef6
           path: rust-relay
           persist-credentials: false
       - name: Test real systemd ownership, namespace identity and account repair
