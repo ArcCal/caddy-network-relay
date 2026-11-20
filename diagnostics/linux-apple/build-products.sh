@@ -4,9 +4,7 @@ source_root=$1
 history=$2
 out=$3
 mkdir -p "$out"
-cargo build --locked --release --manifest-path "$source_root/network-relay-rs/Cargo.toml" --bin network-relay-rs
-cp "$source_root/network-relay-rs/target/release/network-relay-rs" "$out/rs"
-for product in nf tun; do
+for product in tun; do
     case "$product" in nf) model=NetworkRelayNF ;; tun) model=NetworkRelayTun ;; esac
     parent="$source_root/network-relay-$product"
     cargo build --locked --release --manifest-path "$parent/Core/Cargo.toml" --lib

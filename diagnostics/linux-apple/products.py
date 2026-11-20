@@ -12,6 +12,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import traceback
 import time
 from pathlib import Path
 from urllib.request import ProxyHandler, build_opener
@@ -71,12 +72,31 @@ def traffic(port, ctx):
             k=reply[3]; alen={1:4,4:16}.get(k,1+reply[4]); pos=4+alen
             assert struct.unpack("!H",reply[pos:pos+2])[0] == 18553 and reply[pos+2:] == payload
 
+def lifecycle_snapshot(report, secret):
+    if not report.is_file():
+        return {"events": [], "finished": False}
+    metrics = json.loads(report.read_text())
+    def status(value):
+        text = str(value).replace(secret, "<redacted>")
+        if any(s in text.lower() for s in ("authorization", "password", "bearer", "token", "://")):
+            return "redacted diagnostic status"
+        return text[:210]
+    allowed = ("Physical network changed", "Native transport shutdown timed out", "Disconnect requested",
+               "Relay stopped", "changed the active path", "Connection refused", "Network is down",
+               "Opening a fresh relay connection", "Relay connection needs replacement")
+    lines = [line for line in metrics.get("logs", []) if isinstance(line, str)]
+    return {"events": [[round(event["seconds"], 2), status(event["status"])] for event in metrics.get("events", [])],
+            "status": status(metrics.get("status")), "elapsed": metrics.get("elapsed_seconds"),
+            "finished": metrics.get("finished"), "markers": [word for word in allowed if any(word in line for line in lines)]}
+
 def case(product,server,relayport,mode,secret,ca,ctx,out):
     with tempfile.TemporaryDirectory() as private:
         root=Path(private)
         with socket.socket() as free:
             free.bind(("127.0.0.1",0)); port=free.getsockname()[1]
         stop=root/"stop"; report=root/"report.json"
+        timing = {"server": server, "transport": mode}
+        started = time.monotonic()
         if product=="rs":
             settings=root/"client.toml"
             settings.write_text(f'uri_template = "https://127.0.0.1:{relayport}/.well-known/masque/udp/{{target_host}}/{{target_port}}/"\n'
@@ -104,7 +124,9 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                     state=json.loads(report.read_text())["status"] if report.exists() else "no report"
                     raise RuntimeError(f"admission timeout or child exit {child.poll()}: {state}")
                 before=json.loads(fetch("counts"))
+                timing["connected"] = round(time.monotonic() - started, 2)
                 status = capture.run(port)
+                timing["restored"] = round(time.monotonic() - started, 2)
                 after = json.loads(fetch("counts"))
                 expected = {"capture_tcp4": 1, "capture_tcp6": 1, "capture_udp4": 3,
                             "capture_udp6": 3, "capture_dns_fixture": 1}
@@ -115,12 +137,20 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                         "all_system_dns_queries": after.get("capture_dns", 0) - before.get("capture_dns", 0)}
             finally:
                 ongoing = sys.exc_info()[1]
+                timing["before_stop"] = lifecycle_snapshot(report, secret)
+                if ongoing:
+                    timing["exception_frames"] = [[Path(frame.filename).name, frame.name, frame.lineno]
+                                                  for frame in traceback.extract_tb(ongoing.__traceback__)]
+                timing["stop_sent"] = round(time.monotonic() - started, 2)
                 if product=="rs": child.send_signal(2)
                 else: stop.touch()
                 try:child.wait(timeout=25)
                 except subprocess.TimeoutExpired:
                     child.kill(); child.wait(); raise
                 finally:
+                    timing["final"] = lifecycle_snapshot(report, secret)
+                    timing["child_returncode"] = child.returncode
+                    (out / (server + "-" + mode + "-lifecycle.json")).write_text(json.dumps(timing, indent=2))
                     if product in ("nf","tun"):
                         folder=Path.home()/"Library/Application Support"/("NetworkRelayNF" if product=="nf" else "NetworkRelayTun")
                         marker=folder/"diagnostic-owner"
