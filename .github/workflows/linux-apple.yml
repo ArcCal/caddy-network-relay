@@ -1,4 +1,4 @@
-name: Native Apple UDP 63-byte cause and transport-only profile controls
+name: Validate private transport-only profile copies on native Apple Relay
 'on':
   push:
     branches:
@@ -36,6 +36,13 @@ jobs:
         sparse-checkout: diagnostics
         path: native-probe
         persist-credentials: false
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: da3b68dc4f8dc678f23857af2e5634245d31f319
+        sparse-checkout: tools
+        path: profile-tool
+        persist-credentials: false
     - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
         name: linux-${{ matrix.arch }}-guest
@@ -70,8 +77,8 @@ jobs:
         \ \"$GITHUB_ENV\"\n  cat > \"$RUNNER_TEMP/probe\" <<'PROBE'\n#!/bin/bash\n\
         exec xcrun simctl spawn \"$RELAY_SIMULATOR_ID\" \"$RUNNER_TEMP/ios-probe\"\
         \ \"$@\"\nPROBE\n  chmod 700 \"$RUNNER_TEMP/probe\"\nfi\n"
-    - name: Verify exact native UDP origin and return bytes with compiler-generated
-        profiles
+    - name: Verify exact native UDP origin and return bytes using selected
+        profile copies
       shell: bash
       run: python3 diagnostics/linux-apple/native-run.py
     - name: Stop Linux fixture
@@ -83,6 +90,6 @@ jobs:
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: boundary-${{ matrix.platform }}-${{ matrix.arch }}
+        name: selected-profile-${{ matrix.platform }}-${{ matrix.arch }}
         path: ${{ runner.temp }}/evidence
         retention-days: 7

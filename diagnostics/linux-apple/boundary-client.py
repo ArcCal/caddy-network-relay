@@ -19,7 +19,22 @@ with tempfile.TemporaryDirectory() as directory:
         header = None
         for transport in ('h2','h3'):
             profile = root / f'{kind}-{transport}.mobileconfig'
-            profile.write_bytes(fetch(profile.name))
+            source_transport = 'h2' if transport == 'h3' else 'h3'
+            source = root / f'{kind}-{source_transport}-seed-for-{transport}.mobileconfig'
+            original = fetch(f'{kind}-{source_transport}.mobileconfig')
+            source.write_bytes(original)
+            subprocess.run([sys.executable, 'profile-tool/tools/select-apple-relay-transport.py',
+                            transport, source, profile], check=True)
+            expected = plistlib.loads(original)
+            seed_hop = expected['PayloadContent'][0]['Relays'][0]
+            seed_key = 'HTTP' + source_transport[-1] + 'RelayURL'
+            select_key = 'HTTP' + transport[-1] + 'RelayURL'
+            assert seed_key in seed_hop and select_key not in seed_hop
+            seed_hop[select_key] = seed_hop.pop(seed_key)
+            assert plistlib.loads(profile.read_bytes()) == expected and source.read_bytes() == original
+            assert profile.stat().st_mode & 0o777 == 0o600
+            reference = plistlib.loads(fetch(f'{kind}-{transport}.mobileconfig'))
+            assert reference['PayloadContent'][0]['Relays'][0] == seed_hop
             relay = plistlib.loads(profile.read_bytes())['PayloadContent'][0]['Relays'][0]
             expected_key = 'HTTP2RelayURL' if transport=='h2' else 'HTTP3RelayURL'
             assert {k for k in relay if k in ('HTTP2RelayURL','HTTP3RelayURL')}=={expected_key}
