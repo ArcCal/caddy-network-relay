@@ -20,6 +20,7 @@ CADDY = os.environ.get("CADDY_RELAY", "/srv/caddy")
 BLOCK = bytes(range(256)) * 256
 COUNTS = collections.Counter()
 LOCK = threading.Lock()
+BULK_WRITES = {}
 
 
 def count(kind):
@@ -90,10 +91,20 @@ class Origin(http.server.BaseHTTPRequestHandler):
             self.send_header("X-Upload-Bytes", str(upload[0]))
             self.send_header("X-Upload-SHA256", upload[1])
         self.end_headers()
+        transfer = None
+        if size == 64 * 1024 * 1024:
+            with LOCK:
+                transfer = len(BULK_WRITES) + 1
+                BULK_WRITES[transfer] = 0
+        written = 0
         while size:
             chunk = min(size, len(BLOCK))
             self.wfile.write(BLOCK[:chunk])
             size -= chunk
+            written += chunk
+            if transfer is not None and written % (1024 * 1024) == 0:
+                with LOCK:
+                    BULK_WRITES[transfer] = written
 
     def do_GET(self):
         if self.path not in ("/4096", "/1048576", "/8388608", "/67108864"):
@@ -135,6 +146,9 @@ class Metadata(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/environment":
             body = self.server.environment_record
+        elif self.path == "/bulk-progress":
+            with LOCK:
+                body = json.dumps(BULK_WRITES).encode()
         elif self.path == "/counts":
             with LOCK:
                 data = dict(COUNTS)

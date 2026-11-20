@@ -1,6 +1,8 @@
 """Score a native Apple client against independently counted Linux TCP and UDP origins."""
 import hashlib
 import json
+import os
+import time
 import subprocess
 import sys
 import tempfile
@@ -31,10 +33,32 @@ def run(kind, mode, operation, size, count, concurrency, trial):
     request = private/"settings.json"
     request.write_text(json.dumps(settings))
     before = json.loads(fetch("counts"))
-    try:
-        rc = subprocess.run([probe, str(request), str(result)], capture_output=True, timeout=245).returncode
-    except subprocess.TimeoutExpired:
-        rc = 124
+    previous = set(json.loads(fetch("bulk-progress")))
+    folder = private / label
+    folder.mkdir()
+    clock = time.monotonic()
+    trace = []
+    env = dict(os.environ, RELAY_TASK_PROGRESS=str(folder))
+    with subprocess.Popen([probe, str(request), str(result)], env=env) as child:
+        while child.poll() is None:
+            if time.monotonic() - clock > 245:
+                child.kill()
+                break
+            try:
+                snapshot = json.loads(fetch("bulk-progress"))
+                writes = {key: val for key, val in snapshot.items() if key not in previous}
+                trace.append({"elapsed": round(time.monotonic() - clock, 2), "origin_bytes": writes})
+            except OSError:
+                trace.append({"elapsed": round(time.monotonic() - clock, 2), "metadata_timeout": True})
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                pass
+        rc = child.wait()
+    task_samples = [json.loads(item.read_bytes()) for item in folder.glob("*.json")]
+    task_samples.sort(key=lambda item: item["elapsed"])
+    (output / (label + "-progress.json")).write_text(json.dumps(
+        {"linux_origin": trace, "apple_tasks": task_samples}, separators=(",", ":")))
     after = json.loads(fetch("counts"))
     report = json.loads(result.read_text()) if result.exists() else {}
     samples = report.get("samples", [])
@@ -63,14 +87,9 @@ with tempfile.TemporaryDirectory() as directory:
         profile=fetch(server+".mobileconfig")
         (private/(server+".mobileconfig")).write_bytes(profile)
     size = 64 * 1024 * 1024
-    run("rust","direct","download",size,4,4,1)
-    # Alternate the order across trials to expose transient H3 progress stalls.
-    for trial, servers in enumerate((("caddy","rust"),("rust","caddy")),start=1):
-        for server in servers:
-            if trial == 1:
-                run(server,"h2","download",size,4,4,trial)
-                run(server,"h3","download",size,1,1,trial)
-            run(server,"h3","download",size,4,4,trial)
+    for kind,mode,trial in (("rust","direct",1), ("caddy","h3",1), ("caddy","h2",1),
+                            ("rust","h3",1), ("caddy","h3",2)):
+        run(kind,mode,"download",size,4,4,trial)
 failed=sum(not r["ok"] for r in rows)
 print(f"{len(rows)} cases, {failed} failures")
 sys.exit(bool(failed))

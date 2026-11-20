@@ -1,8 +1,8 @@
-name: Native macOS four-stream bulk against Linux Relay servers
+name: Native macOS four-stream progress at the origin and client
 'on':
   push:
     branches:
-    - audit/linux-apple-bulk-20261120
+    - audit/native-bulk-progress-20261120
 permissions:
   contents: read
   actions: read
@@ -44,6 +44,9 @@ jobs:
         sw_vers
 
         xcodebuild -version
+
+        python3 diagnostics/linux-apple/prepare-progress.py native-probe/diagnostics/RelayProbe.swift
+
 
         xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos14.0" native-probe/diagnostics/RelayProbe.swift
         -o "$RUNNER_TEMP/probe"
