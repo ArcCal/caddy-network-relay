@@ -33,7 +33,12 @@ touch "$log"
 # real UTC before the fixture issues its one-day certificate.
 epoch=$(date +%s)
 initargs="rdinit=/bin/sh console=$console panic=-1 -- -c \"/bin/date -u -s @$epoch && exec /relay-init\""
-"$cmd" -machine "$machine" -accel tcg,thread=multi -cpu "$cpu" -smp 2 -m 2048 \
+case "$RELAY_READER_ACCEL" in
+    hvf) acceleration=hvf; cpu=host ;;
+    tcg) acceleration=tcg,thread=multi ;;
+    *) exit 2 ;;
+esac
+"$cmd" -machine "$machine" -accel "$acceleration" -cpu "$cpu" -smp 2 -m 2048 \
   -kernel "$image/kernel" -initrd "$overlay/guest-with-bulk.gz" -append "$initargs" \
   -netdev "$net" -device virtio-net-pci,netdev=nic -object rng-random,filename=/dev/urandom,id=rng \
   -device virtio-rng-pci,rng=rng -display none -monitor none -serial "file:$log" -no-reboot \

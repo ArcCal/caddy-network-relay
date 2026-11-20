@@ -54,9 +54,15 @@ def run(root,server,mode,trial):
 with tempfile.TemporaryDirectory() as tmp:
     root=Path(tmp);(root/'ca.der').write_bytes(fetch('ca.der'))
     for kind in ('caddy','candidate','nogso'): (root/(kind+'.mobileconfig')).write_bytes(fetch(kind+'.mobileconfig'))
-    run(root,'caddy','direct',1);run(root,'caddy','h2',1)
-    order=['caddy','candidate','nogso'] if os.environ['RELAY_FRAME_ARCH']=='arm64' else ['nogso','candidate','caddy']
-    for trial,sequence in ((1,order),(2,list(reversed(order)))):
-        for server in sequence: run(root,server,'h3',trial)
-    run(root,'caddy','h2',2)
-assert len(rows)==9 and all(x['completed'] and x['controls'] for x in rows)
+    readers=['file','stream']
+    if os.environ['RELAY_READER_REVERSE']=='true': readers.reverse()
+    for reader in readers:
+        os.environ['RELAY_READER']=reader
+        run(root,'caddy','direct',reader)
+        run(root,'caddy','h2',reader)
+    rounds=6 if os.environ['RELAY_READER_ACCEL']=='hvf' else 2
+    for repetition in range(rounds):
+        for reader in (readers if repetition%2==0 else list(reversed(readers))):
+            os.environ['RELAY_READER']=reader
+            run(root,'caddy','h3',f'{reader}-{repetition+1}')
+assert len(rows)==4+2*rounds and all(row['completed'] and row['controls'] for row in rows)
