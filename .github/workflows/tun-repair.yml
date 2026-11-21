@@ -1,0 +1,54 @@
+name: Validate signed TUN candidate and missing-helper Connect button
+on:
+  push:
+    branches: [audit/tun-signed-settings-20261121]
+permissions:
+  contents: read
+jobs:
+  tun:
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
+          path: relay
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin
+      - name: Build the candidate bundle and exercise helper exit handling
+        working-directory: relay
+        run: |
+          git apply ../diagnostics/settings-20261121/candidate.patch
+          bash network-relay-tun/scripts/test-native-host-session.sh
+          bash network-relay-tun/build-macos.sh
+          codesign --verify --deep --strict 'network-relay-tun/dist/Network Relay Tun.app'
+      - name: Click Connect in the signed app without a helper
+        run: |
+          set -eu
+          umask 077
+          stage=/tmp/relay-history-app
+          support="$HOME/Library/Application Support/NetworkRelayTun"
+          test ! -e "$stage" && test ! -e "$support"
+          test ! -e '/Library/Application Support/NetworkRelayTun'
+          mkdir "$stage" "$support"
+          trap 'rm -f "$support/settings.json"' EXIT
+          ditto 'relay/network-relay-tun/dist/Network Relay Tun.app' "$stage/Network Relay Tun.app"
+          python3 - "$support/settings.json" <<'PY'
+          import json, sys
+          with open(sys.argv[1], 'x') as f:
+              json.dump({'servers':[dict(name='Loopback runner fixture',domain='relay.test:14201',serverIP='198.51.100.254',username='alice',password='disposable',transport='h2',probeTarget='127.0.0.1:18443')]},f)
+          PY
+          cd diagnostics/history-ui
+          command -v xcodegen >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
+          xcodegen generate
+          xcodebuild -quiet -project RelayBoundaryUI.xcodeproj -scheme Boundary -destination 'platform=macOS,arch=arm64' -derivedDataPath "$RUNNER_TEMP/ui-derived" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 120 test
+      - name: Install the signed helper and verify global capture rollback
+        working-directory: relay
+        run: bash network-relay-tun/scripts/test-native-helper.sh --capture
