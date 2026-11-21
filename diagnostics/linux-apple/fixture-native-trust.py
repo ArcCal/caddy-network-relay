@@ -29,3 +29,7 @@ text=text.replace(a,a+r'''
                 print("EOF-SAMPLE", id, Date().timeIntervalSince1970, "context", context?.identifier ?? "nil", "final", context?.isFinal ?? false, "complete", complete, "error", String(describing: error), "state", entry.native.state, "bytes", data?.count ?? 0)
             }''')
 output.write_text(text)
+a='let parameters = NWParameters(tls: tls, tcp: tcp)'
+assert text.count(a)==1
+text=text.replace(a,a+'\n        parameters.defaultProtocolStack.applicationProtocols.append(NWProtocolFramer.Options(definition: StrictTCP.definition))')
+output.write_text(text+'\n'+Path('diagnostics/linux-apple/strict-tcp.swift').read_text())

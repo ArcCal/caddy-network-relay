@@ -1,8 +1,8 @@
-name: Inspect public native TLS close signals
+name: Compare native TLS with a strict TCP framer
 'on':
   push:
     branches:
-    - audit/native-eof-metadata-20261121
+    - audit/native-eof-framer-20261121
 permissions:
   contents: read
   actions: read
