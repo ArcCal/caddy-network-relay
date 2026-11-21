@@ -7,7 +7,14 @@ class Boundary(socketserver.BaseRequestHandler):
         if mode not in (b'R', b'C'):
             return
         self.request.settimeout(25)
-        self.request.sendall(BLOCK * 128)
+        tag=mode.decode()
+        count("entered_"+tag)
+        try:
+            self.request.sendall(BLOCK * 128)
+        except OSError:
+            count("write_failed_"+tag)
+            raise
+        count("queued_"+tag)
         if mode == b'R':
             self.request.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
             count('attempt_abort')

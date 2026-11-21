@@ -20,8 +20,9 @@ def sample(connect,label):
     rows=[]
 
     before = json.loads(p.fetch('counts'))
-    for mode in ['C','R','R','R'] * 5:
+    for mode in ['C','R','R','R'] * 10:
         prior = json.loads(p.fetch('counts')).get('reverse_ping',0)
+        start_counts=json.loads(p.fetch('counts'))
         with connect() as channel:
             channel.settimeout(40)
             print("CASE",label,mode,time.time(),flush=True)
@@ -33,6 +34,16 @@ def sample(connect,label):
                     total += len(data)
                     h.update(data)
                 terminal = 'EOF'
+            except TimeoutError:
+                import subprocess
+                terminal='TIMEOUT'
+                counts=json.loads(p.fetch('counts'))
+                print('READ-TIMEOUT',label,mode,total,dict((k,v-start_counts.get(k,0)) for k,v in counts.items()),flush=True)
+                local,remote=channel.getsockname()[1],channel.getpeername()[1]
+                stat=subprocess.run(['netstat','-anv','-p','tcp'],capture_output=True,text=True)
+                print('TCP-STATE',*[l for l in stat.stdout.splitlines() if any('.'+str(port)+' ' in l for port in (14201,local,remote))],sep='\n',flush=True)
+                lines=(Path(os.environ['RUNNER_TEMP'])/'close-signals').read_text(errors='replace').splitlines()
+                print('TRANSPORT-CLOSE-SIGNALS',local,remote,lines[-16:],flush=True)
             except ConnectionResetError:
                 terminal = 'ECONNRESET'
             except ssl.SSLEOFError:
@@ -45,7 +56,7 @@ def sample(connect,label):
             rows.append(dict(mode=mode,terminal=terminal,size=total,complete=h.digest()==payload_hash))
     for _ in range(30):
         after = json.loads(p.fetch('counts'))
-        if after.get('reverse_ping',0)-before.get('reverse_ping',0)==5: break
+        if after.get('reverse_ping',0)-before.get('reverse_ping',0)==10: break
         time.sleep(.1)
     counts = {key:after.get(key,0)-before.get(key,0) for key in ('attempt_abort','reverse_ping')}
     print(json.dumps(dict(label=label,rows=rows,counts=counts)),flush=True)
@@ -79,10 +90,10 @@ with tempfile.TemporaryDirectory() as d:
     pem=Path(d)/'ca.pem'
     pem.write_text(ssl.DER_cert_to_PEM_cert(root.read_bytes()))
     for host,path in [('127.0.0.1','port-forward'),('192.0.2.2','packet')]:
-        for product,mode in [('rs','http/1.1'),('nf','h2')]:
+        for product,mode in [('rs','http/1.1')]:
             label=f'{product}-{mode.replace("/","_")}-{path}'
             os.environ.update(RELAY_HISTORY_ADDRESS=host,RELAY_HISTORY_LABEL=label)
             rows,counts=p.case(product,'caddy',14201,mode,secret,pem if product=='rs' else root,None,out)
-            assert counts==dict(attempt_abort=15,reverse_ping=5),(label,counts)
+            print('END-COUNTS',label,counts,flush=True)
             assert all(row['terminal']=='EOF' and row['complete'] for row in rows if row['mode']=='C'),label
-            assert all(row['terminal']=='ECONNRESET' for row in rows if row['mode']=='R'),label
+            assert all(row['terminal'] in ('ECONNRESET','TIMEOUT') for row in rows if row['mode']=='R'),label

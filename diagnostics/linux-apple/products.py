@@ -163,7 +163,7 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                             shutil.rmtree(folder)
                 log.flush()
                 for line in (root/"log").read_text(errors="replace").splitlines():
-                    if line.startswith("EOF-SAMPLE"):print(os.environ.get("RELAY_HISTORY_LABEL"),line,flush=True)
+                    if line.startswith(("EOF-SAMPLE","CLOSE-RS")):print(os.environ.get("RELAY_HISTORY_LABEL"),line,flush=True)
                 if child.returncode!=0:
                     raise RuntimeError(f"{product} exited {child.returncode}")
                 if product!="rs":

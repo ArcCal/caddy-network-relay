@@ -1,8 +1,8 @@
-name: Verify alternatives for forwarded H1 termination
+name: Trace RS close delivery and origin completion on the x86 Linux fixture
 'on':
   push:
     branches:
-    - audit/h1-alternatives-20261121
+    - audit/rs-close-boundary-observation-20261121
 permissions:
   contents: read
   actions: read
@@ -74,22 +74,16 @@ jobs:
       with:
         toolchain: stable
     - name: Build production clients and the native controller entry points
-      run: 'sdk=$(xcrun --sdk macosx --show-sdk-path)
+      run: 'set -eu
 
-        grep -Ein ''close.notify|closure.alert|peer.*closed|disconnect.*alert|truncation''
-        "$sdk"/System/Library/Frameworks/Security.framework/Headers/SecProtocol*.h
-        "$sdk"/System/Library/Frameworks/Network.framework/Headers/*.h || true
+        python3 diagnostics/linux-apple/trace-rs.py
 
-        set -eu
+        mkdir -p "$RUNNER_TEMP/products"
 
-        sed -e ''s/for product in nf tun/for product in nf/'' diagnostics/linux-apple/build-products.sh
-        > "$RUNNER_TEMP/build-nf.sh"
+        cargo build --locked --release --manifest-path clients/network-relay-rs/Cargo.toml
+        --bin network-relay-rs
 
-        sed -i '''' ''s/serverIP: "127.0.0.1"/serverIP: ProcessInfo.processInfo.environment["RELAY_HISTORY_ADDRESS"]!/''
-        native-probe/diagnostics/RelayProbe.swift
-
-        bash "$RUNNER_TEMP/build-nf.sh"  "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
-        "$RUNNER_TEMP/products"
+        cp clients/network-relay-rs/target/release/network-relay-rs "$RUNNER_TEMP/products/rs"
 
         '
     - name: Verify the production SOCKS terminal condition and origin half-close
@@ -109,6 +103,9 @@ jobs:
         boundary(port, ctx)\n''+s[end:])
 
         PYCASE
+
+        sudo tcpdump -l -n -t -i lo0 ''tcp[tcpflags] & (tcp-fin|tcp-rst) != 0'' >
+        "$RUNNER_TEMP/close-signals" 2>/dev/null &
 
         python3 diagnostics/linux-apple/h1-mac.py'
     - name: Stop Linux fixture
@@ -130,6 +127,3 @@ jobs:
         - arch: amd64
           runner: ubuntu-24.04
           machine: x86_64
-        - arch: arm64
-          runner: ubuntu-22.04-arm
-          machine: aarch64
