@@ -1,8 +1,8 @@
-name: Historical acceptance on macOS and native Linux
+name: Signed TUN GUI Connect and Disconnect
 'on':
   push:
     branches:
-    - audit/ipv6-scale-and-gui-20261121
+    - audit/tun-signed-ui-20261121
 permissions:
   contents: read
   actions: read
@@ -12,8 +12,7 @@ jobs:
     runs-on: xcode-27
     timeout-minutes: 75
     steps:
-    - &id001
-      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -62,21 +61,13 @@ jobs:
       env:
         GUEST_ARCH: amd64
         GUEST_MACHINE: x86_64
-    - &id002
-      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
-        repository: ArcCal/network-relay
-        ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
-        path: clients
-        persist-credentials: false
-    - &id003
-      uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
-      with:
-        toolchain: stable
-    - name: Build and sign unmodified TUN application
-      run: 'bash clients/network-relay-tun/scripts/test-native-host-session.sh
+        name: signed-TUN-main-0d7d83c
+        path: ${{ runner.temp }}/signed
+    - run: 'mkdir -p clients/network-relay-tun/dist
 
-        bash clients/network-relay-tun/build-macos.sh'
+        ditto -x -k "$RUNNER_TEMP/signed/tun-app.zip" clients/network-relay-tun/dist'
     - name: Click Connect in the signed app using XCTest
       run: bash diagnostics/history-ui/gui.sh
     - name: Stop Linux fixture
@@ -91,69 +82,38 @@ jobs:
         name: ui-network-preflight
         path: ${{ runner.temp }}/evidence
         retention-days: 7
-  nat64:
-    name: IPv6-only RS through DNS64 and NAT64 on ${{ matrix.arch }}
-    strategy: &id004
-      fail-fast: false
-      matrix:
-        include:
-        - arch: amd64
-          runner: ubuntu-24.04
-        - arch: arm64
-          runner: ubuntu-22.04-arm
-    steps:
-    - *id001
-    - *id002
-    - *id003
-    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-      with:
-        name: caddy-network-relay-linux-${{ matrix.arch }}
-        path: ${{ runner.temp }}/exact-caddy
-        run-id: 44835734583
-        github-token: ${{ github.token }}
-    - name: Build current relay and RS; install isolated translation test dependencies
-      run: 'sudo apt-get update -qq
-
-        sudo apt-get install -y -qq tayga unbound dnsmasq-base dnsutils
-
-        cargo build --locked --manifest-path clients/Cargo.toml --bin network-relay
-        --release
-
-        cargo build --locked --manifest-path clients/network-relay-rs/Cargo.toml --bin
-        network-relay-rs --release
-
-        chmod 755 "$RUNNER_TEMP/exact-caddy/caddy"
-
-        sudo bash diagnostics/linux-apple/nat64.sh "$PWD/clients/target/release/network-relay"
-        "$RUNNER_TEMP/exact-caddy/caddy" "$PWD/clients/network-relay-rs/target/release/network-relay-rs"
-
-        '
-    runs-on: ${{ matrix.runner }}
-  scale:
-    runs-on: ${{ matrix.runner }}
-    strategy: *id004
+    needs: package
+  package:
+    runs-on: xcode-27
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
-        ref: 84fe1338319f9ee06dc7f5de635b09fdeefd1e2b
+        repository: ArcCal/network-relay
+        ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
+        path: clients
         persist-credentials: false
-    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
       with:
-        go-version: 1.27.4
-    - name: Prepare reviewed TLS source
-      run: 'echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+        toolchain: stable
+    - name: Build the unmodified release sources and preserve the signed bundle
+      run: 'set -euo pipefail
 
-        python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+        cd clients/network-relay-tun
 
-        echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+        # The parallel acceptance job uses build-macos.sh with all debug test suites.
 
-        echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+        # Here keep the release packaging steps and preserve the signed output for
+        replay.
 
-        echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
+        sed -e ''/^cargo test /d'' -e ''/^swift test /d'' build-macos.sh > .build-history-bundle.sh
+
+        bash .build-history-bundle.sh
+
+        ditto -c -k --sequesterRsrc --keepParent "dist/Network Relay Tun.app" "$RUNNER_TEMP/tun-app.zip"
 
         '
-    - name: H3 independent authenticated clients, reload and recovery
-      run: "set -euo pipefail\nulimit -n 32768\nfor n in 128 512 1000; do\n    RELAY_CAPACITY_CLIENTS=\"\
-        $n\" go test -tags http2legacy,relay_tls9846_v1 -count=1 -timeout=8m -run\
-        \ '^TestDeploymentCapacity$' -v . | tee \"$RUNNER_TEMP/scale-$n\"\n    grep\
-        \ -q '^--- PASS: TestDeploymentCapacity' \"$RUNNER_TEMP/scale-$n\"\ndone"
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: signed-TUN-main-0d7d83c
+        path: ${{ runner.temp }}/tun-app.zip
+        retention-days: 3
