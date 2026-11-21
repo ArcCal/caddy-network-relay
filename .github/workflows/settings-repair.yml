@@ -1,4 +1,4 @@
-name: Verify old WARP quotas and migration on native Linux
+name: Compare released VLESS WebSocket peers for empty UDP and one-way FIN
 permissions:
   contents: read
 env:
@@ -37,12 +37,25 @@ jobs:
         echo "CARGO_TARGET_DIR=$RUNNER_TEMP/relay-target" >> "$GITHUB_ENV"
 
         '
-    - name: Run both real CLI configurations over both WARP transports
-      working-directory: relay/network-relay-cf-masque
-      run: 'cp ../../diagnostics/settings-20261121/quota_migrate_probe.rs tests/
-
-        cargo test --locked --test quota_migrate_probe -- --nocapture'
+    - name: Verify current peer binaries and measure their wire behavior
+      working-directory: relay/network-relay-vless
+      run: "set -eu\ncase \"$(uname -m)\" in\n  x86_64) xr=64; sb=amd64; xsha=b651f7e1d9966ee2c1b1ee1bf8b52c72771824d3065dce96bbc8bcc19ed95f82;\
+        \ ssha=699a1b510aa4396b2176d32d1181920399ebf1e267835da6f3b598d0f7c24968 ;;\n\
+        \  aarch64) xr=arm64-v8a; sb=arm64; xsha=64ed6858982a7f5eb85d88b811089063bd4f17561f4c8f44e0f1dc8e6f6430be;\
+        \ ssha=436441f76ee2f7fe21b5b2d426d3cb261a480455a704865789ad533e4273ec26 ;;\n\
+        \  *) exit 1 ;;\nesac\nt=\"$RUNNER_TEMP\"\ncurl --fail --location --retry\
+        \ 3 \"https://github.com/XTLS/Xray-core/releases/download/v26.11.9/Xray-linux-$xr.zip\"\
+        \ -o \"$t/xray.zip\"\ncurl --fail --location --retry 3 \"https://github.com/SagerNet/sing-box/releases/download/v1.14.4/sing-box-1.14.4-linux-$sb.tar.gz\"\
+        \ -o \"$t/sing-box.tar.gz\"\n(cd \"$t\" && echo \"$xsha  xray.zip\" | sha256sum\
+        \ --check && echo \"$ssha  sing-box.tar.gz\" | sha256sum --check)\nunzip -p\
+        \ \"$t/xray.zip\" xray > \"$t/xray\"\nchmod 700 \"$t/xray\"\ntar -xzOf \"\
+        $t/sing-box.tar.gz\" \"sing-box-1.14.4-linux-$sb/sing-box\" > \"$t/sing-box\"\
+        \nchmod 700 \"$t/sing-box\"\ncp ../../diagnostics/settings-20261121/peer.rs\
+        \ tests/current_peer.rs\nfor product in xray sing-box; do\n  \"$t/$product\"\
+        \ version | head -n 1\n  XRAY_BIN=\"$t/$product\" PEER=\"$product\" cargo\
+        \ test --locked --test current_peer historical_xray_empty_and_fin -- --exact\
+        \ --nocapture\ndone"
 'on':
   push:
     branches:
-    - audit/warp-quota-migration-20261121
+    - audit/vless-peer-closures-20261121
