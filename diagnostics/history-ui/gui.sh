@@ -21,7 +21,7 @@ test ! -e "$support"
 test ! -e '/Library/Application Support/NetworkRelayTun'
 ditto "clients/network-relay-tun/dist/Network Relay Tun.app" "$app"
 codesign --verify --deep --strict "$app"
-cp diagnostics/history-ui/{ordinary,clone,browser,public,dnsbench,dns_stream}.py "$stage/"
+cp diagnostics/history-ui/{ordinary,clone,browser,public,dnsbench,dns_stream,close_trials}.py "$stage/"
 if [[ ! -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
     HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask google-chrome
 fi
@@ -126,11 +126,8 @@ installed)
             site=${spec%:*}
             curl --noproxy '*' --max-time 12 -sS -o /dev/null --connect-to "$site:443:127.0.0.1:${spec#*:}" "https://$site/" || echo "Uplink TLS control failed for $site"
         done
-        for check in dns_stream dnsbench ordinary clone browser public; do
-            [[ "$cycle" == 0 || "$check" == dns_stream || "$check" == dnsbench || "$check" == ordinary || "$check" == clone ]] || continue
-            echo "Cycle $cycle: $check"
-            TEST_CHROME_DOH=$([[ "$cycle" == 0 ]] && echo yes || echo no) /usr/bin/python3 -u "$stage/$check.py" || touch "$stage/check-failed"
-        done
+        CLOSE_CYCLE=$cycle /usr/bin/python3 -u "$stage/close_trials.py" || touch "$stage/check-failed"
+        /usr/bin/python3 -u "$stage/ordinary.py" || touch "$stage/check-failed"
         curl --max-time 5 --noproxy '*' -fsS http://127.0.0.1:18080/counts || true
         touch "$stage/done-$cycle"
         if [[ $cycle == 0 ]]; then
@@ -144,6 +141,7 @@ installed)
 probe_pid=$!
 rc=0
 run_ui installed || rc=$?
+for report in "$stage"/close-evidence-*; do if [[ -f "$report" ]]; then cat "$report"; echo; fi; done
 if [[ "$rc" != 0 ]]; then kill "$probe_pid" 2>/dev/null || true; fi
 wait "$probe_pid" || true
 cat "$stage/public-bridge.log"
@@ -155,16 +153,8 @@ curl --noproxy '*' -fsS http://127.0.0.1:18080/counts > "$RUNNER_TEMP/plain-coun
 python3 - "$RUNNER_TEMP/plain-counts.json" <<'CHECK'
 import json,sys
 d=json.load(open(sys.argv[1]))
-assert all(d.get("browser_" + mode, 0) >= 1 for mode in ("transparent", "socks")), d
-assert all(d.get("public_" + port, 0) >= 2 for port in ("18481", "18482")), d
-assert d.get("git_dns6_a", 0) >= 2, d
-assert d.get("git_dns_a", 0) > 0, d
-for kind in ("dns_tcp", "dns_tls"):
-    assert d.get(kind, 0) >= 32, (kind, d.get(kind))
-    print("Verified DNS stream queries at Linux origin", kind, d[kind])
-
-assert d.get("git_object", 0) >= 18, d
-print("Git DNS answers and object reads:", d["git_dns_a"], d["git_object"])
+assert d.get("dns_tls",0) >= 22, d.get("dns_tls")
+print("Verified independent DNS transactions while deliberately closing local sockets",d["dns_tls"])
 for kind in ("tcp4","tcp6","udp4","udp6"):
  n=d["capture_"+kind]; print(kind,n); assert n>=2
 CHECK

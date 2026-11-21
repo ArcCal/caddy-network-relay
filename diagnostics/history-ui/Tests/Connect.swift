@@ -25,6 +25,36 @@ final class Connect: XCTestCase {
         try XCTUnwrap(output("/sbin/route", ["-n","get","198.51.100.42"]).split(separator:"\n")
             .first(where: { $0.contains("interface:") })).trimmingCharacters(in: .whitespaces)
     }
+    @MainActor private func page(_ name: String, in app: XCUIApplication) {
+        let segment = app.radioButtons[name].firstMatch
+        let button = segment.exists ? segment : app.buttons[name].firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 5))
+        button.click()
+    }
+    @MainActor private func recordClosures(_ cycle: Int, in app: XCUIApplication) throws {
+        struct Trial: Decodable { let mode: String; let port: Int }
+        page("Log", in: app)
+        let copy = app.buttons["Copy All"].firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        copy.click()
+        let lines = try output("/usr/bin/pbpaste", []).components(separatedBy: .newlines)
+        let data = try Data(contentsOf: folder.appendingPathComponent("close-\(cycle).json"))
+        let trials = try JSONDecoder().decode([Trial].self, from: data)
+        XCTAssertEqual(trials.count, 3)
+        var evidence = [String]()
+        for trial in trials {
+            let peer = "peer=127.0.0.1:\(trial.port) "
+            let ready = try XCTUnwrap(lines.last { $0.contains("SOCKS CONNECT ready") && $0.contains(peer) && $0.contains("port=853 ") })
+            let resource = try XCTUnwrap(ready.range(of: #"local_resource=[0-9]+"#, options: .regularExpression))
+            let id = ready[resource].dropFirst("local_resource=".count)
+            let tag = try XCTUnwrap(ready.range(of: #"\[run=[A-F0-9]{8}\]$"#, options: .regularExpression))
+            let terminal = lines.filter { $0.contains(ready[tag]) && (($0.contains("Resource \(id) failed:") && $0.contains(" native:")) || ($0.contains("SOCKS session ended:") && $0.contains(peer))) }
+            evidence.append("Local DoT \(trial.mode) socket \(id) matching terminal records: \(terminal.count)")
+            evidence.append(contentsOf: terminal)
+        }
+        try evidence.joined(separator: "\n").write(to: folder.appendingPathComponent("close-evidence-\(cycle)"), atomically: true, encoding: .utf8)
+        page("Settings", in: app)
+    }
     @MainActor func testSwitchWhileConnected() throws {
         continueAfterFailure = false
         let app = XCUIApplication(url: folder.appendingPathComponent("Network Relay Tun.app"))
@@ -68,6 +98,7 @@ final class Connect: XCTestCase {
                     Thread.sleep(forTimeInterval: 0.1)
                 }
                 XCTAssertTrue(FileManager.default.fileExists(atPath: done.path))
+                try recordClosures(cycle, in: app)
                 toggle.click()
                 XCTAssertTrue(app.windows.staticTexts["System capture: Off"].firstMatch.waitForExistence(timeout: 30))
                 XCTAssertTrue(connected.waitForExistence(timeout: 50))

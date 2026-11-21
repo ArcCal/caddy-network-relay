@@ -1,41 +1,14 @@
-name: Verify Chrome Secure DNS and TUN connection diagnostics
+name: Compare completed and interrupted local DNS-over-TLS sockets
 'on':
   push:
     branches:
-    - audit/tun-ui-system-sockets-20261121
+    - audit/tun-dot-close-20261121
 permissions:
   contents: read
   actions: read
 jobs:
-  package:
-    name: Build and verify the TUN diagnostic client
-    runs-on: xcode-27
-    timeout-minutes: 55
-    steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        persist-credentials: false
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        repository: ArcCal/network-relay
-        ref: 7db57dbc54d0ecf1f3c949b6fba704e4ebfeea49
-        path: clients
-        persist-credentials: false
-    - name: Run the product tests, build the app and check its signature
-      run: |
-        set -eu
-        git -C clients apply ../diagnostics/history-ui/native-log-clock.patch
-        bash clients/network-relay-tun/build-macos.sh
-        codesign --verify --strict --deep "clients/network-relay-tun/dist/Network Relay Tun.app"
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: network-relay-tun-trace-macos-arm64
-        path: clients/network-relay-tun/dist/NetworkRelayTun-*-macos-arm64.zip
-        if-no-files-found: error
-        retention-days: 7
   gui:
-    needs: package
-    name: System DNS over TLS (${{ matrix.transport }})
+    name: Local DNS-over-TLS socket closure (${{ matrix.transport }})
     runs-on: xcode-27
     timeout-minutes: 75
     steps:
@@ -85,12 +58,19 @@ jobs:
       with:
         name: network-relay-tun-trace-macos-arm64
         path: signed
+        run-id: 44896541314
+        github-token: ${{ github.token }}
     - name: Verify the app built by this workflow
-      run: |
-        set -eu
+      run: 'set -eu
+
         mkdir -p clients/network-relay-tun/dist
+
         ditto -x -k signed/NetworkRelayTun-0.1.0-macos-arm64.zip clients/network-relay-tun/dist
-        codesign --verify --strict --deep "clients/network-relay-tun/dist/Network Relay Tun.app"
+
+        codesign --verify --strict --deep "clients/network-relay-tun/dist/Network
+        Relay Tun.app"
+
+        '
     - name: prepare GUI acceptance
       timeout-minutes: 4
       run: bash diagnostics/history-ui/gui.sh prepare
@@ -104,13 +84,11 @@ jobs:
     - name: install GUI acceptance
       timeout-minutes: 2
       run: bash diagnostics/history-ui/gui.sh install
-      if: '!cancelled() && steps.network.outcome
-        == ''success'''
+      if: '!cancelled() && steps.network.outcome == ''success'''
     - name: installed GUI acceptance
       timeout-minutes: 8
       run: bash diagnostics/history-ui/gui.sh installed
-      if: '!cancelled() && steps.network.outcome
-        == ''success'''
+      if: '!cancelled() && steps.network.outcome == ''success'''
     - name: Record the UI assertions for each completed phase
       if: always()
       run: "for phase in missing installed; do\n  bundle=\"$RUNNER_TEMP/ui-$phase.xcresult\"\
@@ -139,7 +117,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        transport: [h2, h3]
+        transport:
+        - h2
+        - h3
     env:
       RELAY_UI_TRANSPORT: ${{ matrix.transport }}
       MODE_VARIANT: candidate
