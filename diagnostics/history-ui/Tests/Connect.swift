@@ -31,9 +31,9 @@ final class Connect: XCTestCase {
         defer { app.terminate() }
         let connect = app.windows.buttons["Connect"].firstMatch
         XCTAssertTrue(connect.waitForExistence(timeout: 20))
-        let toggle = app.windows.checkBoxes["Global TUN"].firstMatch
+        let toggle = app.windows.descendants(matching: .any).matching(NSPredicate(format: "label == %@ OR title == %@", "Global TUN", "Global TUN")).allElementsBoundByIndex.first { $0.elementType == .checkBox || $0.elementType == .switch } ?? app.windows.checkBoxes["Global TUN"].firstMatch
         XCTAssertTrue(toggle.exists, app.debugDescription)
-        XCTAssertEqual(toggle.value as? String, "0")
+        XCTAssertEqual(toggle.value.map { String(describing: $0) }, "0")
         let before = try route(), dns = try output("/usr/sbin/scutil", ["--dns"])
         connect.click()
         let connected = app.windows.staticTexts["Relay Connected"].firstMatch
@@ -45,9 +45,9 @@ final class Connect: XCTestCase {
         } else if !FileManager.default.fileExists(atPath: folder.appendingPathComponent("installed").path) {
             XCTAssertTrue(toggle.isEnabled)
             toggle.click()
-            let error = app.windows.staticTexts.containing(NSPredicate(format:"label CONTAINS[c] %@", "Install / Update Helper")).firstMatch
+            let error = app.windows.staticTexts.matching(NSPredicate(format:"label CONTAINS[c] %@", "Install / Update Helper")).firstMatch
             XCTAssertTrue(error.waitForExistence(timeout: 10), app.debugDescription)
-            XCTAssertEqual(toggle.value as? String, "0")
+            XCTAssertEqual(toggle.value.map { String(describing: $0) }, "0")
             XCTAssertTrue(connected.exists)
             try socks()
             print("PASS missing helper preserves connected SOCKS")
@@ -57,14 +57,14 @@ final class Connect: XCTestCase {
                 toggle.click()
                 XCTAssertTrue(app.windows.staticTexts["System capture: Capturing IPv4 and IPv6"].firstMatch.waitForExistence(timeout: 50))
                 XCTAssertTrue(connected.exists)
-                XCTAssertEqual(toggle.value as? String, "1")
+                XCTAssertEqual(toggle.value.map { String(describing: $0) }, "1")
                 XCTAssertNotEqual(try route(), before)
                 XCTAssertTrue(try route().contains("utun"))
                 try socks()
                 toggle.click()
                 XCTAssertTrue(app.windows.staticTexts["System capture: Off"].firstMatch.waitForExistence(timeout: 30))
                 XCTAssertTrue(connected.waitForExistence(timeout: 50))
-                XCTAssertEqual(toggle.value as? String, "0")
+                XCTAssertEqual(toggle.value.map { String(describing: $0) }, "0")
                 XCTAssertEqual(try route(), before)
                 XCTAssertEqual(try output("/usr/sbin/scutil", ["--dns"]), dns)
                 try socks()
