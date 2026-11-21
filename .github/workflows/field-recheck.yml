@@ -77,6 +77,11 @@ jobs:
         Relay Tun.app"
 
         '
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      with:
+        name: signed-live-mode-${{ matrix.variant }}
+        path: clients/network-relay-tun/dist/NetworkRelayTun-*-macos-arm64.zip
+        retention-days: 2
     - name: prepare GUI acceptance
       timeout-minutes: 4
       run: bash diagnostics/history-ui/gui.sh prepare
@@ -94,6 +99,15 @@ jobs:
       timeout-minutes: 6
       run: bash diagnostics/history-ui/gui.sh installed
       if: matrix.variant == 'candidate'
+    - name: Record the UI assertions for each completed phase
+      if: always()
+      run: "for phase in missing installed; do\n  bundle=\"$RUNNER_TEMP/ui-$phase.xcresult\"\
+        \n  if [[ -d \"$bundle\" ]]; then\n    xcrun xcresulttool get test-results\
+        \ summary --path \"$bundle\" > \"$RUNNER_TEMP/$phase-summary.json\"\n    python3\
+        \ - \"$RUNNER_TEMP/$phase-summary.json\" <<'LOG'\nimport json,sys\ns=json.load(open(sys.argv[1]))\n\
+        print('UI result:',s.get('result'))\nfor f in s.get('testFailures',[]):\n\
+        \ print(str(f.get('failureText','')).split('Attributes:')[0][:700])\nLOG\n\
+        \  fi\ndone\n"
     - name: cleanup GUI acceptance
       timeout-minutes: 2
       run: bash diagnostics/history-ui/gui.sh cleanup

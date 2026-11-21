@@ -31,8 +31,8 @@ final class Connect: XCTestCase {
         defer { app.terminate() }
         let connect = app.windows.buttons["Connect"].firstMatch
         XCTAssertTrue(connect.waitForExistence(timeout: 20))
-        let toggle = app.windows.descendants(matching: .any).matching(NSPredicate(format: "label == %@ OR title == %@", "Global TUN", "Global TUN")).allElementsBoundByIndex.first { $0.elementType == .checkBox || $0.elementType == .switch } ?? app.windows.checkBoxes["Global TUN"].firstMatch
-        XCTAssertTrue(toggle.exists, app.debugDescription)
+        let toggle = app.windows.descendants(matching: .any).matching(identifier: "Global TUN").firstMatch
+        XCTAssertTrue(toggle.exists, app.debugDescription.split(separator:"\n").filter { $0.contains("Global") }.joined(separator:"\n"))
         XCTAssertEqual(toggle.value.map { String(describing: $0) }, "0")
         let before = try route(), dns = try output("/usr/sbin/scutil", ["--dns"])
         connect.click()
@@ -46,7 +46,7 @@ final class Connect: XCTestCase {
             XCTAssertTrue(toggle.isEnabled)
             toggle.click()
             let error = app.windows.staticTexts.matching(NSPredicate(format:"label CONTAINS[c] %@", "Install / Update Helper")).firstMatch
-            XCTAssertTrue(error.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertTrue(error.waitForExistence(timeout: 10), "Missing helper must leave an actionable capture status")
             XCTAssertEqual(toggle.value.map { String(describing: $0) }, "0")
             XCTAssertTrue(connected.exists)
             try socks()
