@@ -1,127 +1,19 @@
-name: Check DNS over TLS through the signed macOS TUN client
-'on':
+name: Measure timestamp formatting on the macOS native I/O queue
+on:
   push:
-    branches:
-    - audit/tun-ui-system-sockets-20261121
+    branches: [audit/tun-native-log-cost-20261121]
 permissions:
   contents: read
-  actions: read
 jobs:
-  gui:
-    name: System DNS over TLS (${{ matrix.transport }})
+  trace:
     runs-on: xcode-27
-    timeout-minutes: 75
+    timeout-minutes: 8
     steps:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
-    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-      with:
-        name: linux-amd64-guest
-        path: ${{ runner.temp }}/image
-        github-token: ${{ github.token }}
-        run-id: 44747890260
-    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-      with:
-        name: caddy-network-relay-linux-amd64
-        path: ${{ runner.temp }}/exact-caddy
-        run-id: 44835734583
-        github-token: ${{ github.token }}
-    - name: Prepare an isolated relay endpoint on the runner
-      run: |
-        sudo /sbin/route -n add -host 198.51.100.254 127.0.0.1
-        sudo /sbin/ifconfig lo0 alias 198.51.100.254 netmask 255.255.255.255
-        sudo /sbin/route -n change -host 198.51.100.254 127.0.0.1 -static
-        /sbin/route -n get 198.51.100.254 | grep STATIC
-    - name: Boot the release Linux kernel with loopback-only port forwards
-      run: 'set -eu
-
-        mkdir -p "$RUNNER_TEMP/final-linux"
-
-        cp "$RUNNER_TEMP/exact-caddy/caddy" "$RUNNER_TEMP/final-linux/caddy-candidate"
-
-        (cd "$RUNNER_TEMP/final-linux" && shasum -a 256 caddy-candidate > SHA256SUMS)
-
-        bash diagnostics/linux-apple/boot.sh "$GUEST_ARCH" "$RUNNER_TEMP/image"
-
-        python3 - <<''CHECK''
-
-        from pathlib import Path
-
-        import hashlib, json, os
-
-        t=Path(os.environ[''RUNNER_TEMP''])
-
-        assert hashlib.sha256((t/''exact-caddy/caddy'').read_bytes()).hexdigest()==json.loads((t/''linux.json'').read_text())[''caddy'']
-
-        CHECK
-
-        '
-      env:
-        GUEST_ARCH: amd64
-        GUEST_MACHINE: x86_64
-    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-      with:
-        name: network-relay-tun-dns-repair-macos-arm64
-        path: signed
-        run-id: 44891995933
-        github-token: ${{ github.token }}
-    - name: Verify the exact app previously tested and published
+    - name: Compare identical synthetic timestamps with four implementations
       run: |
         set -eu
-        echo 'bf76b2cc7fe585b0da61cfc09c4f9ad495516253bfe770a11b351aaa082f37a7  signed/NetworkRelayTun-0.1.0-macos-arm64.zip' | shasum -a 256 -c -
-        mkdir -p clients/network-relay-tun/dist
-        ditto -x -k signed/NetworkRelayTun-0.1.0-macos-arm64.zip clients/network-relay-tun/dist
-        codesign --verify --strict --deep "clients/network-relay-tun/dist/Network Relay Tun.app"
-    - name: prepare GUI acceptance
-      timeout-minutes: 4
-      run: bash diagnostics/history-ui/gui.sh prepare
-    - name: network GUI acceptance
-      timeout-minutes: 2
-      run: bash diagnostics/history-ui/gui.sh network
-      id: network
-    - name: missing GUI acceptance
-      timeout-minutes: 4
-      run: bash diagnostics/history-ui/gui.sh missing
-    - name: install GUI acceptance
-      timeout-minutes: 2
-      run: bash diagnostics/history-ui/gui.sh install
-      if: '!cancelled() && steps.network.outcome
-        == ''success'''
-    - name: installed GUI acceptance
-      timeout-minutes: 6
-      run: bash diagnostics/history-ui/gui.sh installed
-      if: '!cancelled() && steps.network.outcome
-        == ''success'''
-    - name: Record the UI assertions for each completed phase
-      if: always()
-      run: "for phase in missing installed; do\n  bundle=\"$RUNNER_TEMP/ui-$phase.xcresult\"\
-        \n  if [[ -d \"$bundle\" ]]; then\n    xcrun xcresulttool get test-results\
-        \ summary --path \"$bundle\" > \"$RUNNER_TEMP/$phase-summary.json\"\n    python3\
-        \ - \"$RUNNER_TEMP/$phase-summary.json\" <<'LOG'\nimport json,sys\ns=json.load(open(sys.argv[1]))\n\
-        print('UI result:',s.get('result'))\nfor f in s.get('testFailures',[]):\n\
-        \ print(str(f.get('failureText','')).split('Attributes:')[0][:700])\nLOG\n\
-        \  fi\ndone\n"
-    - name: cleanup GUI acceptance
-      timeout-minutes: 2
-      run: bash diagnostics/history-ui/gui.sh cleanup
-      if: always()
-    - name: Stop Linux fixture
-      if: always()
-      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
-        || true; fi
-
-        '
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      if: always()
-      with:
-        name: dns-tls-${{ matrix.transport }}
-        path: ${{ runner.temp }}/evidence
-        retention-days: 7
-    strategy:
-      fail-fast: false
-      matrix:
-        transport: [h2, h3]
-    env:
-      RELAY_UI_TRANSPORT: ${{ matrix.transport }}
-      MODE_VARIANT: candidate
+        xcrun swiftc -O diagnostics/history-ui/log-clock.swift -o "$RUNNER_TEMP/log-clock"
+        "$RUNNER_TEMP/log-clock"
