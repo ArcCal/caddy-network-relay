@@ -1,0 +1,49 @@
+name: Verify H3 negotiation and WARP configuration repairs
+on:
+  push:
+    branches: [audit/h3-settings-repair-20261121]
+permissions:
+  contents: read
+env:
+  CARGO_INCREMENTAL: '0'
+  CARGO_PROFILE_TEST_DEBUG: '0'
+jobs:
+  candidate:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [xcode-27, ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
+          path: relay
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with:
+          toolchain: stable
+      - name: Apply exact runtime and regression-test changes
+        run: |
+          cd relay
+          git apply ../diagnostics/settings-20261121/candidate.patch
+          cp ../diagnostics/settings-20261121/history_nov21.rs network-relay-rs/Core/tests/
+          echo "CARGO_TARGET_DIR=$RUNNER_TEMP/relay-target" >> "$GITHUB_ENV"
+      - name: WARP check mode and authenticated forwarding
+        if: runner.os == 'Linux'
+        working-directory: relay/network-relay-cf-masque
+        run: cargo test --locked --test cli_warp_wiring --test warp_matrix
+      - name: RS production backend and delayed SETTINGS and response controls
+        working-directory: relay/network-relay-rs/Core
+        run: cargo test --locked -- --nocapture
+      - name: NF protocol core with transport emulator
+        working-directory: relay/network-relay-nf/Core
+        run: cargo test --locked
+      - name: TUN protocol core with transport emulator
+        working-directory: relay/network-relay-tun/Core
+        run: cargo test --locked
