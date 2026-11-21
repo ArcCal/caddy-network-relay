@@ -21,7 +21,7 @@ test ! -e "$support"
 test ! -e '/Library/Application Support/NetworkRelayTun'
 ditto "clients/network-relay-tun/dist/Network Relay Tun.app" "$app"
 codesign --verify --deep --strict "$app"
-cp diagnostics/history-ui/{ordinary,clone,browser}.py "$stage/"
+cp diagnostics/history-ui/{ordinary,clone,browser,public}.py "$stage/"
 if [[ ! -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
     HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask google-chrome
 fi
@@ -53,6 +53,12 @@ defaults write com.arccal.network-relay-tun GlobalTUN -bool false
 run_ui missing
 ;;
 network)
+python3 -u diagnostics/history-ui/public-bridge.py > "$stage/public-bridge.log" 2>&1 &
+echo $! > "$stage/public-bridge.pid"
+for ((i=0; i<100; i++)); do grep -q "Both fixed" "$stage/public-bridge.log" && break; sleep .1; done
+grep -q "Both fixed" "$stage/public-bridge.log"
+# Verify external HTTPS before trusting an outcome through either proxy path.
+/usr/bin/python3 "$stage/public.py" --baseline
 # The product rejects loopback as a global relay endpoint. Exercise the
 # shipped binary with a non-loopback address on a pre-owned static host route.
 sudo /sbin/route -n add -host 198.51.100.254 127.0.0.1
@@ -99,8 +105,8 @@ installed)
         /sbin/route -n get 198.51.100.42 | grep "interface: utun"
         for ip in 198.51.100.42 1.1.1.1 8.8.8.8; do /sbin/route -n get "$ip" | awk '/interface:/{print $0}'; done
         /usr/sbin/scutil --dns | awk '/nameserver|order|flags/ {print}' | head -65
-        for check in ordinary clone browser; do
-            [[ "$check" != browser || "$cycle" == 0 ]] || continue
+        for check in ordinary clone browser public; do
+            [[ "$cycle" == 0 || "$check" == ordinary || "$check" == clone ]] || continue
             echo "Cycle $cycle: $check"
             /usr/bin/python3 -u "$stage/$check.py" || touch "$stage/check-failed"
         done
@@ -128,6 +134,7 @@ python3 - "$RUNNER_TEMP/plain-counts.json" <<'CHECK'
 import json,sys
 d=json.load(open(sys.argv[1]))
 assert all(d.get("browser_" + mode, 0) >= 1 for mode in ("transparent", "socks")), d
+assert all(d.get("public_" + port, 0) >= 2 for port in ("18481", "18482")), d
 assert d.get("git_dns6_a", 0) >= 2, d
 assert d.get("git_dns_a", 0) > 0, d
 assert d.get("git_object", 0) >= 18, d
@@ -157,6 +164,7 @@ except subprocess.TimeoutExpired:
 CLEAN
         sudo security delete-certificate -Z "$fp" /Library/Keychains/System.keychain </dev/null || true
     fi
+    if [[ -f "$stage/public-bridge.pid" ]]; then kill "$(cat "$stage/public-bridge.pid")" || true; fi
     if [[ -f "$stage/forward.pid" ]]; then kill "$(cat "$stage/forward.pid")" || true; fi
     sudo /sbin/ifconfig lo0 -alias 198.51.100.254 2>/dev/null || true
     sudo /sbin/route -n delete -host 198.51.100.254 127.0.0.1 2>/dev/null || true

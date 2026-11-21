@@ -215,6 +215,32 @@ def start_capture_origins():
         command("ip", "addr", "add", resolver + "/32", "dev", "lo")
         dns = socketserver.UDPServer((resolver, 53), DNS)
         threading.Thread(target=dns.serve_forever, daemon=True).start()
+    class PublicOrigin(socketserver.BaseRequestHandler):
+        def handle(self):
+            import select
+            with socket.create_connection(("10.0.2.2", self.server.forward_port), timeout=10) as dst:
+                dst.settimeout(None)
+                count("public_" + str(self.server.forward_port))
+                readers = [self.request, dst]
+                while readers:
+                    ready, _, _ = select.select(readers, [], [], 45)
+                    if not ready:
+                        return
+                    for source in ready:
+                        other = dst if source is self.request else self.request
+                        data = source.recv(65536)
+                        if data:
+                            other.sendall(data)
+                        else:
+                            readers.remove(source)
+                            other.shutdown(socket.SHUT_WR)
+
+    for host, port in (("198.51.100.43", 18481), ("198.51.100.44", 18482)):
+        command("ip", "addr", "add", host + "/32", "dev", "lo")
+        origin = socketserver.ThreadingTCPServer((host, 443), PublicOrigin)
+        origin.forward_port = port
+        threading.Thread(target=origin.serve_forever, daemon=True).start()
+
     # One reachable IPv6 resolver and one reachable host without a DNS service.
     # Both stay inside the guest; the public network is unreachable.
     command("ip", "-6", "addr", "add", "2001:db8::53/128", "dev", "lo")
@@ -222,6 +248,7 @@ def start_capture_origins():
     dns6 = v6dns(("2001:db8::53", 53), DNS)
     threading.Thread(target=dns6.serve_forever, daemon=True).start()
     with open("/etc/hosts", "a") as hosts:
+        hosts.write("\n198.51.100.43 www.google.com\n198.51.100.44 github.com\n")
         hosts.write("\n" + git_origin.ADDRESS + " " + git_origin.NAME + " relay.test\n")
 
     for host, prefix, version in (("198.51.100.42", 32, 4), ("2001:db8::42", 128, 6), ("192.0.2.53", 32, 4)):
