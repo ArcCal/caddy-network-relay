@@ -1,8 +1,8 @@
-name: Replay actual GUI against the preserved signed application
+name: Verify each signed GUI acceptance checkpoint
 'on':
   push:
     branches:
-    - audit/tun-ui-replay-20261121
+    - audit/tun-ui-checkpoints-20261121
 permissions:
   contents: read
   actions: read
@@ -76,8 +76,25 @@ jobs:
     - run: 'mkdir -p clients/network-relay-tun/dist
 
         ditto -x -k "$RUNNER_TEMP/signed/tun-app.zip" clients/network-relay-tun/dist'
-    - name: Click Connect in the signed app using XCTest
-      run: bash diagnostics/history-ui/gui.sh
+    - name: prepare GUI acceptance
+      timeout-minutes: 4
+      run: bash diagnostics/history-ui/gui.sh prepare
+    - name: missing GUI acceptance
+      timeout-minutes: 4
+      run: bash diagnostics/history-ui/gui.sh missing
+    - name: network GUI acceptance
+      timeout-minutes: 2
+      run: bash diagnostics/history-ui/gui.sh network
+    - name: install GUI acceptance
+      timeout-minutes: 2
+      run: bash diagnostics/history-ui/gui.sh install
+    - name: installed GUI acceptance
+      timeout-minutes: 4
+      run: bash diagnostics/history-ui/gui.sh installed
+    - name: cleanup GUI acceptance
+      timeout-minutes: 2
+      run: bash diagnostics/history-ui/gui.sh cleanup
+      if: always()
     - name: Stop Linux fixture
       if: always()
       run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
