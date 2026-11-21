@@ -24,7 +24,7 @@ def sample(connect,label):
         prior = json.loads(p.fetch('counts')).get('reverse_ping',0)
         start_counts=json.loads(p.fetch('counts'))
         with connect() as channel:
-            channel.settimeout(40)
+            channel.settimeout(6)
             print("CASE",label,mode,time.time(),flush=True)
             channel.sendall(mode.encode())
             h = hashlib.sha256()
@@ -90,7 +90,10 @@ with tempfile.TemporaryDirectory() as d:
     pem=Path(d)/'ca.pem'
     pem.write_text(ssl.DER_cert_to_PEM_cert(root.read_bytes()))
     for host,path in [('127.0.0.1','port-forward'),('192.0.2.2','packet')]:
-        for product,mode in [('rs','http/1.1')]:
+        for drain in ('0','1','1','0'):
+            product,mode='rs','http/1.1'
+            os.environ['TRACE_DRAIN_LOCAL']=drain
+            print('DRAIN',path,drain,flush=True)
             label=f'{product}-{mode.replace("/","_")}-{path}'
             os.environ.update(RELAY_HISTORY_ADDRESS=host,RELAY_HISTORY_LABEL=label)
             rows,counts=p.case(product,'caddy',14201,mode,secret,pem if product=='rs' else root,None,out)

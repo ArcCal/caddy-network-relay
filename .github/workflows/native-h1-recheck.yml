@@ -1,8 +1,8 @@
-name: Trace RS close delivery and origin completion on the x86 Linux fixture
+name: Compare local send queue drainage on Linux to Mac abort delivery
 'on':
   push:
     branches:
-    - audit/rs-close-boundary-observation-20261121
+    - audit/rs-linux-abort-drain-20261121
 permissions:
   contents: read
   actions: read
@@ -67,7 +67,7 @@ jobs:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: ArcCal/network-relay
-        ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
+        ref: 7bf095c481ca527712798b63fb3b7b1e58992f1d
         path: clients
         persist-credentials: false
     - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
@@ -75,6 +75,8 @@ jobs:
         toolchain: stable
     - name: Build production clients and the native controller entry points
       run: 'set -eu
+
+        python3 diagnostics/linux-apple/reset-trace.py
 
         python3 diagnostics/linux-apple/trace-rs.py
 
