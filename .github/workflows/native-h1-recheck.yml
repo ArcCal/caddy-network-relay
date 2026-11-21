@@ -1,8 +1,8 @@
-name: Compare NF and OpenSSL under two transport paths
+name: Inspect public native TLS close signals
 'on':
   push:
     branches:
-    - audit/h1-native-two-paths-20261121
+    - audit/native-eof-metadata-20261121
 permissions:
   contents: read
   actions: read
@@ -74,7 +74,13 @@ jobs:
       with:
         toolchain: stable
     - name: Build production clients and the native controller entry points
-      run: 'set -eu
+      run: 'sdk=$(xcrun --sdk macosx --show-sdk-path)
+
+        grep -Ein ''close.notify|closure.alert|peer.*closed|disconnect.*alert|truncation''
+        "$sdk"/System/Library/Frameworks/Security.framework/Headers/SecProtocol*.h
+        "$sdk"/System/Library/Frameworks/Network.framework/Headers/*.h || true
+
+        set -eu
 
         sed -e ''/^cargo build.*network-relay-rs/d'' -e ''/^cp .*network-relay-rs/d''
         -e ''s/for product in nf tun/for product in nf/'' diagnostics/linux-apple/build-products.sh

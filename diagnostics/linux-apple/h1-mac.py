@@ -24,6 +24,7 @@ def sample(connect,label):
         prior = json.loads(p.fetch('counts')).get('reverse_ping',0)
         with connect() as channel:
             channel.settimeout(40)
+            print("CASE",label,mode,time.time(),flush=True)
             channel.sendall(mode.encode())
             h = hashlib.sha256()
             total = 0

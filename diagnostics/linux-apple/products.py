@@ -161,6 +161,9 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
                         marker=folder/"diagnostic-owner"
                         if marker.is_file() and marker.read_text()==json.loads(settings.read_text())["ownershipToken"]:
                             shutil.rmtree(folder)
+                log.flush()
+                for line in (root/"log").read_text(errors="replace").splitlines():
+                    if line.startswith("EOF-SAMPLE"):print(os.environ.get("RELAY_HISTORY_LABEL"),line,flush=True)
                 if child.returncode!=0:
                     raise RuntimeError(f"{product} exited {child.returncode}")
                 if product!="rs":
