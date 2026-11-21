@@ -27,12 +27,6 @@ jobs:
         path: ${{ runner.temp }}/exact-caddy
         run-id: 44835734583
         github-token: ${{ github.token }}
-    - name: Prepare an isolated relay endpoint on the runner
-      run: |
-        sudo /sbin/route -n add -host 198.51.100.254 127.0.0.1
-        sudo /sbin/ifconfig lo0 alias 198.51.100.254 netmask 255.255.255.255
-        sudo /sbin/route -n change -host 198.51.100.254 127.0.0.1 -static
-        /sbin/route -n get 198.51.100.254 | grep STATIC
     - name: Boot the release Linux kernel with loopback-only port forwards
       run: 'set -eu
 

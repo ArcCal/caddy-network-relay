@@ -26,9 +26,6 @@ for mapping in tcp:18080 tcp:18443 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:1
     port=${mapping#*:}
     net+=",hostfwd=$protocol:127.0.0.1:$port-10.0.2.15:$port"
 done
-for protocol in tcp udp; do
-    net+=",hostfwd=$protocol:198.51.100.254:14201-10.0.2.15:14201"
-done
 log="$RUNNER_TEMP/guest-console.log"
 touch "$log"
 # The minimal guest may start without an RTC driver. Establish the runner's

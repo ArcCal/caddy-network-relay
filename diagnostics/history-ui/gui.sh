@@ -70,7 +70,33 @@ done
 /usr/bin/python3 "$stage/public.py" --baseline
 # The product rejects loopback as a global relay endpoint. Exercise the
 # shipped binary with a non-loopback address on a pre-owned static host route.
+sudo /sbin/route -n add -host 198.51.100.254 127.0.0.1
+sudo /sbin/ifconfig lo0 alias 198.51.100.254 netmask 255.255.255.255
+/sbin/route -n get 198.51.100.254
+sudo /sbin/route -n change -host 198.51.100.254 127.0.0.1 -static
 /sbin/route -n get 198.51.100.254 | grep STATIC
+python3 -u - <<'FORWARD' &
+import contextlib,socket,threading,select
+with socket.socket() as listener:
+    listener.bind(('198.51.100.254',14201)); listener.listen()
+    def tunnel(conn):
+        with conn,socket.create_connection(('127.0.0.1',14201)) as dst:
+            inputs=[conn,dst]
+            while inputs:
+                for source in select.select(inputs,[],[],30)[0]:
+                    other=dst if source is conn else conn
+                    data=source.recv(65536)
+                    if data:other.sendall(data)
+                    else:
+                        inputs.remove(source)
+                        with contextlib.suppress(OSError): other.shutdown(socket.SHUT_WR)
+    while True:threading.Thread(target=tunnel,args=(listener.accept()[0],),daemon=True).start()
+FORWARD
+echo $! > "$stage/forward.pid"
+python3 -u diagnostics/history-ui/relay-udp.py > "$stage/relay-udp.log" 2>&1 &
+echo $! > "$stage/relay-udp.pid"
+sleep 1
+grep -F "UDP forward ready" "$stage/relay-udp.log"
 curl --noproxy '*' --cacert "$pem" --resolve relay.test:14201:198.51.100.254 --max-time 7 -sS -o /dev/null https://relay.test:14201/
 
 ;;
@@ -169,6 +195,7 @@ CLEAN
         while read -r site ip; do sudo /sbin/route -n delete -host "$ip" "$gw" || true; done < "$stage/bridge-targets"
     fi
     if [[ -f "$stage/public-bridge.pid" ]]; then kill "$(cat "$stage/public-bridge.pid")" || true; fi
+    if [[ -f "$stage/relay-udp.pid" ]]; then kill "$(cat "$stage/relay-udp.pid")" 2>/dev/null || true; fi
     if [[ -f "$stage/forward.pid" ]]; then kill "$(cat "$stage/forward.pid")" || true; fi
     sudo /sbin/ifconfig lo0 -alias 198.51.100.254 2>/dev/null || true
     sudo /sbin/route -n delete -host 198.51.100.254 127.0.0.1 2>/dev/null || true
