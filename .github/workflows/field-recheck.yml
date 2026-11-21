@@ -1,0 +1,159 @@
+name: Historical acceptance on macOS and native Linux
+'on':
+  push:
+    branches:
+    - audit/ipv6-scale-and-gui-20261121
+permissions:
+  contents: read
+  actions: read
+jobs:
+  gui:
+    name: Signed TUN app real button missing and installed helper
+    runs-on: xcode-27
+    timeout-minutes: 75
+    steps:
+    - &id001
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: abb966352880c7521cbd9a1e23e9c2f6e70906b0
+        sparse-checkout: diagnostics
+        path: native-probe
+        persist-credentials: false
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: linux-amd64-guest
+        path: ${{ runner.temp }}/image
+        github-token: ${{ github.token }}
+        run-id: 44747890260
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: caddy-network-relay-linux-amd64
+        path: ${{ runner.temp }}/exact-caddy
+        run-id: 44835734583
+        github-token: ${{ github.token }}
+    - name: Boot the release Linux kernel with loopback-only port forwards
+      run: 'set -eu
+
+        mkdir -p "$RUNNER_TEMP/final-linux"
+
+        cp "$RUNNER_TEMP/exact-caddy/caddy" "$RUNNER_TEMP/final-linux/caddy-candidate"
+
+        (cd "$RUNNER_TEMP/final-linux" && shasum -a 256 caddy-candidate > SHA256SUMS)
+
+        bash diagnostics/linux-apple/boot.sh "$GUEST_ARCH" "$RUNNER_TEMP/image"
+
+        python3 - <<''CHECK''
+
+        from pathlib import Path
+
+        import hashlib, json, os
+
+        t=Path(os.environ[''RUNNER_TEMP''])
+
+        assert hashlib.sha256((t/''exact-caddy/caddy'').read_bytes()).hexdigest()==json.loads((t/''linux.json'').read_text())[''caddy'']
+
+        CHECK
+
+        '
+      env:
+        GUEST_ARCH: amd64
+        GUEST_MACHINE: x86_64
+    - &id002
+      uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
+        path: clients
+        persist-credentials: false
+    - &id003
+      uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+      with:
+        toolchain: stable
+    - name: Build and sign unmodified TUN application
+      run: 'bash clients/network-relay-tun/scripts/test-native-host-session.sh
+
+        bash clients/network-relay-tun/build-macos.sh'
+    - name: Click Connect in the signed app using XCTest
+      run: bash diagnostics/history-ui/gui.sh
+    - name: Stop Linux fixture
+      if: always()
+      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
+        || true; fi
+
+        '
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: ui-network-preflight
+        path: ${{ runner.temp }}/evidence
+        retention-days: 7
+  nat64:
+    name: IPv6-only RS through DNS64 and NAT64 on ${{ matrix.arch }}
+    strategy: &id004
+      fail-fast: false
+      matrix:
+        include:
+        - arch: amd64
+          runner: ubuntu-24.04
+        - arch: arm64
+          runner: ubuntu-22.04-arm
+    steps:
+    - *id001
+    - *id002
+    - *id003
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: caddy-network-relay-linux-${{ matrix.arch }}
+        path: ${{ runner.temp }}/exact-caddy
+        run-id: 44835734583
+        github-token: ${{ github.token }}
+    - name: Build current relay and RS; install isolated translation test dependencies
+      run: 'sudo apt-get update -qq
+
+        sudo apt-get install -y -qq tayga unbound dnsmasq-base dnsutils
+
+        cargo build --locked --manifest-path clients/Cargo.toml --bin network-relay
+        --release
+
+        cargo build --locked --manifest-path clients/network-relay-rs/Cargo.toml --bin
+        network-relay-rs --release
+
+        chmod 755 "$RUNNER_TEMP/exact-caddy/caddy"
+
+        sudo bash diagnostics/linux-apple/nat64.sh "$PWD/clients/target/release/network-relay"
+        "$RUNNER_TEMP/exact-caddy/caddy" "$PWD/clients/network-relay-rs/target/release/network-relay-rs"
+
+        '
+    runs-on: ${{ matrix.runner }}
+  scale:
+    runs-on: ${{ matrix.runner }}
+    strategy: *id004
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        ref: 84fe1338319f9ee06dc7f5de635b09fdeefd1e2b
+        persist-credentials: false
+    - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+      with:
+        go-version: 1.27.4
+    - name: Prepare reviewed TLS source
+      run: 'echo "RELAY_OFFICIAL_GOROOT=$(go env GOROOT)" >> "$GITHUB_ENV"
+
+        python3 deploy/go-tls/prepare.py "$(go env GOROOT)" "$RUNNER_TEMP/relay-go-tls"
+
+        echo "GOROOT=$RUNNER_TEMP/relay-go-tls" >> "$GITHUB_ENV"
+
+        echo "GOTOOLCHAIN=local" >> "$GITHUB_ENV"
+
+        echo "GOFLAGS=-tags=relay_tls9846_v1" >> "$GITHUB_ENV"
+
+        '
+    - name: H3 independent authenticated clients, reload and recovery
+      run: "set -euo pipefail\nulimit -n 32768\nfor n in 128 512 1000; do\n    RELAY_CAPACITY_CLIENTS=\"\
+        $n\" go test -tags http2legacy,relay_tls9846_v1 -count=1 -timeout=8m -run\
+        \ '^TestDeploymentCapacity$' -v . | tee \"$RUNNER_TEMP/scale-$n\"\n    grep\
+        \ -q '^--- PASS: TestDeploymentCapacity' \"$RUNNER_TEMP/scale-$n\"\ndone"

@@ -1,0 +1,31 @@
+name: RelayBoundaryUI
+settings:
+  base:
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGNING_ALLOWED: YES
+    GENERATE_INFOPLIST_FILE: YES
+    SWIFT_VERSION: 5.0
+targets:
+  Fixture:
+    type: application
+    platform: macOS
+    sources: [Host]
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: invalid.example.relay.history.fixture
+  UITests:
+    type: bundle.ui-testing
+    platform: macOS
+    sources: [Tests]
+    dependencies:
+      - target: Fixture
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: invalid.example.relay.history.tests
+      TEST_TARGET_NAME: Fixture
+schemes:
+  Boundary:
+    build:
+      targets:
+        Fixture: all
+        UITests: [test]
+    test:
+      targets: [UITests]
