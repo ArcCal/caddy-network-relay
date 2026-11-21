@@ -1,0 +1,59 @@
+name: Bounded RS waits and legacy WARP and Xray behavior
+on:
+  push:
+    branches: [audit/rs-and-egress-history-20261121]
+permissions:
+  contents: read
+jobs:
+  rs:
+    runs-on: xcode-27
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with: {persist-credentials: false}
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with: {repository: ArcCal/network-relay, ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58, path: clients, persist-credentials: false}
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with: {toolchain: stable}
+      - run: |
+          cd clients
+          git apply ../diagnostics/history-nov21/rs.patch
+          cargo test --locked --manifest-path network-relay-rs/Cargo.toml -p network-relay-rs-core --test connection_reuse -- --nocapture
+  egress:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {runner: ubuntu-24.04, asset: Xray-linux-64.zip}
+          - {runner: ubuntu-22.04-arm, asset: Xray-linux-arm64-v8a.zip}
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with: {persist-credentials: false}
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with: {repository: ArcCal/network-relay, ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58, path: clients, persist-credentials: false}
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+        with: {toolchain: stable}
+      - name: Recheck admissions at 32 and 48 with a real local WARP protocol peer
+        run: |
+          cd clients
+          git apply ../diagnostics/history-nov21/warp.patch
+          cp ../diagnostics/history-nov21/history_limit.rs network-relay-cf-masque/tests/history_limit.rs
+          cargo test --locked --manifest-path network-relay-cf-masque/Cargo.toml --test history_limit -- --nocapture
+      - name: Recheck half-close and empty datagrams with real Xray 26.10.31
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ASSET: ${{ matrix.asset }}
+        run: |
+          set -euo pipefail
+          gh release download v26.10.31 -R XTLS/Xray-core -p "$ASSET" -D "$RUNNER_TEMP"
+          checksum=$(gh api repos/XTLS/Xray-core/releases/tags/v26.10.31 --jq '.assets[]|select(.name==env.ASSET)|.digest')
+          [[ $checksum =~ ^sha256:[0-9a-f]{64}$ ]]
+          (cd "$RUNNER_TEMP" && echo "${checksum#sha256:}  $ASSET" | sha256sum -c)
+          unzip -p "$RUNNER_TEMP/$ASSET" xray > "$RUNNER_TEMP/xray"
+          chmod 755 "$RUNNER_TEMP/xray"
+          export XRAY_BIN="$RUNNER_TEMP/xray"
+          "$XRAY_BIN" version
+          cd clients
+          git apply ../diagnostics/history-nov21/vless.patch
+          cargo test --locked --manifest-path network-relay-vless/Cargo.toml --test xray_interop historical_xray -- --nocapture

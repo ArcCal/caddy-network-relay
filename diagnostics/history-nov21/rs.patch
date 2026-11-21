@@ -1,0 +1,85 @@
+--- a/network-relay-rs/Core/tests/connection_reuse.rs
++++ b/network-relay-rs/Core/tests/connection_reuse.rs
+@@ -44,6 +44,9 @@
+     }
+ 
+     async fn start_with_response_delay(stream_limit: u32, response_delay: Duration) -> Self {
++        Self::start_with_delays(stream_limit, Duration::ZERO, response_delay).await
++    }
++    async fn start_with_delays(stream_limit:u32, settings_delay:Duration, response_delay:Duration) -> Self {
+         let directory = std::env::temp_dir().join(format!(
+             "relay-rs-h3-reuse-{}-{}",
+             std::process::id(),
+@@ -163,12 +166,13 @@
+                         let mut notices = notices.subscribe();
+                         workers.spawn(async move {
+                             let mut control = connection.open_uni().await.unwrap();
+-                            control.write_all(&[0, 4, 2, 8, 1]).await.unwrap();
++                            let mut settings_sent=false; let settings_due=tokio::time::Instant::now()+settings_delay;
+                             let cutoff = Arc::new(AtomicU64::new(u64::MAX));
+                             let mut streams = JoinSet::new();
+                             loop {
+                                 tokio::select! {
+                                     _ = streams.join_next(), if !streams.is_empty() => {},
++                                    _ = tokio::time::sleep_until(settings_due), if !settings_sent => { if control.write_all(&[0,4,2,8,1]).await.is_err() {break;} settings_sent=true; },
+                                     _ = connection.closed() => break,
+                                     result = notices.changed() => {
+                                         if result.is_err() { break; }
+@@ -293,7 +297,10 @@
+         return;
+     }
+     tokio::time::sleep(response_delay).await;
+-    if send.write_all(&[1, 3, 0, 0, 0xd9]).await.is_err() {
++    let mut fields=vec![0,0,0xd9,0x27,9];
++    fields.extend_from_slice(b"capsule-protocol"); fields.extend_from_slice(&[2,b'?',b'1']);
++    let mut wire=vec![1,fields.len() as u8]; wire.extend_from_slice(&fields);
++    if send.write_all(&wire).await.is_err() {
+         return;
+     }
+     while let Some(kind) = varint(&mut recv).await {
+@@ -635,3 +642,45 @@
+     backend.shutdown().await;
+     assert_eq!(backend.resource_count(), 0);
+ }
++
++#[tokio::test(flavor="multi_thread",worker_threads=4)]
++async fn historical_delayed_settings_and_absent_settings() {
++    for (delay, expected_headers) in [(2,true),(14,false)] {
++        let fixture=Fixture::start_with_delays(32,Duration::from_secs(delay),Duration::ZERO).await;
++        let mut backend=fixture.backend();
++        let client=Client::new(&fixture.config(),backend.bridge.clone()).unwrap();
++        let start=std::time::Instant::now();
++        let result=client.open("127.0.0.1",7,true).await;
++        let elapsed=start.elapsed();
++        println!("SETTINGS delay={delay}s elapsed={elapsed:?} headers={:?}",fixture.request_ids(0));
++        assert_eq!(fixture.request_ids(0).len(),usize::from(expected_headers));
++        if expected_headers {
++            assert!(elapsed>=Duration::from_secs(2) && elapsed<Duration::from_secs(6));
++            let mut opened=result.unwrap();
++            echo(&mut opened.stream,&[0,4,0,b'o',b'k',b'!']).await;
++        } else {
++            let err=result.err().unwrap();
++            println!("SETTINGS error={err:#}");
++            assert!(elapsed>=Duration::from_secs(9) && elapsed<Duration::from_secs(13));
++            assert!(format!("{err:#}").contains("Extended CONNECT"));
++            // A plain TCP CONNECT on this same session still reaches the peer.
++            let mut opened=client.open("127.0.0.1",7,false).await.unwrap();
++            echo(&mut opened.stream,b"recovered after settings deadline").await;
++            assert_eq!(fixture.connection_count(),1);
++        }
++        drop(client); backend.shutdown().await; assert_eq!(backend.resource_count(),0);
++    }
++}
++#[tokio::test(flavor="multi_thread",worker_threads=4)]
++async fn historical_missing_response() {
++    let fixture=Fixture::start_with_delays(32, Duration::ZERO, Duration::from_secs(26)).await;
++    let mut backend=fixture.backend();
++    let client=Client::new(&fixture.config(),backend.bridge.clone()).unwrap();
++    let start=std::time::Instant::now();
++    let err=client.open("127.0.0.1",7,false).await.err().unwrap();
++    println!("RESPONSE elapsed={:?} headers={:?} error={err:#}",start.elapsed(),fixture.request_ids(0));
++    assert!(start.elapsed()>=Duration::from_secs(19) && start.elapsed()<Duration::from_secs(24));
++    assert!(format!("{err:#}").contains("no HTTP/3 response"));
++    assert_eq!(fixture.request_ids(0),[0]);
++    drop(client); backend.shutdown().await; assert_eq!(backend.resource_count(),0);
++}

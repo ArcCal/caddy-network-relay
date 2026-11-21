@@ -1,0 +1,16 @@
+--- a/network-relay-cf-masque/tests/support/relay.rs
++++ b/network-relay-cf-masque/tests/support/relay.rs
+@@ -82,11 +82,12 @@
+         static HASH: OnceLock<String> = OnceLock::new();
+         let hash = HASH.get_or_init(|| auth::hash_password(PASSWORD).expect("hashing fixture password"));
+         let text = format!(
+-            "listen = \"{addr}\"\n[tls]\ncert = {:?}\nkey = {:?}\n[web]\nroot = {:?}\n[relay]\nblocked_destinations = []\nblocked_ports = []\nblock_own_addresses = false\nmax_tunnels = 64\nmax_tunnels_per_user = 64\n[[user]]\nname = \"{USER}\"\npassword_hash = \"{hash}\"\n",
++            "listen = \"{addr}\"\n[tls]\ncert = {:?}\nkey = {:?}\n[web]\nroot = {:?}\n[relay]\nblocked_destinations = []\nblocked_ports = []\nblock_own_addresses = false\nmax_tunnels = 48\nmax_tunnels_per_user = 32\n[[user]]\nname = \"{USER}\"\npassword_hash = \"{hash}\"\n",
+             env.path.join("fullchain.pem"),
+             env.path.join("privkey.pem"),
+             env.path.join("site")
+         );
++        let text = text + &format!("[[user]]\nname = \"second\"\npassword_hash = \"{hash}\"\n");
+         let config: Config = toml::from_str(&text)?;
+         config.validate()?;
+         let certs = CertStore::open(&config.tls.cert, &config.tls.key)?;

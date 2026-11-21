@@ -1,0 +1,56 @@
+--- a/network-relay-vless/tests/xray_interop.rs
++++ b/network-relay-vless/tests/xray_interop.rs
+@@ -716,3 +716,53 @@
+     ensure!(!log.contains(UUID) && !log.contains(WS_PATH), "the log shows the user ID or path:\n{log}");
+     Ok(())
+ }
++
++#[tokio::test(flavor = "multi_thread", worker_threads=4)]
++async fn historical_xray_empty_and_fin() -> Result<()> {
++    let xray=Xray::start(true).await?;
++    let dns=dns(ALLOWED).await;
++    let udp=udp_echo(ALLOWED).await;
++    let listener=TcpListener::bind((ALLOWED,0)).await?;
++    let relay=relay(xray.port,UUID,dns.port).await?;
++    let mut h3=relay.h3().await?;
++    let mut tcp=h3.request(connect_request(&format!("{ALLOWED}:{}",listener.local_addr()?.port()))).await?;
++    ensure!(tcp.recv_response().await?.status()==StatusCode::OK);
++    tcp.send_data(Bytes::from_static(b"A")).await?;
++    let (mut target,_)=tokio::time::timeout(WAIT,listener.accept()).await??;
++    let mut b=[0u8;1];
++    tokio::time::timeout(WAIT,target.read_exact(&mut b)).await??;
++    ensure!(b[0]==b'A');
++    tcp.finish().await?;
++    ensure!(tokio::time::timeout(Duration::from_secs(2),target.read(&mut b)).await.is_err(),"target unexpectedly received FIN");
++    target.write_all(b"B").await?;
++    let mut data=tokio::time::timeout(WAIT,tcp.recv_data()).await??.context("missing reverse bytes")?;
++    ensure!(data.copy_to_bytes(data.remaining()).as_ref()==b"B");
++    println!("TCP: destination received A, no FIN within 2s, reverse B arrived after client FIN");
++    // CONNECT-UDP: datagrams of many sizes, each echoed exactly.
++    let uri = format!("https://relay.test:{}/.well-known/masque/udp/{ALLOWED}/{}/", relay.addr.port(), udp.port);
++    let request = Request::builder()
++        .method(Method::CONNECT)
++        .uri(uri)
++        .header("capsule-protocol", "?1")
++        .header(AUTHORIZATION, auth::basic_authorization(USER, PASSWORD))
++        .extension(h3::ext::Protocol::CONNECT_UDP)
++        .body(())?;
++    let mut stream = h3.request(request).await?;
++    let response = tokio::time::timeout(WAIT, stream.recv_response()).await??;
++    ensure!(response.status() == StatusCode::OK, "CONNECT-UDP answered {}", response.status());
++    let (mut tunnel, _filter) = h3.udp_tunnel(stream);
++
++    for round in 0u8..4 {
++        tunnel.send_datagram(Bytes::from_static(&[0]))?;
++        let silent=tokio::time::timeout(Duration::from_millis(350),tunnel.next_event()).await;
++        ensure!(silent.is_err(),"unexpected empty echo");
++        let marker=Bytes::from(vec![0,round,42]);
++        tunnel.send_datagram(marker.clone())?;
++        match tokio::time::timeout(WAIT,tunnel.next_event()).await?? {
++            Event::Datagram(echoed)=>ensure!(echoed==marker),_=>bail!("tunnel closed"),
++        }
++        ensure!(udp.accepted.load(Ordering::SeqCst)==round as usize+1);
++    }
++    println!("UDP: 0/4 empty, 4/4 distinct nonempty marker datagrams reached and returned");
++    Ok(())
++}
