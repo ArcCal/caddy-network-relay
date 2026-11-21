@@ -9,6 +9,7 @@ cleanup() {
         ip netns pids "$ns" | xargs -r kill || true
         ip netns del "$ns" || true
     done
+    rm -f /etc/unbound/relay-history-test.conf
     rm -f /etc/netns/"$c"/resolv.conf
     rmdir /etc/netns/"$c" || true
     rm -rf "$d"
@@ -59,7 +60,9 @@ forward-zone:
     name: "relay.test."
     forward-addr: 127.0.0.1@1053
 EOF
-gw unbound -d -c "$d/unbound.conf" > "$d/dns64.log" 2>&1 &
+# The packaged AppArmor profile permits configuration under /etc/unbound.
+install -m 644 "$d/unbound.conf" /etc/unbound/relay-history-test.conf
+gw unbound -d -c /etc/unbound/relay-history-test.conf > "$d/dns64.log" 2>&1 &
 mkdir -p /etc/netns/"$c"
 echo 'nameserver fd21:1::1' > /etc/netns/"$c"/resolv.conf
 test -z "$(ip -n "$c" -4 route)"
