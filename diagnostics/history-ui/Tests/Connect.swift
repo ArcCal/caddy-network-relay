@@ -61,6 +61,9 @@ final class Connect: XCTestCase {
                 XCTAssertNotEqual(try route(), before)
                 XCTAssertTrue(try route().contains("utun"))
                 try socks()
+                let clone = folder.appendingPathComponent("clone.py").path
+                let results = try output("/usr/bin/python3", [clone])
+                XCTAssertEqual(results.components(separatedBy: "clone verified").count - 1, 3, results)
                 let script = folder.appendingPathComponent("ordinary.py").path
                 XCTAssertEqual(try output("/usr/bin/python3", [script]), "4 plain sockets echoed\n")
                 toggle.click()

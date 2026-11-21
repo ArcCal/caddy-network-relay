@@ -21,7 +21,7 @@ test ! -e "$support"
 test ! -e '/Library/Application Support/NetworkRelayTun'
 ditto "clients/network-relay-tun/dist/Network Relay Tun.app" "$app"
 codesign --verify --deep --strict "$app"
-cp diagnostics/history-ui/ordinary.py "$stage/ordinary.py"
+cp diagnostics/history-ui/{ordinary,clone}.py "$stage/"
 mkdir -m 700 "$support"
 python3 - "$support/settings.json" <<'PY'
 import base64,json,plistlib,sys,urllib.request
@@ -83,11 +83,17 @@ touch "$stage/installed"
 
 ;;
 installed)
-run_ui installed
+rc=0
+run_ui installed || rc=$?
+[[ ! -f "$stage/clone-results" ]] || cat "$stage/clone-results"
+[[ "$rc" == 0 ]] || exit "$rc"
 curl --noproxy '*' -fsS http://127.0.0.1:18080/counts > "$RUNNER_TEMP/plain-counts.json"
 python3 - "$RUNNER_TEMP/plain-counts.json" <<'CHECK'
 import json,sys
 d=json.load(open(sys.argv[1]))
+assert d.get("git_dns_a", 0) > 0, d
+assert d.get("git_object", 0) >= 18, d
+print("Git DNS answers and object reads:", d["git_dns_a"], d["git_object"])
 for kind in ("tcp4","tcp6","udp4","udp6"):
  n=d["capture_"+kind]; print(kind,n); assert n>=2
 CHECK

@@ -1,4 +1,3 @@
-import socketserver
 """Isolated Linux origin and two real Relay servers. Only loopback ports are published by QEMU."""
 import collections
 import hashlib
@@ -8,6 +7,8 @@ import os
 from pathlib import Path
 import secrets
 import socket
+import socketserver
+import git_origin
 import ssl
 import subprocess
 import tempfile
@@ -21,6 +22,7 @@ CADDY = os.environ.get("CADDY_RELAY", "/srv/caddy")
 BLOCK = bytes(range(256)) * 256
 COUNTS = collections.Counter()
 LOCK = threading.Lock()
+GIT = git_origin.git_files()
 
 
 def count(kind):
@@ -39,7 +41,7 @@ def credentials():
             "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     command("openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
             "-keyout", "key.pem", "-out", "cert.csr", "-subj", "/CN=relay.test")
-    (ROOT / "extensions").write_text("subjectAltName=DNS:relay.test,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth\n"
+    (ROOT / "extensions").write_text("subjectAltName=DNS:relay.test,DNS:git-fixture.test,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth\n"
                                      "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\n")
     command("openssl", "x509", "-req", "-in", "cert.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
             "-out", "cert.pem", "-days", "1", "-extfile", "extensions")
@@ -97,6 +99,18 @@ class Origin(http.server.BaseHTTPRequestHandler):
             size -= chunk
 
     def do_GET(self):
+        if self.path.startswith("/repo.git/"):
+            key = self.path.split("?", 1)[0][len("/repo.git/"):]
+            body = GIT.get(key)
+            if body is None:
+                return self.send_error(404)
+            count("git_" + ("object" if key.startswith("objects/") else "ref"))
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream" if key.startswith("objects/") else "text/plain")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path not in ("/4096", "/1048576", "/8388608"):
             return self.send_error(404)
         count("download")
@@ -174,6 +188,23 @@ def start_capture_origins():
                 data = data[:2] + bytes([data[2] | 128]) + data[3:]
             count(self.server.counter)
             channel.sendto(data, self.client_address)
+
+    class DNS(socketserver.BaseRequestHandler):
+        def handle(self):
+            query, channel = self.request
+            answer = git_origin.dns_reply(query)
+            if answer is not None:
+                if answer[6:8] == b"\0\1":
+                    count("git_dns_a")
+                channel.sendto(answer, self.client_address)
+
+    # These addresses exist only inside the guest with a prohibited default route.
+    for resolver in ("1.1.1.1", "8.8.8.8"):
+        command("ip", "addr", "add", resolver + "/32", "dev", "lo")
+        dns = socketserver.UDPServer((resolver, 53), DNS)
+        threading.Thread(target=dns.serve_forever, daemon=True).start()
+    with open("/etc/hosts", "a") as hosts:
+        hosts.write("\n" + git_origin.ADDRESS + " " + git_origin.NAME + "\n")
 
     for host, prefix, version in (("198.51.100.42", 32, 4), ("2001:db8::42", 128, 6), ("192.0.2.53", 32, 4)):
         command("ip", "-" + str(version), "addr", "add", f"{host}/{prefix}", "dev", "lo")

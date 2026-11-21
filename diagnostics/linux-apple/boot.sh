@@ -11,10 +11,10 @@ esac
 # Boot the signed kernel and verified image with the exact tested Caddy release binary.
 overlay=$(mktemp -d "$RUNNER_TEMP/origin-overlay.XXXXXX")
 mkdir "$overlay/srv"
-cp diagnostics/linux-apple/guest.py "$overlay/srv/guest.py"
+cp diagnostics/linux-apple/{guest,git_origin}.py "$overlay/srv/"
 (cd "$RUNNER_TEMP/final-linux" && shasum -a 256 --check SHA256SUMS)
 install -m 755 "$RUNNER_TEMP/final-linux/caddy-candidate" "$overlay/srv/caddy"
-(cd "$overlay" && printf '%s\n' srv/guest.py srv/caddy | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
+(cd "$overlay" && printf '%s\n' srv/guest.py srv/git_origin.py srv/caddy | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
 cat "$image/guest.gz" "$overlay/fixture.gz" > "$overlay/guest-with-bulk.gz"
 command -v "$cmd" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install qemu
 # libslirp restricted mode drops every guest UDP reply, including forwarded
