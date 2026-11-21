@@ -30,7 +30,8 @@ trap cleanup EXIT
 mkdir -m 700 "$support"
 python3 - "$support/settings.json" <<'PY'
 import base64,json,plistlib,sys,urllib.request
-doc=plistlib.load(urllib.request.urlopen('http://127.0.0.1:18080/caddy.mobileconfig'))
+with urllib.request.urlopen('http://127.0.0.1:18080/caddy.mobileconfig',timeout=10) as response:
+    doc=plistlib.loads(response.read())
 headers=next(i for i in doc['PayloadContent'] if i.get('PayloadType')=='com.apple.relay.managed')['Relays'][0]['AdditionalHTTPHeaderFields']
 secret=base64.b64decode(next(v for k,v in headers.items() if 'authorization' in k.lower()).split()[1]).decode().split(':',1)[1]
 open(sys.argv[1],'w').write(json.dumps({'servers':[dict(name='Isolated Linux relay',domain='relay.test:14201',serverIP='198.51.100.254',username='alice',password=secret,transport='h2',probeTarget='127.0.0.1:18443')]}))

@@ -1,8 +1,8 @@
-name: Signed TUN GUI Connect and Disconnect
+name: Replay actual GUI against the preserved signed application
 'on':
   push:
     branches:
-    - audit/tun-signed-ui-20261121
+    - audit/tun-ui-replay-20261121
 permissions:
   contents: read
   actions: read
@@ -61,10 +61,18 @@ jobs:
       env:
         GUEST_ARCH: amd64
         GUEST_MACHINE: x86_64
+    - name: Wait for the one matching signed package
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: "for i in {1..80}; do\n  n=$(gh api repos/ArcCal/caddy-network-relay/actions/runs/44847652952/artifacts\
+        \ --jq '[.artifacts[]|select(.name==\"signed-TUN-main-0d7d83c\" and .expired==false)]|length')\n\
+        \  if [[ $n == 1 ]]; then exit 0; fi\n  sleep 5\ndone\nexit 1"
     - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
         name: signed-TUN-main-0d7d83c
         path: ${{ runner.temp }}/signed
+        run-id: 44847652952
+        github-token: ${{ github.token }}
     - run: 'mkdir -p clients/network-relay-tun/dist
 
         ditto -x -k "$RUNNER_TEMP/signed/tun-app.zip" clients/network-relay-tun/dist'
@@ -82,38 +90,3 @@ jobs:
         name: ui-network-preflight
         path: ${{ runner.temp }}/evidence
         retention-days: 7
-    needs: package
-  package:
-    runs-on: xcode-27
-    steps:
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        repository: ArcCal/network-relay
-        ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
-        path: clients
-        persist-credentials: false
-    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
-      with:
-        toolchain: stable
-    - name: Build the unmodified release sources and preserve the signed bundle
-      run: 'set -euo pipefail
-
-        cd clients/network-relay-tun
-
-        # The parallel acceptance job uses build-macos.sh with all debug test suites.
-
-        # Here keep the release packaging steps and preserve the signed output for
-        replay.
-
-        sed -e ''/^cargo test /d'' -e ''/^swift test /d'' build-macos.sh > .build-history-bundle.sh
-
-        bash .build-history-bundle.sh
-
-        ditto -c -k --sequesterRsrc --keepParent "dist/Network Relay Tun.app" "$RUNNER_TEMP/tun-app.zip"
-
-        '
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: signed-TUN-main-0d7d83c
-        path: ${{ runner.temp }}/tun-app.zip
-        retention-days: 3
