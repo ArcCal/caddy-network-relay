@@ -76,20 +76,13 @@ with tempfile.TemporaryDirectory() as d:
         return sock
     def boundary(port, ctx):
         return sample(lambda:p.socks(port,1,b'\x01\x7f\0\0\x01',18449)[0],'native-nf-'+os.environ['RELAY_HISTORY_LABEL'])
-    control=sample(lambda:raw('127.0.0.1'),'openssl-port-forward')
-    packet=sample(lambda:raw('192.0.2.2'),'openssl-packet')
-    os.environ.update(RELAY_HISTORY_ADDRESS='127.0.0.1',RELAY_HISTORY_LABEL='port-forward')
-    forwarded=p.case('nf','caddy',14201,'http/1.1',secret,root,None,out)
-    os.environ.update(RELAY_HISTORY_ADDRESS='192.0.2.2',RELAY_HISTORY_LABEL='packet')
-    native=p.case('nf','caddy',14201,'http/1.1',secret,root,None,out)
-
-    for name,(rows,counts) in [('openssl-packet',packet),('nf',native)]:
-        assert counts == dict(attempt_abort=15,reverse_ping=5),(name,counts)
-        assert all(r['complete'] and r['terminal']=='EOF' for r in rows if r['mode']=='C'),name
-        assert all(r['terminal'] in ('ECONNRESET','TLS_UNEXPECTED_EOF') for r in rows if r['mode']=='R'),name
-
-    # A TCP forward can replace a peer reset with an unannounced transport EOF.
-    # Record what NF delivers without requiring that platform-specific outcome.
-    rows,counts=forwarded
-    assert counts==dict(attempt_abort=15,reverse_ping=5),counts
-    assert all(r['complete'] and r['terminal']=='EOF' for r in rows if r['mode']=='C')
+    pem=Path(d)/'ca.pem'
+    pem.write_text(ssl.DER_cert_to_PEM_cert(root.read_bytes()))
+    for host,path in [('127.0.0.1','port-forward'),('192.0.2.2','packet')]:
+        for product,mode in [('rs','http/1.1'),('nf','h2')]:
+            label=f'{product}-{mode.replace("/","_")}-{path}'
+            os.environ.update(RELAY_HISTORY_ADDRESS=host,RELAY_HISTORY_LABEL=label)
+            rows,counts=p.case(product,'caddy',14201,mode,secret,pem if product=='rs' else root,None,out)
+            assert counts==dict(attempt_abort=15,reverse_ping=5),(label,counts)
+            assert all(row['terminal']=='EOF' and row['complete'] for row in rows if row['mode']=='C'),label
+            assert all(row['terminal']=='ECONNRESET' for row in rows if row['mode']=='R'),label

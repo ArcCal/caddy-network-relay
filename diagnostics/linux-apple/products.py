@@ -110,7 +110,7 @@ def case(product,server,relayport,mode,secret,ca,ctx,out):
         stop=root/"stop"; report=root/"report.json"
         if product=="rs":
             settings=root/"client.toml"
-            settings.write_text(f'uri_template = "https://127.0.0.1:{relayport}/.well-known/masque/udp/{{target_host}}/{{target_port}}/"\n'
+            settings.write_text(f'uri_template = "https://{os.environ["RELAY_HISTORY_ADDRESS"]}:{relayport}/.well-known/masque/udp/{{target_host}}/{{target_port}}/"\n'
               f'username = "alice"\npassword = {json.dumps(secret)}\nserver_name = "relay.test"\ntransport = "{mode}"\n'
               f'mode = "socks"\nprobe_target = "127.0.0.1:18553"\n[socks]\nlisten = ["127.0.0.1:{port}"]\n')
             args=[str(bins/product),"--config",str(settings),"--ca-file",str(ca),"--duration","500"]

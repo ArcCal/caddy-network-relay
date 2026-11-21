@@ -1,8 +1,8 @@
-name: Inspect public native TLS close signals
+name: Verify alternatives for forwarded H1 termination
 'on':
   push:
     branches:
-    - audit/native-eof-metadata-20261121
+    - audit/h1-alternatives-20261121
 permissions:
   contents: read
   actions: read
@@ -82,8 +82,7 @@ jobs:
 
         set -eu
 
-        sed -e ''/^cargo build.*network-relay-rs/d'' -e ''/^cp .*network-relay-rs/d''
-        -e ''s/for product in nf tun/for product in nf/'' diagnostics/linux-apple/build-products.sh
+        sed -e ''s/for product in nf tun/for product in nf/'' diagnostics/linux-apple/build-products.sh
         > "$RUNNER_TEMP/build-nf.sh"
 
         sed -i '''' ''s/serverIP: "127.0.0.1"/serverIP: ProcessInfo.processInfo.environment["RELAY_HISTORY_ADDRESS"]!/''
