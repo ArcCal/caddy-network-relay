@@ -27,11 +27,11 @@ jobs:
       working-directory: relay
       run: "git apply ../diagnostics/settings-20261121/bounded-abort.patch\ncargo\
         \ fmt --manifest-path network-relay-rs/Core/Cargo.toml -- --check\ncargo clippy\
-        \ --locked --manifest-path network-relay-rs/Core/Cargo.toml --lib -- -D warnings\n\
-        cargo test --locked --manifest-path network-relay-rs/Core/Cargo.toml -- --test-threads=1\n\
-        if [ \"$(uname)\" = Darwin ]; then\n  for i in 1 2 3 4; do cargo test --locked\
-        \ --manifest-path network-relay-rs/Core/Cargo.toml --lib local_bulk_write_followed_by_abort_reports_reset;\
-        \ done\nfi\n"
+        \ --no-deps --locked --manifest-path network-relay-rs/Core/Cargo.toml --lib\
+        \ -- -D warnings\ncargo test --locked --manifest-path network-relay-rs/Core/Cargo.toml\
+        \ -- --test-threads=1\nif [ \"$(uname)\" = Darwin ]; then\n  for i in 1 2\
+        \ 3 4; do cargo test --locked --manifest-path network-relay-rs/Core/Cargo.toml\
+        \ --lib local_bulk_write_followed_by_abort_reports_reset; done\nfi\n"
     strategy:
       fail-fast: false
       matrix:
