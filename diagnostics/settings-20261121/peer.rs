@@ -104,10 +104,7 @@ impl Xray {
             std::env::var("XRAY_LOG").unwrap_or_else(|_| "warning".into())
         );
         let config = if std::env::var("PEER").as_deref() == Ok("sing-box") {
-            serde_json::json!({
-                "inbounds":[{"type":"vless","listen":"127.0.0.1","listen_port":port,"users":[{"uuid":UUID}],"transport":{"type":"ws","path":WS_PATH}}],
-                "outbounds":[{"type":"direct","tag":"local-echo"}]
-            }).to_string()
+            format!(r#"{{"inbounds":[{{"type":"vless","listen":"127.0.0.1","listen_port":{port},"users":[{{"uuid":"{UUID}"}}],"transport":{{"type":"ws","path":"{WS_PATH}"}}}}],"outbounds":[{{"type":"direct","tag":"local-echo"}}]}}"#)
         } else { config };
         let path = dir.0.join("xray.json");
         std::fs::write(&path, config)?;
