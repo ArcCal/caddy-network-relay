@@ -35,47 +35,32 @@ jobs:
         run-id: 44835734583
         github-token: ${{ github.token }}
     - name: Boot the release Linux kernel with loopback-only port forwards
-      run: 'set -eu
-
-        mkdir -p "$RUNNER_TEMP/final-linux"
-
-        cp "$RUNNER_TEMP/exact-caddy/caddy" "$RUNNER_TEMP/final-linux/caddy-candidate"
-
-        (cd "$RUNNER_TEMP/final-linux" && shasum -a 256 caddy-candidate > SHA256SUMS)
-
-        python3 - <<''PATCH''
-
-        from pathlib import Path
-
-        p=Path(''diagnostics/linux-apple/guest.py'')
-
-        s=p.read_text()
-
-        anchor=''    jobs = start_servers(credentials())''
-
-        assert s.count(anchor)==1
-
-        s=s.replace(anchor,anchor+''\n''+ ''\n''.join(''    ''+line for line in Path(''diagnostics/linux-apple/h1-origin.py'').read_text().splitlines()))
-
-        p.write_text(s)
-
-        PATCH
-
-        bash diagnostics/linux-apple/boot.sh "$GUEST_ARCH" "$RUNNER_TEMP/image"
-
-        python3 - <<''CHECK''
-
-        from pathlib import Path
-
-        import hashlib, json, os
-
-        t=Path(os.environ[''RUNNER_TEMP''])
-
-        assert hashlib.sha256((t/''exact-caddy/caddy'').read_bytes()).hexdigest()==json.loads((t/''linux.json'').read_text())[''caddy'']
-
-        CHECK
-
-        '
+      run: "set -eu\nmkdir -p \"$RUNNER_TEMP/final-linux\"\ncp \"$RUNNER_TEMP/exact-caddy/caddy\"\
+        \ \"$RUNNER_TEMP/final-linux/caddy-candidate\"\n(cd \"$RUNNER_TEMP/final-linux\"\
+        \ && shasum -a 256 caddy-candidate > SHA256SUMS)\npython3 - <<'PATCH'\nfrom\
+        \ pathlib import Path\np=Path('diagnostics/linux-apple/guest.py')\ns=p.read_text()\n\
+        anchor='    jobs = start_servers(credentials())'\nassert s.count(anchor)==1\n\
+        s=s.replace(anchor,anchor+'\\n'+ '\\n'.join('    '+line for line in Path('diagnostics/linux-apple/h1-origin.py').read_text().splitlines()))\n\
+        p.write_text(s)\nPATCH\npython3 - <<'NET'\nfrom pathlib import Path\np=Path('diagnostics/linux-apple/boot.sh')\n\
+        s=p.read_text().replace('-netdev \"$net\"','-netdev socket,id=wire,udp=127.0.0.1:11080,localaddr=127.0.0.1:11081\
+        \ -device virtio-net-pci,netdev=wire,mac=52:54:00:11:22:34 -netdev \"$net\"\
+        ')\np.write_text(s)\np=Path('diagnostics/linux-apple/guest.py')\ns=p.read_text()\n\
+        a='    if BIND == \"0.0.0.0\":'\ns=s.replace(a, a+'\\n        links=json.loads(command(\"\
+        ip\",\"-j\",\"link\")); wire=next(i[\"ifname\"] for i in links if i.get(\"\
+        address\")==\"52:54:00:11:22:34\"); mgmt=next(i[\"ifname\"] for i in links\
+        \ if i[\"ifname\"] not in (wire,\"lo\")); command(\"ip\",\"addr\",\"flush\"\
+        ,\"dev\",wire); command(\"ip\",\"link\",\"set\",mgmt,\"up\"); command(\"ip\"\
+        ,\"addr\",\"replace\",\"10.0.2.15/24\",\"dev\",mgmt)')\na='    identity =\
+        \ environment_record()'\nassert s.count(a)==1\np.write_text(s.replace(a,'''\
+        \    wire = next(link[\"ifname\"] for link in json.loads(command(\"ip\",\"\
+        -j\",\"link\")) if link.get(\"address\")==\"52:54:00:11:22:34\")\n    command(\"\
+        ip\",\"link\",\"set\",wire,\"up\")\n    command(\"ip\",\"addr\",\"add\",\"\
+        192.0.2.2/30\",\"dev\",wire)\n'''+a))\nNET\nsudo \"$(command -v python3)\"\
+        \ -u diagnostics/linux-apple/h1-link.py > \"$RUNNER_TEMP/evidence-link.log\"\
+        \ 2>&1 &\nbash diagnostics/linux-apple/boot.sh \"$GUEST_ARCH\" \"$RUNNER_TEMP/image\"\
+        \npython3 - <<'CHECK'\nfrom pathlib import Path\nimport hashlib, json, os\n\
+        t=Path(os.environ['RUNNER_TEMP'])\nassert hashlib.sha256((t/'exact-caddy/caddy').read_bytes()).hexdigest()==json.loads((t/'linux.json').read_text())['caddy']\n\
+        CHECK\n"
       env:
         GUEST_ARCH: ${{ matrix.arch }}
         GUEST_MACHINE: ${{ matrix.machine }}
@@ -95,7 +80,9 @@ jobs:
         -e ''s/for product in nf tun/for product in nf/'' diagnostics/linux-apple/build-products.sh
         > "$RUNNER_TEMP/build-nf.sh"
 
-        bash "$RUNNER_TEMP/build-nf.sh" "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
+        sed -i '''' ''s/serverIP: "127.0.0.1"/serverIP: "192.0.2.2"/'' native-probe/diagnostics/RelayProbe.swift
+
+        bash "$RUNNER_TEMP/build-nf.sh"  "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
         "$RUNNER_TEMP/products"
 
         '
