@@ -207,7 +207,7 @@ def start_capture_origins():
             answer = git_origin.dns_reply(query)
             if answer is not None:
                 if answer[6:8] == b"\0\1":
-                    count("git_dns_a")
+                    count("git_dns_a" if self.server.address_family == socket.AF_INET else "git_dns6_a")
                 channel.sendto(answer, self.client_address)
 
     # These addresses exist only inside the guest with a prohibited default route.
@@ -215,6 +215,12 @@ def start_capture_origins():
         command("ip", "addr", "add", resolver + "/32", "dev", "lo")
         dns = socketserver.UDPServer((resolver, 53), DNS)
         threading.Thread(target=dns.serve_forever, daemon=True).start()
+    # One reachable IPv6 resolver and one reachable host without a DNS service.
+    # Both stay inside the guest; the public network is unreachable.
+    command("ip", "-6", "addr", "add", "2001:db8::53/128", "dev", "lo")
+    v6dns = type("IPv6DNS", (socketserver.UDPServer,), {"address_family": socket.AF_INET6})
+    dns6 = v6dns(("2001:db8::53", 53), DNS)
+    threading.Thread(target=dns6.serve_forever, daemon=True).start()
     with open("/etc/hosts", "a") as hosts:
         hosts.write("\n" + git_origin.ADDRESS + " " + git_origin.NAME + " relay.test\n")
 

@@ -128,6 +128,7 @@ python3 - "$RUNNER_TEMP/plain-counts.json" <<'CHECK'
 import json,sys
 d=json.load(open(sys.argv[1]))
 assert all(d.get("browser_" + mode, 0) >= 1 for mode in ("transparent", "socks")), d
+assert d.get("git_dns6_a", 0) >= 2, d
 assert d.get("git_dns_a", 0) > 0, d
 assert d.get("git_object", 0) >= 18, d
 print("Git DNS answers and object reads:", d["git_dns_a"], d["git_object"])
