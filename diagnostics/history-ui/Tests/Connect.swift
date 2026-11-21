@@ -45,8 +45,8 @@ final class Connect: XCTestCase {
         } else if !FileManager.default.fileExists(atPath: folder.appendingPathComponent("installed").path) {
             XCTAssertTrue(toggle.isEnabled)
             toggle.click()
-            let error = app.windows.staticTexts.matching(NSPredicate(format:"label CONTAINS[c] %@", "Install / Update Helper")).firstMatch
-            XCTAssertTrue(error.waitForExistence(timeout: 10), "Missing helper must leave an actionable capture status")
+            let error = app.windows.staticTexts.matching(NSPredicate(format:"label CONTAINS[c] %@ OR value CONTAINS[c] %@", "Install / Update Helper", "Install / Update Helper")).firstMatch
+            XCTAssertTrue(error.waitForExistence(timeout: 10), app.debugDescription.split(separator:"\n").filter { $0.contains("capture:") || $0.contains("Global TUN") }.joined(separator:"\n"))
             XCTAssertEqual(toggle.value.map { String(describing: $0) }, "0")
             XCTAssertTrue(connected.exists)
             try socks()

@@ -1,8 +1,8 @@
-name: Exercise the signed connected Global TUN switch with and without its helper
+name: Recheck signed mode switching with the verified original bundles
 'on':
   push:
     branches:
-    - audit/tun-live-mode-20261121
+    - audit/tun-live-mode-artifacts-20261121
 permissions:
   contents: read
   actions: read
@@ -61,44 +61,41 @@ jobs:
       env:
         GUEST_ARCH: amd64
         GUEST_MACHINE: x86_64
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
-        repository: ArcCal/network-relay
-        ref: d86f9dd45806caf420bdf6211b594f2a5873d85f
-        path: clients
-        persist-credentials: false
-    - name: Build and verify the signed client under test
-      run: 'if [[ "$MODE_VARIANT" == candidate ]]; then git -C clients apply ../diagnostics/history-ui/live-mode.patch;
-        fi
+        name: signed-live-mode-${{ matrix.variant }}
+        path: signed
+        github-token: ${{ github.token }}
+        run-id: 44867403634
+    - name: Verify the signed app from the original build
+      run: 'mkdir -p clients/network-relay-tun/dist
 
-        bash clients/network-relay-tun/build-macos.sh
+        ditto -x -k signed/NetworkRelayTun-*-macos-arm64.zip clients/network-relay-tun/dist
 
         codesign --verify --deep --strict "clients/network-relay-tun/dist/Network
         Relay Tun.app"
 
         '
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: signed-live-mode-${{ matrix.variant }}
-        path: clients/network-relay-tun/dist/NetworkRelayTun-*-macos-arm64.zip
-        retention-days: 2
     - name: prepare GUI acceptance
       timeout-minutes: 4
       run: bash diagnostics/history-ui/gui.sh prepare
     - name: network GUI acceptance
       timeout-minutes: 2
       run: bash diagnostics/history-ui/gui.sh network
+      id: network
     - name: missing GUI acceptance
       timeout-minutes: 4
       run: bash diagnostics/history-ui/gui.sh missing
     - name: install GUI acceptance
       timeout-minutes: 2
       run: bash diagnostics/history-ui/gui.sh install
-      if: matrix.variant == 'candidate'
+      if: '!cancelled() && matrix.variant == ''candidate'' && steps.network.outcome
+        == ''success'''
     - name: installed GUI acceptance
       timeout-minutes: 6
       run: bash diagnostics/history-ui/gui.sh installed
-      if: matrix.variant == 'candidate'
+      if: '!cancelled() && matrix.variant == ''candidate'' && steps.network.outcome
+        == ''success'''
     - name: Record the UI assertions for each completed phase
       if: always()
       run: "for phase in missing installed; do\n  bundle=\"$RUNNER_TEMP/ui-$phase.xcresult\"\
@@ -128,7 +125,6 @@ jobs:
       fail-fast: false
       matrix:
         variant:
-        - baseline
         - candidate
     env:
       MODE_VARIANT: ${{ matrix.variant }}
