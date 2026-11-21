@@ -1,8 +1,8 @@
-name: Trace RS close delivery and origin completion on the x86 Linux fixture
+name: Verify exact Mac abort fix with the two Linux release server architectures
 'on':
   push:
     branches:
-    - audit/rs-close-boundary-observation-20261121
+    - audit/rs-bounded-linux-final-20261121
 permissions:
   contents: read
   actions: read
@@ -67,7 +67,7 @@ jobs:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: ArcCal/network-relay
-        ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
+        ref: 7bf095c481ca527712798b63fb3b7b1e58992f1d
         path: clients
         persist-credentials: false
     - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
@@ -76,7 +76,7 @@ jobs:
     - name: Build production clients and the native controller entry points
       run: 'set -eu
 
-        python3 diagnostics/linux-apple/trace-rs.py
+        git -C clients apply ../diagnostics/linux-apple/bounded-abort.patch
 
         mkdir -p "$RUNNER_TEMP/products"
 
@@ -127,3 +127,6 @@ jobs:
         - arch: amd64
           runner: ubuntu-24.04
           machine: x86_64
+        - arch: arm64
+          runner: ubuntu-24.04-arm
+          machine: aarch64
