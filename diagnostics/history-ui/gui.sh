@@ -10,7 +10,7 @@ cert="$RUNNER_TEMP/guest-ca.der"
 pem="$RUNNER_TEMP/guest-ca.pem"
 run_ui() {
     cd "$root/diagnostics/history-ui"
-    xcodebuild -quiet -project RelayBoundaryUI.xcodeproj -scheme Boundary -destination 'platform=macOS,arch=arm64' -derivedDataPath "$RUNNER_TEMP/ui-derived" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 120 -resultBundlePath "$RUNNER_TEMP/ui-$1.xcresult" test
+    xcodebuild -quiet -project RelayBoundaryUI.xcodeproj -scheme Boundary -destination 'platform=macOS,arch=arm64' -derivedDataPath "$RUNNER_TEMP/ui-derived" -parallel-testing-enabled NO -test-timeouts-enabled YES -default-test-execution-time-allowance 350 -resultBundlePath "$RUNNER_TEMP/ui-$1.xcresult" test
 }
 case "$phase" in
 prepare)
@@ -87,11 +87,30 @@ touch "$stage/installed"
 
 ;;
 installed)
+(
+    for cycle in 0 1; do
+        for ((n=0; n<1500; n++)); do [[ ! -f "$stage/active-$cycle" ]] || break; sleep 0.1; done
+        [[ -f "$stage/active-$cycle" ]] || exit 1
+        for ip in 198.51.100.42 1.1.1.1 8.8.8.8; do /sbin/route -n get "$ip" | awk '/interface:/{print $0}'; done
+        /usr/sbin/scutil --dns | awk '/nameserver|order|flags/ {print}' | head -65
+        for check in ordinary clone browser; do
+            [[ "$check" != browser || "$cycle" == 0 ]] || continue
+            echo "Cycle $cycle: $check"
+            /usr/bin/python3 -u "$stage/$check.py" || touch "$stage/check-failed"
+        done
+        curl --max-time 5 --noproxy '*' -fsS http://127.0.0.1:18080/counts || true
+        touch "$stage/done-$cycle"
+    done
+) &
+probe_pid=$!
 rc=0
 run_ui installed || rc=$?
+if [[ "$rc" != 0 ]]; then kill "$probe_pid" 2>/dev/null || true; fi
+wait "$probe_pid" || true
 [[ ! -f "$stage/browser-results" ]] || cat "$stage/browser-results"
 [[ ! -f "$stage/clone-results" ]] || cat "$stage/clone-results"
 [[ "$rc" == 0 ]] || exit "$rc"
+[[ ! -e "$stage/check-failed" ]] || exit 1
 curl --noproxy '*' -fsS http://127.0.0.1:18080/counts > "$RUNNER_TEMP/plain-counts.json"
 python3 - "$RUNNER_TEMP/plain-counts.json" <<'CHECK'
 import json,sys
@@ -109,7 +128,10 @@ test "$(cat "$stage/route.before")" = "$(/sbin/route -n get 198.51.100.42 | awk 
 ;;
 cleanup)
 fp=$(openssl x509 -in "$pem" -fingerprint -sha256 -noout | cut -d= -f2 | tr -d :)
-    if [[ -e "$stage/helper" ]]; then sudo bash "$app/Contents/Resources/uninstall-helper.sh"; fi
+    if [[ -e "$stage/helper" ]]; then
+        /usr/bin/pkill -x NetworkRelayTun 2>/dev/null || true
+        printf '%s\n' '{"operation":"recover"}' | "$app/Contents/Helpers/network-relay-tun-host" control || true
+        sudo bash "$app/Contents/Resources/uninstall-helper.sh"; fi
     if [[ -e "$stage/trusted" ]]; then
         # This disposable runner used a fixture-specific system trust entry.
         # Run its noninteractive cleanup with a deadline.

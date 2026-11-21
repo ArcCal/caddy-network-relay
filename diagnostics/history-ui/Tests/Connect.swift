@@ -24,7 +24,7 @@ final class Connect: XCTestCase {
         try XCTUnwrap(output("/sbin/route", ["-n","get","198.51.100.42"]).split(separator:"\n")
             .first(where: { $0.contains("interface:") })).trimmingCharacters(in: .whitespaces)
     }
-    @MainActor func testSwitchWhileConnected() throws {
+    @MainActor func testSwitchWhileConnected() async throws {
         continueAfterFailure = false
         let app = XCUIApplication(url: folder.appendingPathComponent("Network Relay Tun.app"))
         app.launch()
@@ -61,15 +61,14 @@ final class Connect: XCTestCase {
                 XCTAssertNotEqual(try route(), before)
                 XCTAssertTrue(try route().contains("utun"))
                 try socks()
-                if cycle == 0 {
-                    let browser = folder.appendingPathComponent("browser.py").path
-                    XCTAssertEqual(try output("/usr/bin/python3", [browser]), "Chrome verified both paths\n")
+                let marker = folder.appendingPathComponent("active-\(cycle)")
+                try Data().write(to: marker)
+                let done = folder.appendingPathComponent("done-\(cycle)")
+                let deadline = Date().addingTimeInterval(120)
+                while !FileManager.default.fileExists(atPath: done.path), Date() < deadline {
+                    try await Task.sleep(nanoseconds: 100_000_000)
                 }
-                let clone = folder.appendingPathComponent("clone.py").path
-                let results = try output("/usr/bin/python3", [clone])
-                XCTAssertEqual(results.components(separatedBy: "clone verified").count - 1, 3, results)
-                let script = folder.appendingPathComponent("ordinary.py").path
-                XCTAssertEqual(try output("/usr/bin/python3", [script]), "4 plain sockets echoed\n")
+                XCTAssertTrue(FileManager.default.fileExists(atPath: done.path))
                 toggle.click()
                 XCTAssertTrue(app.windows.staticTexts["System capture: Off"].firstMatch.waitForExistence(timeout: 30))
                 XCTAssertTrue(connected.waitForExistence(timeout: 50))
