@@ -15,28 +15,20 @@ jobs:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         repository: ArcCal/network-relay
-        ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
+        ref: 7bf095c481ca527712798b63fb3b7b1e58992f1d
         path: relay
         persist-credentials: false
     - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
       with:
         toolchain: stable
-    - name: Apply exact runtime and regression-test changes
-      run: 'cd relay
-
-        git apply ../diagnostics/settings-20261121/candidate.patch
-
-        cp ../diagnostics/settings-20261121/history_nov21.rs network-relay-rs/Core/tests/
-
-        echo "CARGO_TARGET_DIR=$RUNNER_TEMP/relay-target" >> "$GITHUB_ENV"
-
-        '
+    - name: Select an isolated build output directory
+      run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/relay-target" >> "$GITHUB_ENV"
     - name: Test runtime candidate, stalled reader budget and client core
       working-directory: relay
       run: "git apply ../diagnostics/settings-20261121/bounded-abort.patch\ncargo\
         \ fmt --manifest-path network-relay-rs/Core/Cargo.toml -- --check\ncargo clippy\
         \ --locked --manifest-path network-relay-rs/Core/Cargo.toml --lib -- -D warnings\n\
-        cargo test --locked --manifest-path network-relay-rs/Core/Cargo.toml --lib\n\
+        cargo test --locked --manifest-path network-relay-rs/Core/Cargo.toml -- --test-threads=1\n\
         if [ \"$(uname)\" = Darwin ]; then\n  for i in 1 2 3 4; do cargo test --locked\
         \ --manifest-path network-relay-rs/Core/Cargo.toml --lib local_bulk_write_followed_by_abort_reports_reset;\
         \ done\nfi\n"
