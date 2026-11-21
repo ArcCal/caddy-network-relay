@@ -83,9 +83,9 @@ with tempfile.TemporaryDirectory() as d:
                     except ConnectionResetError: terminal='RESET'
                     except TimeoutError:
                         terminal='TIMEOUT'
-                        peer=str(ch.getsockname()[1])
-                        lines=[l for l in (root/'rslog').read_text().splitlines() if 'TRACE abort' in l and ':'+peer+')' in l]
-                        print('TIMEOUT',mode,peer,n,'RS issued local abort',bool(lines),flush=True)
+                        failed_port=str(ch.getsockname()[1])
+                        lines=[l for l in (root/'rslog').read_text().splitlines() if 'TRACE abort' in l and ':'+failed_port+')' in l]
+                        print('TIMEOUT',mode,failed_port,n,'RS issued local abort',bool(lines),flush=True)
                     results[(mode,terminal)]+=1
                     if mode==b'C': assert n==len(blob) and digest.digest()==expected and terminal=='EOF'
             print('Target completed writes',reports,'SOCKS results',results,flush=True)
