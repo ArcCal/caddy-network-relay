@@ -52,7 +52,10 @@ final class Connect: XCTestCase {
             evidence.append("Local DoT \(trial.mode) socket \(id) matching terminal records: \(terminal.count)")
             evidence.append(contentsOf: terminal)
         }
-        try evidence.joined(separator: "\n").write(to: folder.appendingPathComponent("close-evidence-\(cycle)"), atomically: true, encoding: .utf8)
+        let attachment = XCTAttachment(string: evidence.joined(separator: "\n"))
+        attachment.name = "DoT-closures-\(cycle)"
+        attachment.lifetime = .keepAlways
+        add(attachment)
         page("Settings", in: app)
     }
     @MainActor func testSwitchWhileConnected() throws {

@@ -141,7 +141,24 @@ installed)
 probe_pid=$!
 rc=0
 run_ui installed || rc=$?
-for report in "$stage"/close-evidence-*; do if [[ -f "$report" ]]; then cat "$report"; echo; fi; done
+if [[ -d "$RUNNER_TEMP/ui-installed.xcresult" ]]; then
+    dest="$RUNNER_TEMP/closure-attachments"
+    xcrun xcresulttool export attachments --path "$RUNNER_TEMP/ui-installed.xcresult" --output-path "$dest"
+    python3 - "$dest" "$rc" <<'REPORT'
+from pathlib import Path
+import sys
+reports = []
+for p in Path(sys.argv[1]).rglob('*'):
+    if p.is_file() and p.stat().st_size < 50000:
+        blob = p.read_bytes()
+        if blob.startswith(b'Local DoT '):
+            reports.append(blob.decode())
+for report in reports:
+    print(report)
+if sys.argv[2] == '0':
+    assert len(reports) == 2, 'Both capture cycles must have an XCTest attachment'
+REPORT
+fi
 if [[ "$rc" != 0 ]]; then kill "$probe_pid" 2>/dev/null || true; fi
 wait "$probe_pid" || true
 cat "$stage/public-bridge.log"
