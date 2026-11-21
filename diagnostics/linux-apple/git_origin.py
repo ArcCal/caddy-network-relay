@@ -39,7 +39,7 @@ def dns_reply(query):
     if i + 5 > len(query) or query[i] != 0:
         return None
     qtype, qclass = struct.unpack("!HH", query[i+1:i+5])
-    known = b".".join(labels) == NAME.encode()
+    known = b".".join(labels) in {NAME.encode(), b"relay.test"}
     answer = known and qclass == 1 and qtype == 1
     header = query[:2] + struct.pack("!5H", 0x8180 if known else 0x8183, 1, int(answer), 0, 0)
     rdata = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 1, 4) + socket.inet_aton(ADDRESS)

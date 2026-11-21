@@ -52,7 +52,7 @@ final class Connect: XCTestCase {
             try socks()
             print("PASS missing helper preserves connected SOCKS")
         } else {
-            for _ in 0..<2 {
+            for cycle in 0..<2 {
                 XCTAssertTrue(toggle.isEnabled)
                 toggle.click()
                 XCTAssertTrue(app.windows.staticTexts["System capture: Capturing IPv4 and IPv6"].firstMatch.waitForExistence(timeout: 50))
@@ -61,6 +61,10 @@ final class Connect: XCTestCase {
                 XCTAssertNotEqual(try route(), before)
                 XCTAssertTrue(try route().contains("utun"))
                 try socks()
+                if cycle == 0 {
+                    let browser = folder.appendingPathComponent("browser.py").path
+                    XCTAssertEqual(try output("/usr/bin/python3", [browser]), "Chrome verified both paths\n")
+                }
                 let clone = folder.appendingPathComponent("clone.py").path
                 let results = try output("/usr/bin/python3", [clone])
                 XCTAssertEqual(results.components(separatedBy: "clone verified").count - 1, 3, results)

@@ -21,7 +21,11 @@ test ! -e "$support"
 test ! -e '/Library/Application Support/NetworkRelayTun'
 ditto "clients/network-relay-tun/dist/Network Relay Tun.app" "$app"
 codesign --verify --deep --strict "$app"
-cp diagnostics/history-ui/{ordinary,clone}.py "$stage/"
+cp diagnostics/history-ui/{ordinary,clone,browser}.py "$stage/"
+if [[ ! -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
+    HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask google-chrome
+fi
+codesign -v -R='identifier "com.google.Chrome" and anchor apple generic and certificate leaf[subject.OU] = EQHXZ8M8AV' "/Applications/Google Chrome.app"
 mkdir -m 700 "$support"
 python3 - "$support/settings.json" <<'PY'
 import base64,json,plistlib,sys,urllib.request
@@ -85,12 +89,14 @@ touch "$stage/installed"
 installed)
 rc=0
 run_ui installed || rc=$?
+[[ ! -f "$stage/browser-results" ]] || cat "$stage/browser-results"
 [[ ! -f "$stage/clone-results" ]] || cat "$stage/clone-results"
 [[ "$rc" == 0 ]] || exit "$rc"
 curl --noproxy '*' -fsS http://127.0.0.1:18080/counts > "$RUNNER_TEMP/plain-counts.json"
 python3 - "$RUNNER_TEMP/plain-counts.json" <<'CHECK'
 import json,sys
 d=json.load(open(sys.argv[1]))
+assert all(d.get("browser_" + mode, 0) >= 1 for mode in ("transparent", "socks")), d
 assert d.get("git_dns_a", 0) > 0, d
 assert d.get("git_object", 0) >= 18, d
 print("Git DNS answers and object reads:", d["git_dns_a"], d["git_object"])

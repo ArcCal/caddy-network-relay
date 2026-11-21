@@ -99,6 +99,18 @@ class Origin(http.server.BaseHTTPRequestHandler):
             size -= chunk
 
     def do_GET(self):
+        if self.path.startswith("/browser/"):
+            mode = self.path.removeprefix("/browser/")
+            if mode not in {"transparent", "socks"}:
+                return self.send_error(404)
+            body = ("<html><title>Verified Relay " + mode + "</title></html>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            count("browser_" + mode)
+            return
         if self.path.startswith("/repo.git/"):
             key = self.path.split("?", 1)[0][len("/repo.git/"):]
             body = GIT.get(key)
@@ -204,7 +216,7 @@ def start_capture_origins():
         dns = socketserver.UDPServer((resolver, 53), DNS)
         threading.Thread(target=dns.serve_forever, daemon=True).start()
     with open("/etc/hosts", "a") as hosts:
-        hosts.write("\n" + git_origin.ADDRESS + " " + git_origin.NAME + "\n")
+        hosts.write("\n" + git_origin.ADDRESS + " " + git_origin.NAME + " relay.test\n")
 
     for host, prefix, version in (("198.51.100.42", 32, 4), ("2001:db8::42", 128, 6), ("192.0.2.53", 32, 4)):
         command("ip", "-" + str(version), "addr", "add", f"{host}/{prefix}", "dev", "lo")
