@@ -1,4 +1,5 @@
 """Forward only two fixed HTTPS origins from the isolated guest to the runner uplink."""
+from pathlib import Path
 import select
 import socket
 import subprocess
@@ -33,12 +34,19 @@ def copy(client, target):
 
 def listen(port, host):
     target = socket.getaddrinfo(host, 443, socket.AF_INET, socket.SOCK_STREAM)[0][4]
+    with Path("/tmp/relay-history-app/bridge-targets").open("a") as targets:
+        print(host, target[0], file=targets)
     sock = socket.socket()
     sock.bind(("127.0.0.1", port))
     sock.listen()
+    def forward(client):
+        try:
+            copy(client, target)
+        except OSError as exc:
+            print("Bridge", host, type(exc).__name__, str(exc), flush=True)
     def accept():
         while True:
-            threading.Thread(target=copy, args=(sock.accept()[0], target), daemon=True).start()
+            threading.Thread(target=forward, args=(sock.accept()[0],), daemon=True).start()
     threading.Thread(target=accept, daemon=True).start()
 
 

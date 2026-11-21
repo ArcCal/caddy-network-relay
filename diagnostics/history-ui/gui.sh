@@ -57,6 +57,15 @@ python3 -u diagnostics/history-ui/public-bridge.py > "$stage/public-bridge.log" 
 echo $! > "$stage/public-bridge.pid"
 for ((i=0; i<100; i++)); do grep -q "Both fixed" "$stage/public-bridge.log" && break; sleep .1; done
 grep -q "Both fixed" "$stage/public-bridge.log"
+gw=$(/sbin/route -n get default | awk '/gateway:/ {print $2}')
+while read -r site ip; do
+    sudo /sbin/route -n add -host "$ip" "$gw"
+    /sbin/route -n get "$ip" | grep 'interface:'
+done < "$stage/bridge-targets"
+for spec in www.google.com:18481 github.com:18482; do
+    site=${spec%:*}
+    curl --noproxy '*' --max-time 12 -sS -o /dev/null --connect-to "$site:443:127.0.0.1:${spec#*:}" "https://$site/"
+done
 # Verify external HTTPS before trusting an outcome through either proxy path.
 /usr/bin/python3 "$stage/public.py" --baseline
 # The product rejects loopback as a global relay endpoint. Exercise the
@@ -105,6 +114,14 @@ installed)
         /sbin/route -n get 198.51.100.42 | grep "interface: utun"
         for ip in 198.51.100.42 1.1.1.1 8.8.8.8; do /sbin/route -n get "$ip" | awk '/interface:/{print $0}'; done
         /usr/sbin/scutil --dns | awk '/nameserver|order|flags/ {print}' | head -65
+        while read -r site ip; do
+            echo "Public bridge uplink for $site"
+            /sbin/route -n get "$ip" | grep 'interface:'
+        done < "$stage/bridge-targets"
+        for spec in www.google.com:18481 github.com:18482; do
+            site=${spec%:*}
+            curl --noproxy '*' --max-time 12 -sS -o /dev/null --connect-to "$site:443:127.0.0.1:${spec#*:}" "https://$site/" || echo "Uplink TLS control failed for $site"
+        done
         for check in ordinary clone browser public; do
             [[ "$cycle" == 0 || "$check" == ordinary || "$check" == clone ]] || continue
             echo "Cycle $cycle: $check"
@@ -125,6 +142,7 @@ rc=0
 run_ui installed || rc=$?
 if [[ "$rc" != 0 ]]; then kill "$probe_pid" 2>/dev/null || true; fi
 wait "$probe_pid" || true
+cat "$stage/public-bridge.log"
 [[ ! -f "$stage/browser-results" ]] || cat "$stage/browser-results"
 [[ ! -f "$stage/clone-results" ]] || cat "$stage/clone-results"
 [[ "$rc" == 0 ]] || exit "$rc"
@@ -163,6 +181,10 @@ except subprocess.TimeoutExpired:
  print("Timed out removing fixture trust settings on disposable runner.")
 CLEAN
         sudo security delete-certificate -Z "$fp" /Library/Keychains/System.keychain </dev/null || true
+    fi
+    if [[ -f "$stage/bridge-targets" ]]; then
+        gw=$(/sbin/route -n get default | awk '/gateway:/ {print $2}')
+        while read -r site ip; do sudo /sbin/route -n delete -host "$ip" "$gw" || true; done < "$stage/bridge-targets"
     fi
     if [[ -f "$stage/public-bridge.pid" ]]; then kill "$(cat "$stage/public-bridge.pid")" || true; fi
     if [[ -f "$stage/forward.pid" ]]; then kill "$(cat "$stage/forward.pid")" || true; fi
