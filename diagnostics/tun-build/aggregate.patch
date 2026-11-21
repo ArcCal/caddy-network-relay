@@ -1,0 +1,151 @@
+diff --git a/README.md b/README.md
+index 912ffb9..9cd0b86 100644
+--- a/README.md
++++ b/README.md
+@@ -947,7 +947,7 @@ its results.
+ |---|---|---|---|
+ | `build-linux-servers-on-linux.sh` | Debian 13 or Ubuntu 26.04, x64 or arm64 | `network-relay`, `network-relay-cf-masque` and `caddy-network-relay` (with Cloudflare DNS) for Linux x64 and arm64 | `./relay-servers-*` |
+ | `build-linux-clients-on-linux.sh` | Debian 13 or Ubuntu 26.04, x64 or arm64 | the headless Network Relay RS client for Linux x64 and arm64 | `./network-relay-linux-clients-*` |
+-| `build-macos-gui-clients-on-macos.sh` | Apple silicon Mac, macOS 27+ and Xcode 27+ | the Network Relay NF and RS apps | `~/Desktop/Network-Relay-Builds/network-relay-macos-gui-*` |
++| `build-macos-gui-clients-on-macos.sh` | Apple silicon Mac, macOS 27+ and Xcode 27+ | the Network Relay NF, RS and Tun apps and their ZIP archives | `~/Desktop/Network-Relay-Builds/network-relay-macos-gui-*` |
+ | `build-all-targets-on-macos.sh` | Apple silicon Mac, macOS 27+ and Xcode 27+ | everything above, plus `network-relay-vless` for Linux x64/arm64 and the RS client for macOS arm64 | `~/Desktop/YYYYMMDD-HHMMSS` (local time) |
+ | [`tools/build-all-macos.sh`](docs/build-all-macos.md) | Apple silicon Mac | every ArcCal VPN application from five repositories | `~/Projects/vpn-build-*` |
+ | `network-relay-nf/build-macos.sh`, `network-relay-rs/build-macos.sh` | Apple silicon Mac | one app from fresh main sources | `dist/` in the invoking app's folder |
+diff --git a/build-all-targets-on-macos.sh b/build-all-targets-on-macos.sh
+index 0716c68..3406e3b 100755
+--- a/build-all-targets-on-macos.sh
++++ b/build-all-targets-on-macos.sh
+@@ -149,7 +149,7 @@ usage() {
+ Usage: bash build-all-targets-on-macos.sh [--repo DIR] [--output DIR] [--jobs N]
+ 
+ Build network-relay, network-relay-cf-masque, network-relay-vless and Caddy
+-Network Relay for Linux x64 and arm64, plus the NF and RS macOS applications.
++Network Relay for Linux x64 and arm64, plus the NF, RS and Tun macOS applications.
+ Also build the Rust RS command-line client for Linux x64, Linux arm64 and
+ macOS arm64.
+ The Caddy executable includes the Cloudflare DNS plugin.
+diff --git a/build-macos-gui-clients-on-macos.sh b/build-macos-gui-clients-on-macos.sh
+index 3c49542..4ad8365 100755
+--- a/build-macos-gui-clients-on-macos.sh
++++ b/build-macos-gui-clients-on-macos.sh
+@@ -1,5 +1,5 @@
+ #!/usr/bin/env bash
+-# Download current source, then build the two independent Network Relay GUI apps.
++# Download current source, then build the independent Network Relay GUI apps.
+ # All A && B || die guards intentionally reject failure of either predicate.
+ # shellcheck disable=SC2015
+ set -euo pipefail
+@@ -178,7 +178,7 @@ rg_usage() {
+     cat <<'HELP'
+ Usage: bash build-macos-gui-clients-on-macos.sh [--repo DIR] [--output DIR] [--jobs N]
+ 
+-Build Network Relay NF and Network Relay RS, including their original tests,
++Build Network Relay NF, RS and Tun, including their original tests,
+ ad-hoc signatures and ZIPs. Requires an Apple silicon Mac, macOS 27+, the
+ macOS 27+ Xcode SDK with XCTest, Rust/rustup, and Git access to the repository.
+ No Linux servers, Go, Zig or unrelated applications are built.
+@@ -474,6 +474,7 @@ rg_require
+ rg_build_app() { cd -- "$repo"; "$BASH" "$repo/$1/build-macos.sh"; }
+ rg_step macos-network-relay-nf rg_build_app network-relay-nf
+ rg_step macos-network-relay-rs rg_build_app network-relay-rs
++rg_step macos-network-relay-tun rg_build_app network-relay-tun
+ 
+ rg_replacement() {
+     awk -F '\t' -v module="$2" -v replacement="$3" '
+@@ -560,8 +561,10 @@ rg_mac_cli() {
+ }
+ rg_step collect-nf-app rg_app "$repo/network-relay-nf/dist/Network Relay NF.app" network-relay-nf-macos-arm64.app
+ rg_step collect-rs-app rg_app "$repo/network-relay-rs/dist/Network Relay RS.app" network-relay-rs-macos-arm64.app
++rg_step collect-tun-app rg_app "$repo/network-relay-tun/dist/Network Relay Tun.app" network-relay-tun-macos-arm64.app
+ rg_step collect-nf-zip rg_zip "$repo/network-relay-nf/dist" NetworkRelayNF
+ rg_step collect-rs-zip rg_zip "$repo/network-relay-rs/dist" NetworkRelayRS
++rg_step collect-tun-zip rg_zip "$repo/network-relay-tun/dist" NetworkRelayTun
+ if [[ $mode == all ]]; then rg_step collect-macos-rust-cli rg_mac_cli; fi
+ # Export successful Mac products before an independent Linux build can fail.
+ if [[ $mode == all ]]; then rg_step linux-servers-both-architectures rg_servers; fi
+@@ -586,12 +589,12 @@ rg_manifest() {
+             printf 'VLESS: network-relay-vless-linux-amd64 and network-relay-vless-linux-arm64.\n'
+             printf 'Rust CLI: Linux amd64/arm64 and macOS arm64; native Mac --help/--version checked.\n'
+         fi
+-        printf 'Mac: original client tests, bundle architecture and strict signatures checked.\n'
++        printf 'Mac: NF, RS and Tun original client tests, bundle architecture and strict signatures checked.\n'
+     } > "$output/MANIFEST.txt"
+ }
+ rg_checksums() (
+     cd -- "$output" || exit
+-    local expected=(network-relay-nf-macos-arm64.app network-relay-rs-macos-arm64.app NetworkRelayNF-*-macos-arm64.zip NetworkRelayRS-*-macos-arm64.zip MANIFEST.txt)
++    local expected=(network-relay-nf-macos-arm64.app network-relay-rs-macos-arm64.app network-relay-tun-macos-arm64.app NetworkRelayNF-*-macos-arm64.zip NetworkRelayRS-*-macos-arm64.zip NetworkRelayTun-*-macos-arm64.zip MANIFEST.txt)
+     if [[ $mode == all ]]; then
+         expected+=(network-relay-linux-amd64 network-relay-linux-arm64 network-relay-cf-masque-linux-amd64 network-relay-cf-masque-linux-arm64 network-relay-vless-linux-amd64 network-relay-vless-linux-arm64 caddy-network-relay-linux-amd64 caddy-network-relay-linux-arm64 network-relay-rs-linux-amd64 network-relay-rs-linux-arm64 network-relay-rs-macos-arm64)
+     fi
+diff --git a/network-relay-tun/build-macos.sh b/network-relay-tun/build-macos.sh
+index a665f58..4b3c176 100755
+--- a/network-relay-tun/build-macos.sh
++++ b/network-relay-tun/build-macos.sh
+@@ -53,7 +53,11 @@ iconutil -c icns "$icons" -o "$app/Contents/Resources/AppIcon.icns"
+ plutil -lint "$app/Contents/Info.plist"
+ codesign --force --sign - "$app"
+ codesign --verify --strict "$app"
++archive="NetworkRelayTun-$version-macos-arm64.zip"
++ditto -c -k --keepParent "$app" "$stage/$archive"
++unzip -tq "$stage/$archive"
+ # Replace only this project's generated bundle after successful verification.
+ rm -rf -- "$root/dist/Network Relay Tun.app"
+ mv -- "$app" "$root/dist/Network Relay Tun.app"
+-echo "Built $root/dist/Network Relay Tun.app; native acceptance is required before production use."
++mv -f -- "$stage/$archive" "$root/dist/$archive"
++echo "Built $root/dist/Network Relay Tun.app and $archive; native acceptance is required before production use."
+diff --git a/tools/tests/test_mac_fresh_sources.py b/tools/tests/test_mac_fresh_sources.py
+index d5c82c1..a12aba3 100644
+--- a/tools/tests/test_mac_fresh_sources.py
++++ b/tools/tests/test_mac_fresh_sources.py
+@@ -154,7 +154,7 @@ class MacFreshSourceTests(unittest.TestCase):
+ 
+     def test_failed_gui_build_cleans_source_work_and_private_caches(self):
+         shutil.copyfile(ROOT / "build-macos-gui-clients-on-macos.sh", self.remote / "build-macos-gui-clients-on-macos.sh")
+-        for name in ("network-relay-nf", "network-relay-rs"):
++        for name in ("network-relay-nf", "network-relay-rs", "network-relay-tun"):
+             folder = self.remote / name; folder.mkdir()
+             (folder / "build-macos.sh").write_text(
+                 "#!/bin/bash\npython3 - <<'CAPTURE'\n"
+@@ -233,13 +233,13 @@ lr_build_caddy() {
+ '''
+         (self.remote / "build-linux-servers-on-linux.sh").write_text(
+             f"LR_CLOUDFLARE_DNS_TAG=fixture-tag\nLR_CLOUDFLARE_DNS_COMMIT={tag_commit}\n" + linux_recipes)
+-        for name in ("network-relay-nf", "network-relay-rs"):
++        for name in ("network-relay-nf", "network-relay-rs", "network-relay-tun"):
+             folder = self.remote / name; folder.mkdir()
+             (folder / "build-macos.sh").write_text(r'''#!/bin/bash
+ python3 - "$0" <<'BUILD'
+ import json,os,pathlib,sys,zipfile
+ root=pathlib.Path(sys.argv[1]).parent
+-label='NF' if root.name.endswith('-nf') else 'RS'
++label={'network-relay-nf':'NF','network-relay-rs':'RS','network-relay-tun':'Tun'}[root.name]
+ keys=['RELAY_BUILD_WORK_ROOT','CARGO_HOME','RUSTUP_HOME','GOCACHE','GOMODCACHE','TMPDIR','HOMEBREW_CACHE','RELAY_FRESH_SOURCE_ROOT']
+ pathlib.Path(os.environ['TEST_BUILD_ENV']).write_text(json.dumps({k:os.environ[k] for k in keys}))
+ cache=pathlib.Path(os.environ['GOMODCACHE'])/'github.com/pkg/errors@v0.9.1'
+@@ -342,7 +342,7 @@ elif tool=='go' and args[:2]==['version','-m']:
+             for arch in ("amd64", "arm64"):
+                 for name in ("network-relay", "network-relay-cf-masque", "network-relay-vless", "network-relay-rs", "caddy-network-relay"):
+                     self.assertEqual((output / f"{name}-linux-{arch}").read_text(), "fixture executable\n")
+-        for label in ("nf", "rs"):
++        for label in ("nf", "rs", "tun"):
+             self.assertIn(f"==> macos-network-relay-{label}\n    ok", transcript)
+         values = json.loads(capture.read_text())
+         work = Path(values["RELAY_BUILD_WORK_ROOT"])
+@@ -359,10 +359,14 @@ elif tool=='go' and args[:2]==['version','-m']:
+         self.assertEqual((output / "MANIFEST.txt").exists(), not linux_failure)
+         self.assertEqual((output / "SHA256SUMS").exists(), not linux_failure)
+         calls = [json.loads(line) for line in native_calls.read_text().splitlines()] if native_calls.exists() else []
+-        for label in ("NF", "RS"):
++        for label in ("NF", "RS", "Tun"):
+             app = output / f"network-relay-{label.lower()}-macos-arm64.app"
+             self.assertTrue(app.is_dir(), f"Successful {label} application was removed after Linux failure")
+             self.assertEqual((app / "Contents/MacOS/FixtureApp").read_bytes(), f"fixture {label} executable\n".encode())
++            if not linux_failure:
++                sums = (output / "SHA256SUMS").read_text()
++                self.assertIn(f"  {app.name}/Contents/MacOS/FixtureApp\n", sums)
++                self.assertIn(f"  NetworkRelay{label}-fixture-macos-arm64.zip\n", sums)
+             with zipfile.ZipFile(output / f"NetworkRelay{label}-fixture-macos-arm64.zip") as archive:
+                 self.assertEqual(archive.read(f"Network Relay {label}.app/Contents/MacOS/FixtureApp"),
+                                  f"fixture {label} executable\n".encode())

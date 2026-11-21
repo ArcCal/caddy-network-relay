@@ -1,0 +1,66 @@
+name: Verify both macOS build entry points with the TUN release bundle
+on:
+  push:
+    branches: [audit/tun-aggregate-macos-20261121]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: xcode-27
+    strategy:
+      fail-fast: false
+      matrix:
+        entry: [build-macos-gui-clients-on-macos.sh, build-all-targets-on-macos.sh]
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ArcCal/network-relay
+          ref: c825a5f81c99838e8d8b40a2d91eb261f1397446
+          fetch-depth: 0
+          persist-credentials: false
+          path: candidate
+      - name: Run the public build entry from a freshly cloned candidate main
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ENTRY: ${{ matrix.entry }}
+        run: |
+          set -eu
+          cd candidate
+          git apply --check ../diagnostics/tun-build/aggregate.patch
+          git apply ../diagnostics/tun-build/aggregate.patch
+          git add -u
+          git -c user.name=Anonymous -c user.email=anonymous@example.invalid commit --no-gpg-sign -m "Test the aggregate build candidate"
+          git branch -f main HEAD
+          mkdir "$RUNNER_TEMP/origin"
+          git clone --bare . "$RUNNER_TEMP/origin/network-relay.git"
+          git daemon --listen=127.0.0.1 --port=19418 --base-path="$RUNNER_TEMP/origin" --export-all "$RUNNER_TEMP/origin" &
+          daemon=$!
+          trap 'kill "$daemon" || true' EXIT
+          git config --global url.git://127.0.0.1:19418/network-relay.git.insteadOf https://github.com/ArcCal/network-relay.git
+          bash "$ENTRY" --output "$RUNNER_TEMP/products" --jobs 6
+      - name: Verify extracted signed helpers and every published checksum
+        run: |
+          set -eu
+          cd "$RUNNER_TEMP/products"
+          shasum -a 256 --check SHA256SUMS
+          archive=$(ls NetworkRelayTun-*-macos-arm64.zip)
+          ditto -x -k "$archive" "$RUNNER_TEMP/unpacked"
+          for app in network-relay-tun-macos-arm64.app "$RUNNER_TEMP/unpacked/Network Relay Tun.app"; do
+            codesign --verify --deep --strict "$app"
+            for exe in MacOS/NetworkRelayTun Helpers/network-relay-tun-host Helpers/packet-worker; do
+              test -x "$app/Contents/$exe"
+              lipo -verify_arch arm64 "$app/Contents/$exe"
+              codesign --verify --strict "$app/Contents/$exe"
+              cmp "network-relay-tun-macos-arm64.app/Contents/$exe" "$app/Contents/$exe"
+            done
+          done
+      - name: Show failed build steps
+        if: failure()
+        run: |
+          for f in "$RUNNER_TEMP/products/logs"/*.log; do
+            [[ ! -f "$f" ]] || { echo "$(basename "$f")"; tail -8 "$f"; }
+          done
