@@ -6,10 +6,11 @@ final class Connect: XCTestCase {
         proc.executableURL = URL(fileURLWithPath: exe)
         proc.arguments = args
         proc.standardOutput = pipe
+        if exe == "/usr/bin/python3" { proc.standardError = pipe }
         try proc.run()
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         proc.waitUntilExit()
-        XCTAssertEqual(proc.terminationStatus, 0, exe)
+        XCTAssertEqual(proc.terminationStatus, 0, exe + " " + String(decoding: data, as: UTF8.self).prefix(800))
         return String(decoding: data, as: UTF8.self)
     }
     private func socks() throws {
@@ -24,11 +25,11 @@ final class Connect: XCTestCase {
         try XCTUnwrap(output("/sbin/route", ["-n","get","198.51.100.42"]).split(separator:"\n")
             .first(where: { $0.contains("interface:") })).trimmingCharacters(in: .whitespaces)
     }
-    @MainActor func testSwitchWhileConnected() async throws {
+    @MainActor func testSwitchWhileConnected() throws {
         continueAfterFailure = false
         let app = XCUIApplication(url: folder.appendingPathComponent("Network Relay Tun.app"))
         app.launch()
-        defer { app.terminate() }
+
         let connect = app.windows.buttons["Connect"].firstMatch
         XCTAssertTrue(connect.waitForExistence(timeout: 20))
         let toggle = app.windows.descendants(matching: .any).matching(identifier: "Global TUN").firstMatch
@@ -61,12 +62,10 @@ final class Connect: XCTestCase {
                 XCTAssertNotEqual(try route(), before)
                 XCTAssertTrue(try route().contains("utun"))
                 try socks()
-                let marker = folder.appendingPathComponent("active-\(cycle)")
-                try Data().write(to: marker)
                 let done = folder.appendingPathComponent("done-\(cycle)")
                 let deadline = Date().addingTimeInterval(120)
                 while !FileManager.default.fileExists(atPath: done.path), Date() < deadline {
-                    try await Task.sleep(nanoseconds: 100_000_000)
+                    Thread.sleep(forTimeInterval: 0.1)
                 }
                 XCTAssertTrue(FileManager.default.fileExists(atPath: done.path))
                 toggle.click()
@@ -81,5 +80,6 @@ final class Connect: XCTestCase {
         }
         app.windows.buttons["Disconnect"].firstMatch.click()
         XCTAssertTrue(app.windows.staticTexts["Not Connected"].firstMatch.waitForExistence(timeout: 30))
+        app.terminate()
     }
 }

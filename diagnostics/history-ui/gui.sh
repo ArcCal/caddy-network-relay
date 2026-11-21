@@ -89,8 +89,11 @@ touch "$stage/installed"
 installed)
 (
     for cycle in 0 1; do
-        for ((n=0; n<1500; n++)); do [[ ! -f "$stage/active-$cycle" ]] || break; sleep 0.1; done
-        [[ -f "$stage/active-$cycle" ]] || exit 1
+        for ((n=0; n<550; n++)); do
+            if /sbin/route -n get 198.51.100.42 2>/dev/null | grep -q "interface: utun"; then break; fi
+            sleep .2
+        done
+        /sbin/route -n get 198.51.100.42 | grep "interface: utun"
         for ip in 198.51.100.42 1.1.1.1 8.8.8.8; do /sbin/route -n get "$ip" | awk '/interface:/{print $0}'; done
         /usr/sbin/scutil --dns | awk '/nameserver|order|flags/ {print}' | head -65
         for check in ordinary clone browser; do
@@ -100,6 +103,12 @@ installed)
         done
         curl --max-time 5 --noproxy '*' -fsS http://127.0.0.1:18080/counts || true
         touch "$stage/done-$cycle"
+        if [[ $cycle == 0 ]]; then
+            for ((n=0; n<200; n++)); do
+                /sbin/route -n get 198.51.100.42 2>/dev/null | grep -q "interface: utun" || break
+                sleep .1
+            done
+        fi
     done
 ) &
 probe_pid=$!
