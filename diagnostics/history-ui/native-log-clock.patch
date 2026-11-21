@@ -2,20 +2,29 @@ diff --git a/network-relay-tun/App/Sources/NetworkRelayTun/NativeClient.swift b/
 index 74870e3..918fee1 100644
 --- a/network-relay-tun/App/Sources/NetworkRelayTun/NativeClient.swift
 +++ b/network-relay-tun/App/Sources/NetworkRelayTun/NativeClient.swift
-@@ -28,6 +28,7 @@ final class NativeClient {
-     private var groups: [UInt64: Group] = [:]
-     private var pendingConnections: [ObjectIdentifier: (UInt64, NWConnection)] = [:]
+@@ -30,2 +30,3 @@ final class NativeClient {
      private var level: LogLevel
 +    private let logTimestampFormatter = ISO8601DateFormatter()
      private var logTimer: DispatchSourceTimer?
-     private var lastTrafficAt = ProcessInfo.processInfo.systemUptime
-     private var trafficUnavailable = false
-@@ -178,7 +179,7 @@ final class NativeClient {
-     private func notify(_ value: NativeUpdate) { DispatchQueue.main.async { [update] in update(value) } }
-     private func log(_ severity: String, _ text: String) {
+@@ -180,3 +181,3 @@ final class NativeClient {
          if (severity == "DEBUG" && level.nativeValue < 3) || (severity == "TRACE" && level.nativeValue < 4) { return }
 -        appendLog("\(ISO8601DateFormatter().string(from: Date())) \(severity) native: \(text)")
 +        appendLog("\(logTimestampFormatter.string(from: Date())) \(severity) native: \(text)")
      }
-     private func appendLog(_ text: String) {
-         appendClientLog(text.split(whereSeparator: \.isNewline).map { "\($0) [run=\(runID)]" }, to: &pendingLogs)
+diff --git a/network-relay-tun/App/Sources/NetworkRelayTun/TunnelController.swift b/network-relay-tun/App/Sources/NetworkRelayTun/TunnelController.swift
+index 6308d68..c749abb 100644
+--- a/network-relay-tun/App/Sources/NetworkRelayTun/TunnelController.swift
++++ b/network-relay-tun/App/Sources/NetworkRelayTun/TunnelController.swift
+@@ -187,2 +187,3 @@ final class TunnelController: ObservableObject {
+                 status = .connected
++                record("System capture: \(captureStatus) [run=\(run.uuidString.prefix(8))]")
+                 endpoints = [] // Resolve again after a later physical path change.
+diff --git a/network-relay-tun/Core/src/socks.rs b/network-relay-tun/Core/src/socks.rs
+index 22e9e32..8658b89 100644
+--- a/network-relay-tun/Core/src/socks.rs
++++ b/network-relay-tun/Core/src/socks.rs
+@@ -149,3 +149,3 @@ async fn session(client: Arc<Client>, mut io: native::Io, peer: SocketAddr) -> R
+                     reply(&mut io, 0, None).await?;
+-                    tracing::debug!(%peer, host=%target.host, port=target.port, transport=opened.transport, "SOCKS CONNECT ready");
++                    tracing::debug!(%peer, host=%target.host, port=target.port, transport=opened.transport, local_resource=io.id(), "SOCKS CONNECT ready");
+                     if let Err(e) = crate::traffic::copy_bidirectional(

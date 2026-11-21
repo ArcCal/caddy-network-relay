@@ -63,7 +63,7 @@ final class Connect: XCTestCase {
                 XCTAssertTrue(try route().contains("utun"))
                 try socks()
                 let done = folder.appendingPathComponent("done-\(cycle)")
-                let deadline = Date().addingTimeInterval(120)
+                let deadline = Date().addingTimeInterval(170)
                 while !FileManager.default.fileExists(atPath: done.path), Date() < deadline {
                     Thread.sleep(forTimeInterval: 0.1)
                 }
@@ -84,9 +84,23 @@ final class Connect: XCTestCase {
         let button = segment.exists ? segment : app.buttons["Log"].firstMatch
         XCTAssertTrue(button.waitForExistence(timeout: 5))
         button.click()
-        let format = #"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z TRACE native: .+ \[run=[A-Fa-f0-9]{8}\]$"#
-        let rendered = app.windows.staticTexts.matching(NSPredicate(format: "label MATCHES %@ OR value MATCHES %@", format, format)).firstMatch
-        XCTAssertTrue(rendered.waitForExistence(timeout: 15), "Native trace timestamp was not displayed in the Log tab")
+        let copy = app.buttons["Copy All"].firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 5))
+        copy.click()
+        let log = try output("/usr/bin/pbpaste", [])
+        let format = #"(?m)^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z TRACE native: .+ \[run=[A-Fa-f0-9]{8}\]$"#
+        XCTAssertNotNil(log.range(of: format, options: .regularExpression))
+        XCTAssertNotNil(log.range(of: #" INFO app: System capture: Off \[run=[A-F0-9]{8}\]"#, options: .regularExpression))
+        let active = log.range(of: #" INFO app: System capture: Capturing IPv4 and IPv6 \[run=[A-F0-9]{8}\]"#, options: .regularExpression)
+        XCTAssertEqual(active != nil, FileManager.default.fileExists(atPath: folder.appendingPathComponent("installed").path))
+        let accepted = try NSRegularExpression(pattern: #"SOCKS CONNECT ready [^\n]*local_resource=(\d+) \[run=([A-F0-9]{8})\]"#)
+        let rendered = log as NSString
+        let linked = accepted.matches(in: log, range: NSRange(location: 0, length: rendered.length)).contains { match in
+            let resource = rendered.substring(with: match.range(at: 1)), run = rendered.substring(with: match.range(at: 2))
+            return log.contains("resource=\(resource) bytes=0 [run=\(run)]")
+        }
+        XCTAssertTrue(linked, "The retained log must link an admitted local TCP socket to its native I/O in the same run")
+        print("Verified exported native timestamp, correlated SOCKS socket and actual capture mode")
         app.terminate()
     }
 }

@@ -129,7 +129,7 @@ installed)
         for check in dns_stream dnsbench ordinary clone browser public; do
             [[ "$cycle" == 0 || "$check" == dns_stream || "$check" == dnsbench || "$check" == ordinary || "$check" == clone ]] || continue
             echo "Cycle $cycle: $check"
-            /usr/bin/python3 -u "$stage/$check.py" || touch "$stage/check-failed"
+            TEST_CHROME_DOH=$([[ "$cycle" == 0 ]] && echo yes || echo no) /usr/bin/python3 -u "$stage/$check.py" || touch "$stage/check-failed"
         done
         curl --max-time 5 --noproxy '*' -fsS http://127.0.0.1:18080/counts || true
         touch "$stage/done-$cycle"

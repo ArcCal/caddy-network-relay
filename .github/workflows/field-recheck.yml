@@ -1,4 +1,4 @@
-name: Verify native TUN trace output and encrypted DNS
+name: Verify Chrome Secure DNS and TUN connection diagnostics
 'on':
   push:
     branches:
@@ -8,7 +8,7 @@ permissions:
   actions: read
 jobs:
   package:
-    name: Build and verify the TUN client with the reused native formatter
+    name: Build and verify the TUN diagnostic client
     runs-on: xcode-27
     timeout-minutes: 55
     steps:
@@ -107,7 +107,7 @@ jobs:
       if: '!cancelled() && steps.network.outcome
         == ''success'''
     - name: installed GUI acceptance
-      timeout-minutes: 6
+      timeout-minutes: 8
       run: bash diagnostics/history-ui/gui.sh installed
       if: '!cancelled() && steps.network.outcome
         == ''success'''

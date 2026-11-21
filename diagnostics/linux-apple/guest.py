@@ -1,4 +1,5 @@
 """Isolated Linux origin and two real Relay servers. Only loopback ports are published by QEMU."""
+import base64
 import collections
 import hashlib
 import http.server
@@ -14,6 +15,8 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
+import urllib.parse
 
 ROOT = Path(tempfile.mkdtemp(prefix="relay-guest-"))
 os.chmod(ROOT, 0o700)
@@ -42,7 +45,7 @@ def credentials():
             "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     command("openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
             "-keyout", "key.pem", "-out", "cert.csr", "-subj", "/CN=relay.test")
-    (ROOT / "extensions").write_text("subjectAltName=DNS:relay.test,DNS:git-fixture.test,DNS:*.dns-fixture.test,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth\n"
+    (ROOT / "extensions").write_text("subjectAltName=DNS:relay.test,DNS:git-fixture.test,DNS:*.dns-fixture.test,IP:127.0.0.1,IP:::1,IP:198.51.100.42\nextendedKeyUsage=serverAuth\n"
                                      "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\n")
     command("openssl", "x509", "-req", "-in", "cert.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
             "-out", "cert.pem", "-days", "1", "-extfile", "extensions")
@@ -67,7 +70,8 @@ def start_servers(secret):
             cfg = {"logging": {"logs": {"default": {"level": "DEBUG"}}}, "admin": {"disabled": True}, "storage": {"module": "file_system", "root": str(ROOT/"storage")},
                    "apps": {"http": {"servers": {"relay": {"listen": [f"{BIND}:{port}"],
                    "automatic_https": {"disable": True}, "tls_connection_policies": [{}],
-                   "routes": [{"handle": [handler, {"handler":"static_response","status_code":404}]}]}}},
+                   "routes": [{"match": [{"path": ["/dns-query"]}], "handle": [{"handler": "reverse_proxy", "upstreams": [{"dial": "127.0.0.1:18454"}]}]},
+                              {"handle": [handler, {"handler":"static_response","status_code":404}]}]}}},
                    "tls": {"certificates": {"load_files": [{"certificate": str(ROOT/"cert.pem"),"key":str(ROOT/"key.pem")}]}}}}
             (ROOT / "caddy.json").write_text(json.dumps(cfg))
             args = [binary, "run", "--config", str(ROOT / "caddy.json")]
@@ -100,6 +104,31 @@ class Origin(http.server.BaseHTTPRequestHandler):
             size -= chunk
 
     def do_GET(self):
+        if self.path.startswith("/dns-query?"):
+            fields = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            wire = fields.get("dns", [""])[0]
+            if not 1 <= len(wire) <= 8192:
+                return self.send_error(400)
+            try:
+                query = base64.urlsafe_b64decode(wire + "=" * (-len(wire) % 4))
+            except ValueError:
+                return self.send_error(400)
+            answer = git_origin.dns_reply(query)
+            if answer is None:
+                return self.send_error(400)
+            name = git_origin.probe_name(query)
+            if name and answer[6:8] == b"\0\1":
+                count(name)
+                count("doh_" + name)
+            if name and name.startswith("slow-"):
+                time.sleep(1.25)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/dns-message")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(answer)))
+            self.end_headers()
+            self.wfile.write(answer)
+            return
         if self.path.startswith(("/dns-page?", "/dns-payload?", "/dns-stats")):
             mime = "application/json"
             if self.path.startswith("/dns-page?"):
@@ -315,6 +344,8 @@ def main():
             raise RuntimeError("Unexpected external guest route")
     secret = credentials()
     start_capture_origins()
+    doh = http.server.ThreadingHTTPServer(("127.0.0.1", 18454), Origin)
+    threading.Thread(target=doh.serve_forever, daemon=True).start()
     identity = environment_record()
     jobs = start_servers(secret)
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
