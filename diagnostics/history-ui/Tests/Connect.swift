@@ -80,6 +80,13 @@ final class Connect: XCTestCase {
         }
         app.windows.buttons["Disconnect"].firstMatch.click()
         XCTAssertTrue(app.windows.staticTexts["Not Connected"].firstMatch.waitForExistence(timeout: 30))
+        let segment = app.radioButtons["Log"].firstMatch
+        let button = segment.exists ? segment : app.buttons["Log"].firstMatch
+        XCTAssertTrue(button.waitForExistence(timeout: 5))
+        button.click()
+        let format = #"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z TRACE native: .+ \[run=[A-Fa-f0-9]{8}\]$"#
+        let rendered = app.windows.staticTexts.matching(NSPredicate(format: "label MATCHES %@ OR value MATCHES %@", format, format)).firstMatch
+        XCTAssertTrue(rendered.waitForExistence(timeout: 15), "Native trace timestamp was not displayed in the Log tab")
         app.terminate()
     }
 }

@@ -33,7 +33,7 @@ with urllib.request.urlopen('http://127.0.0.1:18080/caddy.mobileconfig',timeout=
     doc=plistlib.loads(response.read())
 headers=next(i for i in doc['PayloadContent'] if i.get('PayloadType')=='com.apple.relay.managed')['Relays'][0]['AdditionalHTTPHeaderFields']
 secret=base64.b64decode(next(v for k,v in headers.items() if 'authorization' in k.lower()).split()[1]).decode().split(':',1)[1]
-open(sys.argv[1],'w').write(json.dumps({'servers':[dict(name='Isolated Linux relay',domain='relay.test:14201',serverIP='198.51.100.254',username='alice',password=secret,transport=os.environ['RELAY_UI_TRANSPORT'],probeTarget='127.0.0.1:18443')]}))
+open(sys.argv[1],'w').write(json.dumps({'logLevel':'everything','servers':[dict(name='Isolated Linux relay',domain='relay.test:14201',serverIP='198.51.100.254',username='alice',password=secret,transport=os.environ['RELAY_UI_TRANSPORT'],probeTarget='127.0.0.1:18443')]}))
 PY
 cd diagnostics/history-ui
 command -v xcodegen >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
