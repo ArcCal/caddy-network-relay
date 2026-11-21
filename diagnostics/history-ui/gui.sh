@@ -37,6 +37,11 @@ cd "$root"
 
 ;;
 missing)
+cp "$pem" "$stage/ca.pem"
+sudo security add-trusted-cert -d -r trustRoot -p ssl -s relay.test -k /Library/Keychains/System.keychain "$cert"
+touch "$stage/trusted"
+defaults write com.arccal.network-relay-tun GlobalTUN -bool false
+[[ ${MODE_VARIANT:-} != baseline ]] || touch "$stage/baseline"
 run_ui missing
 ;;
 network)
@@ -69,8 +74,6 @@ curl --noproxy '*' --cacert "$pem" --resolve relay.test:14201:198.51.100.254 --m
 
 ;;
 install)
-sudo security add-trusted-cert -d -r trustRoot -p ssl -s relay.test -k /Library/Keychains/System.keychain "$cert"
-touch "$stage/trusted"
 sudo bash "$app/Contents/Resources/install-helper.sh" "$(id -u)"
 touch "$stage/helper"
 touch "$stage/installed"
@@ -88,8 +91,16 @@ cleanup)
 fp=$(openssl x509 -in "$pem" -fingerprint -sha256 -noout | cut -d= -f2 | tr -d :)
     if [[ -e "$stage/helper" ]]; then sudo bash "$app/Contents/Resources/uninstall-helper.sh"; fi
     if [[ -e "$stage/trusted" ]]; then
-        sudo security remove-trusted-cert -d "$cert" || true
-        sudo security delete-certificate -Z "$fp" /Library/Keychains/System.keychain || true
+        # This disposable runner used a fixture-specific system trust entry.
+        # Run its noninteractive cleanup with a deadline.
+        python3 - "$cert" <<'CLEAN'
+import subprocess,sys
+try:
+ subprocess.run(["sudo","security","remove-trusted-cert","-d",sys.argv[1]],timeout=10)
+except subprocess.TimeoutExpired:
+ print("Timed out removing fixture trust settings on disposable runner.")
+CLEAN
+        sudo security delete-certificate -Z "$fp" /Library/Keychains/System.keychain </dev/null || true
     fi
     if [[ -f "$stage/forward.pid" ]]; then kill "$(cat "$stage/forward.pid")" || true; fi
     sudo /sbin/ifconfig lo0 -alias 198.51.100.254 2>/dev/null || true

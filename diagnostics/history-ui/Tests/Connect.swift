@@ -1,27 +1,77 @@
 import XCTest
 final class Connect: XCTestCase {
-    @MainActor func testConnectButton() throws {
-        let folder = URL(fileURLWithPath: "/tmp/relay-history-app", isDirectory: true)
+    private let folder = URL(fileURLWithPath: "/tmp/relay-history-app", isDirectory: true)
+    private func output(_ exe: String, _ args: [String]) throws -> String {
+        let proc = Process(), pipe = Pipe()
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = args
+        proc.standardOutput = pipe
+        try proc.run()
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        XCTAssertEqual(proc.terminationStatus, 0, exe)
+        return String(decoding: data, as: UTF8.self)
+    }
+    private func socks() throws {
+        let n = try output("/usr/bin/curl", ["--silent", "--show-error", "--fail", "--noproxy", "",
+            "--proxy", "socks5h://127.0.0.1:1080", "--max-time", "10",
+            "--cacert", folder.appendingPathComponent("ca.pem").path,
+            "--connect-to", "relay.test:18443:127.0.0.1:18443", "-o", "/dev/null", "-w", "%{size_download}",
+            "https://relay.test:18443/4096"])
+        XCTAssertEqual(n, "4096")
+    }
+    private func route() throws -> String {
+        try XCTUnwrap(output("/sbin/route", ["-n","get","198.51.100.42"]).split(separator:"\n")
+            .first(where: { $0.contains("interface:") })).trimmingCharacters(in: .whitespaces)
+    }
+    @MainActor func testSwitchWhileConnected() throws {
+        continueAfterFailure = false
         let app = XCUIApplication(url: folder.appendingPathComponent("Network Relay Tun.app"))
         app.launch()
         defer { app.terminate() }
         let connect = app.windows.buttons["Connect"].firstMatch
         XCTAssertTrue(connect.waitForExistence(timeout: 20))
-        XCTAssertTrue(connect.isEnabled)
+        let toggle = app.windows.checkBoxes["Global TUN"].firstMatch
+        XCTAssertTrue(toggle.exists, app.debugDescription)
+        XCTAssertEqual(toggle.value as? String, "0")
+        let before = try route(), dns = try output("/usr/sbin/scutil", ["--dns"])
         connect.click()
-        let installed = FileManager.default.fileExists(atPath: folder.appendingPathComponent("installed").path)
-        let expected = installed ? "Relay Connected" : "Connection Failed"
-        XCTAssertTrue(app.staticTexts[expected].firstMatch.waitForExistence(timeout: 50))
-        for _ in 0..<4 {
-            Thread.sleep(forTimeInterval: 2)
-            XCTAssertNotEqual(app.state, .notRunning)
-            XCTAssertTrue(app.staticTexts[expected].firstMatch.exists)
+        let connected = app.windows.staticTexts["Relay Connected"].firstMatch
+        XCTAssertTrue(connected.waitForExistence(timeout: 50))
+        try socks()
+        if FileManager.default.fileExists(atPath: folder.appendingPathComponent("baseline").path) {
+            XCTAssertFalse(toggle.isEnabled)
+            print("BASELINE connected SOCKS works, mode toggle disabled")
+        } else if !FileManager.default.fileExists(atPath: folder.appendingPathComponent("installed").path) {
+            XCTAssertTrue(toggle.isEnabled)
+            toggle.click()
+            let error = app.windows.staticTexts.containing(NSPredicate(format:"label CONTAINS[c] %@", "Install / Update Helper")).firstMatch
+            XCTAssertTrue(error.waitForExistence(timeout: 10), app.debugDescription)
+            XCTAssertEqual(toggle.value as? String, "0")
+            XCTAssertTrue(connected.exists)
+            try socks()
+            print("PASS missing helper preserves connected SOCKS")
+        } else {
+            for _ in 0..<2 {
+                XCTAssertTrue(toggle.isEnabled)
+                toggle.click()
+                XCTAssertTrue(app.windows.staticTexts["System capture: Capturing IPv4 and IPv6"].firstMatch.waitForExistence(timeout: 50))
+                XCTAssertTrue(connected.exists)
+                XCTAssertEqual(toggle.value as? String, "1")
+                XCTAssertNotEqual(try route(), before)
+                XCTAssertTrue(try route().contains("utun"))
+                try socks()
+                toggle.click()
+                XCTAssertTrue(app.windows.staticTexts["System capture: Off"].firstMatch.waitForExistence(timeout: 30))
+                XCTAssertTrue(connected.waitForExistence(timeout: 50))
+                XCTAssertEqual(toggle.value as? String, "0")
+                XCTAssertEqual(try route(), before)
+                XCTAssertEqual(try output("/usr/sbin/scutil", ["--dns"]), dns)
+                try socks()
+            }
+            print("PASS two live mode round trips restored routes, DNS and SOCKS")
         }
-        if installed {
-            let off = app.windows.buttons["Disconnect"].firstMatch
-            XCTAssertTrue(off.exists)
-            off.click()
-            XCTAssertTrue(app.staticTexts["Not Connected"].firstMatch.waitForExistence(timeout: 30))
-        }
+        app.windows.buttons["Disconnect"].firstMatch.click()
+        XCTAssertTrue(app.windows.staticTexts["Not Connected"].firstMatch.waitForExistence(timeout: 30))
     }
 }

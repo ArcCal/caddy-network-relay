@@ -1,0 +1,108 @@
+diff --git a/network-relay-tun/App/Sources/NetworkRelayTun/App.swift b/network-relay-tun/App/Sources/NetworkRelayTun/App.swift
+index fe0f18f..bdda2c7 100644
+--- a/network-relay-tun/App/Sources/NetworkRelayTun/App.swift
++++ b/network-relay-tun/App/Sources/NetworkRelayTun/App.swift
+@@ -282,7 +282,8 @@ struct StatusColumn: View {
+             }
+             VStack(alignment: .leading, spacing: 8) {
+                 Toggle("Global TUN", isOn: Binding(get: { tunnel.globalTUN }, set: { tunnel.setGlobalTUN($0) }))
+-                    .disabled(tunnel.status.isActive)
++                    .disabled(!tunnel.canChangeGlobalTUN)
++                    .help("Switching modes while connected reconnects the relay.")
+                 Text("System capture: \(tunnel.captureStatus)").font(.callout)
+                 if let name = tunnel.interfaceName { Text("Interface: \(name)").font(.caption) }
+                 HStack {
+@@ -981,7 +982,8 @@ struct MenuPanel: View {
+             ServerLabel()
+             VStack(alignment: .leading, spacing: 8) {
+                 Toggle("Global TUN", isOn: Binding(get: { tunnel.globalTUN }, set: { tunnel.setGlobalTUN($0) }))
+-                    .disabled(tunnel.status.isActive)
++                    .disabled(!tunnel.canChangeGlobalTUN)
++                    .help("Switching modes while connected reconnects the relay.")
+                 Text("System capture: \(tunnel.captureStatus)").font(.callout)
+                 if let name = tunnel.interfaceName { Text("Interface: \(name)").font(.caption) }
+                 HStack {
+diff --git a/network-relay-tun/App/Sources/NetworkRelayTun/TunnelController.swift b/network-relay-tun/App/Sources/NetworkRelayTun/TunnelController.swift
+index eb0f4b1..6308d68 100644
+--- a/network-relay-tun/App/Sources/NetworkRelayTun/TunnelController.swift
++++ b/network-relay-tun/App/Sources/NetworkRelayTun/TunnelController.swift
+@@ -17,6 +17,7 @@ final class TunnelController: ObservableObject {
+     @Published private(set) var interfaceName: String?
+     @Published private(set) var recoveryRequired = false
+     @Published private(set) var globalTUN: Bool
++    @Published private var checkingModeChange = false
+     private var task: Task<Void, Never>?
+     private var native: NativeClient?
+     private var generation = UUID()
+@@ -46,9 +47,42 @@ final class TunnelController: ObservableObject {
+         record("Network Relay Tun launched; native Network.framework relay transport")
+         if configuration.connectOnLaunch && isConfigured { connect() }
+     }
++    var canChangeGlobalTUN: Bool {
++        !quitting && !recoveryRequired && !checkingModeChange &&
++            (task == nil || (status == .connected && task?.isCancelled == false))
++    }
+     func setGlobalTUN(_ enabled: Bool) {
+-        guard task == nil else { return }
+-        globalTUN = enabled; UserDefaults.standard.set(enabled, forKey: "GlobalTUN")
++        guard enabled != globalTUN, canChangeGlobalTUN else { return }
++        guard enabled, task != nil else { applyGlobalTUN(enabled); return }
++
++        // Keep the working SOCKS session until we know the installed helper can serve us.
++        let original = generation
++        checkingModeChange = true
++        Task {
++            let control = HostSession()
++            defer { control.close(); checkingModeChange = false }
++            do {
++                try await control.checkCompatibility()
++            } catch {
++                if generation == original, status == .connected, task?.isCancelled == false {
++                    captureStatus = "Off. " + error.localizedDescription
++                    record(error.localizedDescription, level: "ERROR")
++                }
++                return
++            }
++            guard generation == original, status == .connected, task?.isCancelled == false,
++                  !quitting, !recoveryRequired else { return }
++            applyGlobalTUN(true)
++        }
++    }
++    private func applyGlobalTUN(_ enabled: Bool) {
++        globalTUN = enabled
++        UserDefaults.standard.set(enabled, forKey: "GlobalTUN")
++        if let task {
++            restart = true
++            status = .connecting
++            task.cancel()
++        }
+     }
+     @discardableResult
+     func save(_ new: Configuration, retryFailed: Bool = false, allowReconnect: Bool = true) throws -> Bool {
+@@ -193,7 +227,7 @@ final class TunnelController: ObservableObject {
+         if quitting {
+             if eraseOnQuit && !recoveryRequired { Store.eraseEverything() }
+             NSApp.reply(toApplicationShouldTerminate: true)
+-        } else if restart {
++        } else if restart && !recoveryRequired {
+             restart = false; connect()
+         }
+     }
+diff --git a/network-relay-tun/README.md b/network-relay-tun/README.md
+index 1d0cbb9..425fea0 100644
+--- a/network-relay-tun/README.md
++++ b/network-relay-tun/README.md
+@@ -46,6 +46,13 @@ or change networking. Compilation caches remain inside this directory.
+    **Recover Network** retries incomplete restoration. Failed work stays in a
+    root-owned journal; subsequent captures remain blocked until recovery succeeds.
+ 
++While connected, switch **Global TUN** in the main window or menu bar to
++change modes. The app reconnects the relay, so existing connections can
++briefly drop. Enabling capture checks the installed helper first. If that
++check fails, the existing SOCKS session stays connected. Disconnect and
++use **Install / Update Helper**, then try again. Disabling capture restores
++this app's routes and DNS before starting the SOCKS-only session.
++
+ With Global TUN disabled, the same application provides its local SOCKS service
+ without requiring the helper. There is no routing rule engine or forced kill
+ switch. Loss of the control connection causes capture restoration; a helper
