@@ -1,0 +1,142 @@
+name: Native NF HTTP/1.1 reset and orderly close
+'on':
+  push:
+    branches:
+    - audit/native-h1-and-tun-recheck-20261121
+permissions:
+  contents: read
+  actions: read
+jobs:
+  boundary:
+    name: Native NF and release Linux ${{ matrix.arch }}
+    runs-on: xcode-27
+    timeout-minutes: 75
+    steps:
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        persist-credentials: false
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: abb966352880c7521cbd9a1e23e9c2f6e70906b0
+        sparse-checkout: diagnostics
+        path: native-probe
+        persist-credentials: false
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: linux-${{ matrix.arch }}-guest
+        path: ${{ runner.temp }}/image
+        github-token: ${{ github.token }}
+        run-id: 44747890260
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      with:
+        name: caddy-network-relay-linux-${{ matrix.arch }}
+        path: ${{ runner.temp }}/exact-caddy
+        run-id: 44835734583
+        github-token: ${{ github.token }}
+    - name: Boot the release Linux kernel with loopback-only port forwards
+      run: 'set -eu
+
+        mkdir -p "$RUNNER_TEMP/final-linux"
+
+        cp "$RUNNER_TEMP/exact-caddy/caddy" "$RUNNER_TEMP/final-linux/caddy-candidate"
+
+        (cd "$RUNNER_TEMP/final-linux" && shasum -a 256 caddy-candidate > SHA256SUMS)
+
+        python3 - <<''PATCH''
+
+        from pathlib import Path
+
+        p=Path(''diagnostics/linux-apple/guest.py'')
+
+        s=p.read_text()
+
+        anchor=''    jobs = start_servers(credentials())''
+
+        assert s.count(anchor)==1
+
+        s=s.replace(anchor,anchor+''\n''+ ''\n''.join(''    ''+line for line in Path(''diagnostics/linux-apple/h1-origin.py'').read_text().splitlines()))
+
+        p.write_text(s)
+
+        PATCH
+
+        bash diagnostics/linux-apple/boot.sh "$GUEST_ARCH" "$RUNNER_TEMP/image"
+
+        python3 - <<''CHECK''
+
+        from pathlib import Path
+
+        import hashlib, json, os
+
+        t=Path(os.environ[''RUNNER_TEMP''])
+
+        assert hashlib.sha256((t/''exact-caddy/caddy'').read_bytes()).hexdigest()==json.loads((t/''linux.json'').read_text())[''caddy'']
+
+        CHECK
+
+        '
+      env:
+        GUEST_ARCH: ${{ matrix.arch }}
+        GUEST_MACHINE: ${{ matrix.machine }}
+    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+      with:
+        repository: ArcCal/network-relay
+        ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
+        path: clients
+        persist-credentials: false
+    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
+      with:
+        toolchain: stable
+    - name: Build production clients and the native controller entry points
+      run: 'set -eu
+
+        sed -e ''/^cargo build.*network-relay-rs/d'' -e ''/^cp .*network-relay-rs/d''
+        -e ''s/for product in nf tun/for product in nf/'' diagnostics/linux-apple/build-products.sh
+        > "$RUNNER_TEMP/build-nf.sh"
+
+        bash "$RUNNER_TEMP/build-nf.sh" "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
+        "$RUNNER_TEMP/products"
+
+        '
+    - name: Verify the production SOCKS terminal condition and origin half-close
+      run: 'python3 - <<''PYCASE''
+
+        from pathlib import Path
+
+        p=Path(''diagnostics/linux-apple/products.py'')
+
+        s=p.read_text()
+
+        start=s.index(''                before=json.loads(fetch("counts"))'')
+
+        end=s.index(''            finally:'',start)
+
+        p.write_text(s[:start]+''                from __main__ import boundary\n                return
+        boundary(port, ctx)\n''+s[end:])
+
+        PYCASE
+
+        python3 diagnostics/linux-apple/h1-mac.py'
+    - name: Stop Linux fixture
+      if: always()
+      run: 'if [[ -f "$RUNNER_TEMP/guest.pid" ]]; then kill "$(cat "$RUNNER_TEMP/guest.pid")"
+        || true; fi
+
+        '
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+      if: always()
+      with:
+        name: h1-nf-reset-${{ matrix.arch }}
+        path: ${{ runner.temp }}/evidence
+        retention-days: 7
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - arch: amd64
+          runner: ubuntu-24.04
+          machine: x86_64
+        - arch: arm64
+          runner: ubuntu-22.04-arm
+          machine: aarch64
