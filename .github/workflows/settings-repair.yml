@@ -1,4 +1,4 @@
-name: Compare socket reset delivery at the two native macOS TCP endpoints
+name: Compare macOS abort delivery from production local stream
 permissions:
   contents: read
 env:
@@ -31,15 +31,14 @@ jobs:
         echo "CARGO_TARGET_DIR=$RUNNER_TEMP/relay-target" >> "$GITHUB_ENV"
 
         '
-    - name: Measure peer and local send queues independently when aborting
+    - name: Compare immediate reset, fixed delay and bounded queue drainage
       working-directory: relay
-      run: "python3 ../diagnostics/settings-20261121/reset-trace.py\ncargo build --locked\
-        \ --manifest-path network-relay-rs/Cargo.toml --bin network-relay-rs\nfor\
-        \ peer in 0 1; do\n  for local_drain in 0 1; do\n    echo \"TLS peer drain=$peer,\
-        \ SOCKS drain=$local_drain\"\n    TRACE_DRAIN_PEER=\"$peer\" TRACE_DRAIN_LOCAL=\"\
-        $local_drain\" python3 ../diagnostics/settings-20261121/direct-close.py \"\
-        $CARGO_TARGET_DIR/debug/network-relay-rs\"\n  done\ndone\n"
+      run: "python3 ../diagnostics/settings-20261121/reset-trace.py\ncat ../diagnostics/settings-20261121/bulk-abort.rs\
+        \ >> network-relay-rs/Core/src/backend.rs\nfor variant in 0 fixed 1 1 fixed\
+        \ 0; do\n  TRACE_DRAIN_LOCAL=\"$variant\" cargo test --locked --manifest-path\
+        \ network-relay-rs/Core/Cargo.toml --lib native_bulk_abort_delivery -- --nocapture\n\
+        done\n"
 'on':
   push:
     branches:
-    - audit/rs-native-reset-delivery-20261121
+    - audit/rs-abort-stream-20261121
