@@ -43,8 +43,11 @@ cd "$root"
 ;;
 missing)
 cp "$pem" "$stage/ca.pem"
-sudo security add-trusted-cert -d -r trustRoot -p ssl -s relay.test -k /Library/Keychains/System.keychain "$cert"
+# Chromium ignores macOS trust entries constrained to one hostname.
+# Trust only this guest's newly generated CA on the disposable runner.
+sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain "$cert"
 touch "$stage/trusted"
+/usr/bin/python3 "$stage/browser.py" --preflight
 defaults write com.arccal.network-relay-tun GlobalTUN -bool false
 [[ ${MODE_VARIANT:-} != baseline ]] || touch "$stage/baseline"
 run_ui missing

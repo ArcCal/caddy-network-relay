@@ -101,7 +101,7 @@ class Origin(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path.startswith("/browser/"):
             mode = self.path.removeprefix("/browser/")
-            if mode not in {"transparent", "socks"}:
+            if mode not in {"control", "transparent", "socks"}:
                 return self.send_error(404)
             body = ("<html><title>Verified Relay " + mode + "</title></html>").encode()
             self.send_response(200)
