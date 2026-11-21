@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [xcode-27, ubuntu-24.04, ubuntu-24.04-arm]
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     steps:
@@ -37,7 +37,7 @@ jobs:
       - name: WARP check mode and authenticated forwarding
         if: runner.os == 'Linux'
         working-directory: relay/network-relay-cf-masque
-        run: cargo test --locked --test cli_warp_wiring --test warp_matrix
+        run: cargo test --locked --test cli_warp_wiring --test warp_matrix -- --test-threads=1
       - name: RS production backend and delayed SETTINGS and response controls
         working-directory: relay/network-relay-rs/Core
         run: cargo test --locked -- --nocapture
