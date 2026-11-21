@@ -6,6 +6,11 @@ expected = hashlib.sha256(blob).digest()
 results = collections.Counter()
 reports = collections.Counter()
 lock = threading.Lock()
+def drain(raw):
+    for _ in range(200):
+        if raw.getsockopt(socket.SOL_SOCKET, 0x1024) == 0: return
+        time.sleep(.002)
+
 def exact(sock, size):
     b = bytearray()
     while len(b) < size:
@@ -36,7 +41,9 @@ class Peer(socketserver.BaseRequestHandler):
                 except OSError: pass
                 return
             with socket.socket(fileno=s.detach()) as raw:
-                if mode==b'R': raw.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))
+                if mode==b'R':
+                    if os.getenv('TRACE_DRAIN_PEER')=='1': drain(raw)
+                    raw.setsockopt(socket.SOL_SOCKET,socket.SO_LINGER,struct.pack('ii',1,0))
                 else: raw.shutdown(socket.SHUT_WR)
 class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
@@ -57,27 +64,31 @@ with tempfile.TemporaryDirectory() as d:
             pick.bind(('127.0.0.1',0)); port=pick.getsockname()[1]
         cfg=root/'client.toml'
         cfg.write_text(f'uri_template="https://127.0.0.1:{peer.server_address[1]}/.well-known/masque/udp/{{target_host}}/{{target_port}}/"\nusername="alice"\npassword="disposable"\nserver_name="relay.test"\ntransport="http/1.1"\nmode="socks"\n[socks]\nlisten=["127.0.0.1:{port}"]\n')
-        child=subprocess.Popen([sys.argv[1],'--config',str(cfg),'--ca-file',str(root/'ca.pem'),'--duration','600'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        child=subprocess.Popen([sys.argv[1],'--config',str(cfg),'--ca-file',str(root/'ca.pem'),'--duration','600'],stdout=subprocess.DEVNULL,stderr=open(root/"rslog","w"))
         try:
             for _ in range(100):
                 assert child.poll() is None, 'RS process exited'
                 try: socket.create_connection(('127.0.0.1',port),timeout=.2).close();break
                 except OSError: time.sleep(.1)
-            for mode in [b'C',b'F',b'R'] * 20:
+            for mode in [b'C',b'F',b'R'] * 16:
                 with socket.create_connection(('127.0.0.1',port),timeout=20) as ch:
                     ch.sendall(b'\x05\x01\x00');assert exact(ch,2)==b'\x05\x00'
                     ch.sendall(b'\x05\x01\x00\x01\x7f\x00\x00\x01\x00\x07')
                     assert exact(ch,10)[:2]==b'\x05\x00'
-                    ch.sendall(mode)
+                    ch.settimeout(3);ch.sendall(mode)
                     digest=hashlib.sha256();n=0
                     try:
                         while data:=ch.recv(65536): digest.update(data);n+=len(data)
                         terminal='EOF'
                     except ConnectionResetError: terminal='RESET'
-                    except TimeoutError: terminal='TIMEOUT'
+                    except TimeoutError:
+                        terminal='TIMEOUT'
+                        peer=str(ch.getsockname()[1])
+                        lines=[l for l in (root/'rslog').read_text().splitlines() if 'TRACE abort' in l and ':'+peer+')' in l]
+                        print('TIMEOUT',mode,peer,n,'RS issued local abort',bool(lines),flush=True)
                     results[(mode,terminal)]+=1
                     if mode==b'C': assert n==len(blob) and digest.digest()==expected and terminal=='EOF'
             print('Target completed writes',reports,'SOCKS results',results,flush=True)
-            assert results=={(b'C','EOF'):20,(b'F','RESET'):20,(b'R','RESET'):20}
+            assert reports=={b'C':16,b'F':16,b'R':16} and results[(b'C','EOF')]==16
         finally:
             child.send_signal(signal.SIGINT);child.wait(timeout=20);peer.shutdown()

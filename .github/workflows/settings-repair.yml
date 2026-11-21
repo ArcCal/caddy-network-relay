@@ -1,4 +1,4 @@
-name: Isolate RS TLS shutdown on Mac without a forwarder
+name: Compare socket reset delivery at the two native macOS TCP endpoints
 permissions:
   contents: read
 env:
@@ -31,14 +31,15 @@ jobs:
         echo "CARGO_TARGET_DIR=$RUNNER_TEMP/relay-target" >> "$GITHUB_ENV"
 
         '
-    - name: Compare authenticated close, bare FIN and TCP reset through production
-        SOCKS
+    - name: Measure peer and local send queues independently when aborting
       working-directory: relay
-      run: 'cargo build --locked --manifest-path network-relay-rs/Cargo.toml --bin
-        network-relay-rs
-
-        python3 ../diagnostics/settings-20261121/direct-close.py "$CARGO_TARGET_DIR/debug/network-relay-rs"'
+      run: "python3 ../diagnostics/settings-20261121/reset-trace.py\ncargo build --locked\
+        \ --manifest-path network-relay-rs/Cargo.toml --bin network-relay-rs\nfor\
+        \ peer in 0 1; do\n  for local_drain in 0 1; do\n    echo \"TLS peer drain=$peer,\
+        \ SOCKS drain=$local_drain\"\n    TRACE_DRAIN_PEER=\"$peer\" TRACE_DRAIN_LOCAL=\"\
+        $local_drain\" python3 ../diagnostics/settings-20261121/direct-close.py \"\
+        $CARGO_TARGET_DIR/debug/network-relay-rs\"\n  done\ndone\n"
 'on':
   push:
     branches:
-    - audit/rs-direct-tls-close-20261121
+    - audit/rs-native-reset-delivery-20261121
