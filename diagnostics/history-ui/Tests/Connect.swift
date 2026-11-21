@@ -61,6 +61,8 @@ final class Connect: XCTestCase {
                 XCTAssertNotEqual(try route(), before)
                 XCTAssertTrue(try route().contains("utun"))
                 try socks()
+                let script = folder.appendingPathComponent("ordinary.py").path
+                XCTAssertEqual(try output("/usr/bin/python3", [script]), "4 plain sockets echoed\n")
                 toggle.click()
                 XCTAssertTrue(app.windows.staticTexts["System capture: Off"].firstMatch.waitForExistence(timeout: 30))
                 XCTAssertTrue(connected.waitForExistence(timeout: 50))

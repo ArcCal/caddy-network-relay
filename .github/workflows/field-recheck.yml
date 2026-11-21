@@ -1,8 +1,8 @@
-name: Recheck signed mode switching with the verified original bundles
+name: Test ordinary system sockets after enabling capture in the signed GUI
 'on':
   push:
     branches:
-    - audit/tun-live-mode-artifacts-20261121
+    - audit/tun-ui-system-sockets-20261121
 permissions:
   contents: read
   actions: read
