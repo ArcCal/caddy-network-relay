@@ -1,8 +1,8 @@
-name: Native NF HTTP/1.1 reset and orderly close
+name: Compare NF and OpenSSL under two transport paths
 'on':
   push:
     branches:
-    - audit/native-h1-and-tun-recheck-20261121
+    - audit/h1-native-two-paths-20261121
 permissions:
   contents: read
   actions: read
@@ -80,7 +80,8 @@ jobs:
         -e ''s/for product in nf tun/for product in nf/'' diagnostics/linux-apple/build-products.sh
         > "$RUNNER_TEMP/build-nf.sh"
 
-        sed -i '''' ''s/serverIP: "127.0.0.1"/serverIP: "192.0.2.2"/'' native-probe/diagnostics/RelayProbe.swift
+        sed -i '''' ''s/serverIP: "127.0.0.1"/serverIP: ProcessInfo.processInfo.environment["RELAY_HISTORY_ADDRESS"]!/''
+        native-probe/diagnostics/RelayProbe.swift
 
         bash "$RUNNER_TEMP/build-nf.sh"  "$PWD/clients" "$PWD/native-probe/diagnostics/RelayProbe.swift"
         "$RUNNER_TEMP/products"

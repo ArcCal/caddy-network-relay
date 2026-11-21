@@ -74,12 +74,21 @@ with tempfile.TemporaryDirectory() as d:
         assert sock.selected_alpn_protocol()=='http/1.1' and header.startswith(b'HTTP/1.1 200')
         return sock
     def boundary(port, ctx):
-        return sample(lambda:p.socks(port,1,b'\x01\x7f\0\0\x01',18449)[0],'native-nf-packet')
+        return sample(lambda:p.socks(port,1,b'\x01\x7f\0\0\x01',18449)[0],'native-nf-'+os.environ['RELAY_HISTORY_LABEL'])
     control=sample(lambda:raw('127.0.0.1'),'openssl-port-forward')
     packet=sample(lambda:raw('192.0.2.2'),'openssl-packet')
+    os.environ.update(RELAY_HISTORY_ADDRESS='127.0.0.1',RELAY_HISTORY_LABEL='port-forward')
+    forwarded=p.case('nf','caddy',14201,'http/1.1',secret,root,None,out)
+    os.environ.update(RELAY_HISTORY_ADDRESS='192.0.2.2',RELAY_HISTORY_LABEL='packet')
     native=p.case('nf','caddy',14201,'http/1.1',secret,root,None,out)
 
     for name,(rows,counts) in [('openssl-packet',packet),('nf',native)]:
         assert counts == dict(attempt_abort=15,reverse_ping=5),(name,counts)
         assert all(r['complete'] and r['terminal']=='EOF' for r in rows if r['mode']=='C'),name
         assert all(r['terminal'] in ('ECONNRESET','TLS_UNEXPECTED_EOF') for r in rows if r['mode']=='R'),name
+
+    # A TCP forward can replace a peer reset with an unannounced transport EOF.
+    # Record what NF delivers without requiring that platform-specific outcome.
+    rows,counts=forwarded
+    assert counts==dict(attempt_abort=15,reverse_ping=5),counts
+    assert all(r['complete'] and r['terminal']=='EOF' for r in rows if r['mode']=='C')
