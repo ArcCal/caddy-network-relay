@@ -18,14 +18,3 @@ setup = """
             }
 """
 output.write_text(text.replace(point, point + setup))
-text = output.read_text()
-a='data, _, complete, error in'
-assert text.count(a) == 1
-text=text.replace(a,'data, context, complete, error in')
-a='            entry.reading = false'
-assert text.count(a)==1
-text=text.replace(a,a+r'''
-            if entry.trust != nil && (complete || error != nil) {
-                print("EOF-SAMPLE", id, Date().timeIntervalSince1970, "context", context?.identifier ?? "nil", "final", context?.isFinal ?? false, "complete", complete, "error", String(describing: error), "state", entry.native.state, "bytes", data?.count ?? 0)
-            }''')
-output.write_text(text)
