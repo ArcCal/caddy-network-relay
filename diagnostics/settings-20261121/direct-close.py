@@ -58,37 +58,27 @@ with tempfile.TemporaryDirectory() as d:
     cmd('openssl','x509','-req','-in','leaf.csr','-CA','ca.pem','-CAkey','ca.key','-set_serial','3','-days','1','-extfile','san','-out','cert.pem')
     ctx=ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(root/'cert.pem',root/'key.pem');ctx.set_alpn_protocols(['http/1.1'])
-    with Server(('127.0.0.1',0),Peer) as peer:
-        threading.Thread(target=peer.serve_forever,daemon=True).start()
-        with socket.socket() as pick:
-            pick.bind(('127.0.0.1',0)); port=pick.getsockname()[1]
-        cfg=root/'client.toml'
-        cfg.write_text(f'uri_template="https://127.0.0.1:{peer.server_address[1]}/.well-known/masque/udp/{{target_host}}/{{target_port}}/"\nusername="alice"\npassword="disposable"\nserver_name="relay.test"\ntransport="http/1.1"\nmode="socks"\n[socks]\nlisten=["127.0.0.1:{port}"]\n')
-        child=subprocess.Popen([sys.argv[1],'--config',str(cfg),'--ca-file',str(root/'ca.pem'),'--duration','600'],stdout=subprocess.DEVNULL,stderr=open(root/"rslog","w"))
-        try:
-            for _ in range(100):
-                assert child.poll() is None, 'RS process exited'
-                try: socket.create_connection(('127.0.0.1',port),timeout=.2).close();break
-                except OSError: time.sleep(.1)
+    with Server(('127.0.0.1',0),Peer) as server:
+        threading.Thread(target=server.serve_forever,daemon=True).start()
+        client=ssl.create_default_context(cafile=str(root/'ca.pem'))
+        client.set_alpn_protocols(['http/1.1'])
+        for draining in ('0','1'):
+            os.environ['TRACE_DRAIN_PEER']=draining
+            results.clear()
             for mode in [b'C',b'F',b'R'] * 16:
-                with socket.create_connection(('127.0.0.1',port),timeout=20) as ch:
-                    ch.sendall(b'\x05\x01\x00');assert exact(ch,2)==b'\x05\x00'
-                    ch.sendall(b'\x05\x01\x00\x01\x7f\x00\x00\x01\x00\x07')
-                    assert exact(ch,10)[:2]==b'\x05\x00'
-                    ch.settimeout(3);ch.sendall(mode)
-                    digest=hashlib.sha256();n=0
-                    try:
-                        while data:=ch.recv(65536): digest.update(data);n+=len(data)
-                        terminal='EOF'
-                    except ConnectionResetError: terminal='RESET'
-                    except TimeoutError:
-                        terminal='TIMEOUT'
-                        peer=str(ch.getsockname()[1])
-                        lines=[l for l in (root/'rslog').read_text().splitlines() if 'TRACE abort' in l and ':'+peer+')' in l]
-                        print('TIMEOUT',mode,peer,n,'RS issued local abort',bool(lines),flush=True)
-                    results[(mode,terminal)]+=1
-                    if mode==b'C': assert n==len(blob) and digest.digest()==expected and terminal=='EOF'
-            print('Target completed writes',reports,'SOCKS results',results,flush=True)
-            assert reports=={b'C':16,b'F':16,b'R':16} and results[(b'C','EOF')]==16
-        finally:
-            child.send_signal(signal.SIGINT);child.wait(timeout=20);peer.shutdown()
+                with socket.create_connection(server.server_address,timeout=3) as raw:
+                    with client.wrap_socket(raw,server_hostname='relay.test',suppress_ragged_eofs=False) as tls:
+                        tls.sendall(b'CONNECT localhost:7 HTTP/1.1\r\nHost: localhost:7\r\n\r\n')
+                        assert exact(tls,19)==b'HTTP/1.1 200 OK\r\n\r\n'
+                        tls.sendall(mode)
+                        digest=hashlib.sha256();n=0
+                        try:
+                            while data:=tls.recv(65536): n+=len(data);digest.update(data)
+                            outcome='EOF'
+                        except ssl.SSLEOFError: outcome='TRUNCATED'
+                        except ConnectionResetError: outcome='RESET'
+                        except TimeoutError: outcome='TIMEOUT'
+                        results[(mode,outcome)]+=1
+                        if mode==b'C': assert digest.digest()==expected and outcome=='EOF'
+            print('Python/OpenSSL direct macOS socket, drain',draining,'results',results,flush=True)
+        server.shutdown()

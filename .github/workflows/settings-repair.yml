@@ -1,4 +1,4 @@
-name: Compare socket reset delivery at the two native macOS TCP endpoints
+name: Check native TLS reset delivery without either relay product
 permissions:
   contents: read
 env:
@@ -12,34 +12,9 @@ jobs:
     - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
       with:
         persist-credentials: false
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
-      with:
-        repository: ArcCal/network-relay
-        ref: 0d7d83ca37d5da9154ae0004e545a6bcf68d2c58
-        path: relay
-        persist-credentials: false
-    - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d
-      with:
-        toolchain: stable
-    - name: Apply exact runtime and regression-test changes
-      run: 'cd relay
-
-        git apply ../diagnostics/settings-20261121/candidate.patch
-
-        cp ../diagnostics/settings-20261121/history_nov21.rs network-relay-rs/Core/tests/
-
-        echo "CARGO_TARGET_DIR=$RUNNER_TEMP/relay-target" >> "$GITHUB_ENV"
-
-        '
-    - name: Measure peer and local send queues independently when aborting
-      working-directory: relay
-      run: "python3 ../diagnostics/settings-20261121/reset-trace.py\ncargo build --locked\
-        \ --manifest-path network-relay-rs/Cargo.toml --bin network-relay-rs\nfor\
-        \ peer in 0 1; do\n  for local_drain in 0 1; do\n    echo \"TLS peer drain=$peer,\
-        \ SOCKS drain=$local_drain\"\n    TRACE_DRAIN_PEER=\"$peer\" TRACE_DRAIN_LOCAL=\"\
-        $local_drain\" python3 ../diagnostics/settings-20261121/direct-close.py \"\
-        $CARGO_TARGET_DIR/debug/network-relay-rs\"\n  done\ndone\n"
+    - name: Test the macOS socket independently with Python and OpenSSL
+      run: python3 diagnostics/settings-20261121/direct-close.py
 'on':
   push:
     branches:
-    - audit/rs-native-reset-delivery-20261121
+    - audit/mac-direct-socket-reset-20261121
