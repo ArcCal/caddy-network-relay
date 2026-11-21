@@ -12,9 +12,10 @@ esac
 overlay=$(mktemp -d "$RUNNER_TEMP/origin-overlay.XXXXXX")
 mkdir "$overlay/srv"
 cp diagnostics/linux-apple/{guest.py,git_origin.py,dns-page.html} "$overlay/srv/"
+cp diagnostics/history-ui/dns_stream.py "$overlay/srv/"
 (cd "$RUNNER_TEMP/final-linux" && shasum -a 256 --check SHA256SUMS)
 install -m 755 "$RUNNER_TEMP/final-linux/caddy-candidate" "$overlay/srv/caddy"
-(cd "$overlay" && printf '%s\n' srv/guest.py srv/git_origin.py srv/dns-page.html srv/caddy | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
+(cd "$overlay" && printf '%s\n' srv/guest.py srv/git_origin.py srv/dns_stream.py srv/dns-page.html srv/caddy | cpio -o -H newc | gzip -1) > "$overlay/fixture.gz"
 cat "$image/guest.gz" "$overlay/fixture.gz" > "$overlay/guest-with-bulk.gz"
 command -v "$cmd" >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install qemu
 # libslirp restricted mode drops every guest UDP reply, including forwarded
@@ -24,6 +25,9 @@ for mapping in tcp:18080 tcp:18443 udp:18553 tcp:14200 udp:14200 tcp:14201 udp:1
     protocol=${mapping%:*}
     port=${mapping#*:}
     net+=",hostfwd=$protocol:127.0.0.1:$port-10.0.2.15:$port"
+done
+for protocol in tcp udp; do
+    net+=",hostfwd=$protocol:198.51.100.254:14201-10.0.2.15:14201"
 done
 log="$RUNNER_TEMP/guest-console.log"
 touch "$log"

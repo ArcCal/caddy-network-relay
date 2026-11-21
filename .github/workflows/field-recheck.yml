@@ -1,4 +1,4 @@
-name: Verify DNS session recovery and cold browser lookups on macOS
+name: Check DNS over TLS through the signed macOS TUN client
 'on':
   push:
     branches:
@@ -8,7 +8,7 @@ permissions:
   actions: read
 jobs:
   gui:
-    name: Live mode UI (${{ matrix.variant }})
+    name: System DNS over TLS (${{ matrix.transport }})
     runs-on: xcode-27
     timeout-minutes: 75
     steps:
@@ -27,6 +27,12 @@ jobs:
         path: ${{ runner.temp }}/exact-caddy
         run-id: 44835734583
         github-token: ${{ github.token }}
+    - name: Prepare an isolated relay endpoint on the runner
+      run: |
+        sudo /sbin/route -n add -host 198.51.100.254 127.0.0.1
+        sudo /sbin/ifconfig lo0 alias 198.51.100.254 netmask 255.255.255.255
+        sudo /sbin/route -n change -host 198.51.100.254 127.0.0.1 -static
+        /sbin/route -n get 198.51.100.254 | grep STATIC
     - name: Boot the release Linux kernel with loopback-only port forwards
       run: 'set -eu
 
@@ -54,36 +60,19 @@ jobs:
       env:
         GUEST_ARCH: amd64
         GUEST_MACHINE: x86_64
-    - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+    - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
       with:
-        repository: ArcCal/network-relay
-        ref: b15844f5329c3578291523c81fccfa222ba44426
-        fetch-depth: 2
-        path: clients
-        persist-credentials: false
-    - name: Reproduce both failures with the original macOS packet worker
+        name: network-relay-tun-dns-repair-macos-arm64
+        path: signed
+        run-id: 44891995933
+        github-token: ${{ github.token }}
+    - name: Verify the exact app previously tested and published
       run: |
         set -eu
-        original="$RUNNER_TEMP/original-client"
-        test "$(git -C clients rev-parse HEAD^)" = f77f1d8c09c59677b14348b808ea5dceff46fab2
-        git -C clients worktree add --detach "$original" HEAD^
-        cp clients/network-relay-tun/TunEngine/tests/udp_path.rs "$original/network-relay-tun/TunEngine/tests/udp_path.rs"
-        export CARGO_HOME="$PWD/clients/network-relay-tun/.cargo"
-        export CARGO_TARGET_DIR="$PWD/clients/network-relay-tun/target"
-        log="$RUNNER_TEMP/baseline-dns.log"
-        if cargo test --locked --manifest-path "$original/network-relay-tun/TunEngine/Cargo.toml" --test udp_path dns > "$log" 2>&1; then
-          cat "$log"
-          exit 1
-        fi
-        tail -40 "$log"
-        grep -Fq 'the same-port DNS retry could not open a fresh association' "$log"
-        grep -Fq 'a new lookup could not open while an answered DNS mapping occupied the budget' "$log"
-        grep -Fq '1 passed; 2 failed' "$log"
-    - name: Build, test and verify the signed client with the repaired packet worker
-      run: |
-        set -eu
-        bash clients/network-relay-tun/build-macos.sh
-        codesign --verify --deep --strict "clients/network-relay-tun/dist/Network Relay Tun.app"
+        echo 'bf76b2cc7fe585b0da61cfc09c4f9ad495516253bfe770a11b351aaa082f37a7  signed/NetworkRelayTun-0.1.0-macos-arm64.zip' | shasum -a 256 -c -
+        mkdir -p clients/network-relay-tun/dist
+        ditto -x -k signed/NetworkRelayTun-0.1.0-macos-arm64.zip clients/network-relay-tun/dist
+        codesign --verify --strict --deep "clients/network-relay-tun/dist/Network Relay Tun.app"
     - name: prepare GUI acceptance
       timeout-minutes: 4
       run: bash diagnostics/history-ui/gui.sh prepare
@@ -97,12 +86,12 @@ jobs:
     - name: install GUI acceptance
       timeout-minutes: 2
       run: bash diagnostics/history-ui/gui.sh install
-      if: '!cancelled() && matrix.variant == ''candidate'' && steps.network.outcome
+      if: '!cancelled() && steps.network.outcome
         == ''success'''
     - name: installed GUI acceptance
       timeout-minutes: 6
       run: bash diagnostics/history-ui/gui.sh installed
-      if: '!cancelled() && matrix.variant == ''candidate'' && steps.network.outcome
+      if: '!cancelled() && steps.network.outcome
         == ''success'''
     - name: Record the UI assertions for each completed phase
       if: always()
@@ -126,19 +115,13 @@ jobs:
     - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
       if: always()
       with:
-        name: mode-check-${{ matrix.variant }}
+        name: dns-tls-${{ matrix.transport }}
         path: ${{ runner.temp }}/evidence
-        retention-days: 7
-    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-      with:
-        name: network-relay-tun-dns-repair-macos-arm64
-        path: clients/network-relay-tun/dist/NetworkRelayTun-*-macos-arm64.zip
-        if-no-files-found: error
         retention-days: 7
     strategy:
       fail-fast: false
       matrix:
-        variant:
-        - candidate
+        transport: [h2, h3]
     env:
-      MODE_VARIANT: ${{ matrix.variant }}
+      RELAY_UI_TRANSPORT: ${{ matrix.transport }}
+      MODE_VARIANT: candidate

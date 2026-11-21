@@ -21,19 +21,19 @@ test ! -e "$support"
 test ! -e '/Library/Application Support/NetworkRelayTun'
 ditto "clients/network-relay-tun/dist/Network Relay Tun.app" "$app"
 codesign --verify --deep --strict "$app"
-cp diagnostics/history-ui/{ordinary,clone,browser,public,dnsbench}.py "$stage/"
+cp diagnostics/history-ui/{ordinary,clone,browser,public,dnsbench,dns_stream}.py "$stage/"
 if [[ ! -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
     HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask google-chrome
 fi
 codesign -v -R='identifier "com.google.Chrome" and anchor apple generic and certificate leaf[subject.OU] = EQHXZ8M8AV' "/Applications/Google Chrome.app"
 mkdir -m 700 "$support"
 python3 - "$support/settings.json" <<'PY'
-import base64,json,plistlib,sys,urllib.request
+import base64,json,os,plistlib,sys,urllib.request
 with urllib.request.urlopen('http://127.0.0.1:18080/caddy.mobileconfig',timeout=10) as response:
     doc=plistlib.loads(response.read())
 headers=next(i for i in doc['PayloadContent'] if i.get('PayloadType')=='com.apple.relay.managed')['Relays'][0]['AdditionalHTTPHeaderFields']
 secret=base64.b64decode(next(v for k,v in headers.items() if 'authorization' in k.lower()).split()[1]).decode().split(':',1)[1]
-open(sys.argv[1],'w').write(json.dumps({'servers':[dict(name='Isolated Linux relay',domain='relay.test:14201',serverIP='198.51.100.254',username='alice',password=secret,transport='h2',probeTarget='127.0.0.1:18443')]}))
+open(sys.argv[1],'w').write(json.dumps({'servers':[dict(name='Isolated Linux relay',domain='relay.test:14201',serverIP='198.51.100.254',username='alice',password=secret,transport=os.environ['RELAY_UI_TRANSPORT'],probeTarget='127.0.0.1:18443')]}))
 PY
 cd diagnostics/history-ui
 command -v xcodegen >/dev/null || HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
@@ -70,29 +70,7 @@ done
 /usr/bin/python3 "$stage/public.py" --baseline
 # The product rejects loopback as a global relay endpoint. Exercise the
 # shipped binary with a non-loopback address on a pre-owned static host route.
-sudo /sbin/route -n add -host 198.51.100.254 127.0.0.1
-sudo /sbin/ifconfig lo0 alias 198.51.100.254 netmask 255.255.255.255
-/sbin/route -n get 198.51.100.254
-sudo /sbin/route -n change -host 198.51.100.254 127.0.0.1 -static
 /sbin/route -n get 198.51.100.254 | grep STATIC
-python3 -u - <<'FORWARD' &
-import socket,threading,select
-with socket.socket() as listener:
-    listener.bind(('198.51.100.254',14201)); listener.listen()
-    def tunnel(conn):
-        with conn,socket.create_connection(('127.0.0.1',14201)) as dst:
-            inputs=[conn,dst]
-            while inputs:
-                for source in select.select(inputs,[],[],30)[0]:
-                    other=dst if source is conn else conn
-                    data=source.recv(65536)
-                    if data:other.sendall(data)
-                    else:
-                        inputs.remove(source);other.shutdown(socket.SHUT_WR)
-    while True:threading.Thread(target=tunnel,args=(listener.accept()[0],),daemon=True).start()
-FORWARD
-echo $! > "$stage/forward.pid"
-sleep 1
 curl --noproxy '*' --cacert "$pem" --resolve relay.test:14201:198.51.100.254 --max-time 7 -sS -o /dev/null https://relay.test:14201/
 
 ;;
@@ -112,7 +90,7 @@ installed)
             sleep .2
         done
         /sbin/route -n get 198.51.100.42 | grep "interface: utun"
-        for ip in 198.51.100.42 1.1.1.1 8.8.8.8; do /sbin/route -n get "$ip" | awk '/interface:/{print $0}'; done
+        for ip in 198.51.100.42 1.1.1.1 1.0.0.1 8.8.8.8; do /sbin/route -n get "$ip" | grep "interface: utun"; done
         /usr/sbin/scutil --dns | awk '/nameserver|order|flags/ {print}' | head -65
         while read -r site ip; do
             echo "Public bridge uplink for $site"
@@ -122,8 +100,8 @@ installed)
             site=${spec%:*}
             curl --noproxy '*' --max-time 12 -sS -o /dev/null --connect-to "$site:443:127.0.0.1:${spec#*:}" "https://$site/" || echo "Uplink TLS control failed for $site"
         done
-        for check in dnsbench ordinary clone browser public; do
-            [[ "$cycle" == 0 || "$check" == dnsbench || "$check" == ordinary || "$check" == clone ]] || continue
+        for check in dns_stream dnsbench ordinary clone browser public; do
+            [[ "$cycle" == 0 || "$check" == dns_stream || "$check" == dnsbench || "$check" == ordinary || "$check" == clone ]] || continue
             echo "Cycle $cycle: $check"
             /usr/bin/python3 -u "$stage/$check.py" || touch "$stage/check-failed"
         done
@@ -155,6 +133,10 @@ assert all(d.get("browser_" + mode, 0) >= 1 for mode in ("transparent", "socks")
 assert all(d.get("public_" + port, 0) >= 2 for port in ("18481", "18482")), d
 assert d.get("git_dns6_a", 0) >= 2, d
 assert d.get("git_dns_a", 0) > 0, d
+for kind in ("dns_tcp", "dns_tls"):
+    assert d.get(kind, 0) >= 32, (kind, d.get(kind))
+    print("Verified DNS stream queries at Linux origin", kind, d[kind])
+
 assert d.get("git_object", 0) >= 18, d
 print("Git DNS answers and object reads:", d["git_dns_a"], d["git_object"])
 for kind in ("tcp4","tcp6","udp4","udp6"):

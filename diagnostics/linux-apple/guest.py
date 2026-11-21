@@ -9,6 +9,7 @@ import secrets
 import socket
 import socketserver
 import git_origin
+import dns_stream
 import ssl
 import subprocess
 import tempfile
@@ -241,6 +242,13 @@ def start_capture_origins():
         command("ip", "addr", "add", resolver + "/32", "dev", "lo")
         dns = socketserver.UDPServer((resolver, 53), DNS)
         threading.Thread(target=dns.serve_forever, daemon=True).start()
+    command("ip", "addr", "add", "1.0.0.1/32", "dev", "lo")
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(ROOT / "cert.pem", ROOT / "key.pem")
+    for resolver in ("1.1.1.1", "1.0.0.1"):
+        dns_stream.listen(resolver, 53, None, git_origin.dns_reply, count)
+        dns_stream.listen(resolver, 853, tls, git_origin.dns_reply, count)
+
     class PublicOrigin(socketserver.BaseRequestHandler):
         def handle(self):
             import select
@@ -305,9 +313,10 @@ def main():
         if subprocess.run(["ip", "-4", "route", "get", "192.0.2.1"],
                           capture_output=True).returncode == 0:
             raise RuntimeError("Unexpected external guest route")
+    secret = credentials()
     start_capture_origins()
     identity = environment_record()
-    jobs = start_servers(credentials())
+    jobs = start_servers(secret)
     udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     udp.bind((BIND, 18553))
     def echo():
