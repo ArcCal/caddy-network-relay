@@ -41,7 +41,7 @@ def credentials():
             "-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
     command("openssl", "req", "-newkey", "ec", "-pkeyopt", "ec_paramgen_curve:P-256", "-nodes",
             "-keyout", "key.pem", "-out", "cert.csr", "-subj", "/CN=relay.test")
-    (ROOT / "extensions").write_text("subjectAltName=DNS:relay.test,DNS:git-fixture.test,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth\n"
+    (ROOT / "extensions").write_text("subjectAltName=DNS:relay.test,DNS:git-fixture.test,DNS:*.dns-fixture.test,IP:127.0.0.1,IP:::1\nextendedKeyUsage=serverAuth\n"
                                      "basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\n")
     command("openssl", "x509", "-req", "-in", "cert.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial",
             "-out", "cert.pem", "-days", "1", "-extfile", "extensions")
@@ -99,6 +99,26 @@ class Origin(http.server.BaseHTTPRequestHandler):
             size -= chunk
 
     def do_GET(self):
+        if self.path.startswith(("/dns-page?", "/dns-payload?", "/dns-stats")):
+            mime = "application/json"
+            if self.path.startswith("/dns-page?"):
+                body = Path(__file__).with_name("dns-page.html").read_bytes()
+                mime = "text/html"
+            elif self.path.startswith("/dns-payload?"):
+                body = json.dumps({"host": self.headers["Host"], "port": self.client_address[1]}).encode()
+            else:
+                with LOCK:
+                    body = json.dumps({k: v for k, v in COUNTS.items() if k.endswith(".dns-fixture.test")}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Connection", "close")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            self.close_connection = True
+            return
         if self.path.startswith("/browser/"):
             mode = self.path.removeprefix("/browser/")
             if mode not in {"control", "transparent", "socks"}:
@@ -208,7 +228,13 @@ def start_capture_origins():
             if answer is not None:
                 if answer[6:8] == b"\0\1":
                     count("git_dns_a" if self.server.address_family == socket.AF_INET else "git_dns6_a")
-                channel.sendto(answer, self.client_address)
+                probe = git_origin.probe_name(query)
+                if probe and answer[6:8] == b"\0\1":
+                    count(probe)
+                if probe and probe.startswith("slow-"):
+                    threading.Timer(1.25, channel.sendto, args=(answer, self.client_address)).start()
+                else:
+                    channel.sendto(answer, self.client_address)
 
     # These addresses exist only inside the guest with a prohibited default route.
     for resolver in ("1.1.1.1", "8.8.8.8"):

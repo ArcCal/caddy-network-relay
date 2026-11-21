@@ -1,0 +1,27 @@
+<!doctype html><meta charset="utf-8"><pre id="results"></pre><script>
+const nonce = new URL(location.href).searchParams.get("trial");
+const data = [];
+function get(url) {
+    const request = new XMLHttpRequest();
+    request.open("GET", url, false);
+    request.send();
+    if (request.status !== 200) throw new Error("HTTP " + request.status);
+    return JSON.parse(request.responseText);
+}
+try {
+    for (const kind of ["fast", "slow"]) {
+        const name = kind + "-" + nonce + ".dns-fixture.test";
+        for (let visit = 1; visit <= 2; visit++) {
+            const before = get("/dns-stats")[name] || 0;
+            const start = performance.now();
+            const reply = get("https://" + name + ":18443/dns-payload?visit=" + visit);
+            const ms = Math.round(performance.now() - start);
+            if (reply.host !== name + ":18443") throw new Error("Unexpected origin");
+            data.push({kind, visit, ms, port: reply.port, queries: (get("/dns-stats")[name] || 0) - before});
+        }
+    }
+    document.querySelector("pre").textContent = JSON.stringify(data);
+} catch (error) {
+    document.querySelector("pre").textContent = String(error);
+}
+</script>

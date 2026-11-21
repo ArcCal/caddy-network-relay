@@ -1,6 +1,7 @@
 """Read-only Git HTTP fixture and authoritative answers for one test name."""
 import hashlib
 import socket
+import re
 import struct
 import zlib
 
@@ -28,6 +29,11 @@ def git_files():
     return files
 
 
+def probe_name(query):
+    match = re.match(rb"^.((?:fast|slow)-[0-9a-f]{12})\x0bdns-fixture\x04test\x00", query[12:], re.IGNORECASE)
+    return match[1].decode().lower() + ".dns-fixture.test" if match else None
+
+
 def dns_reply(query):
     if len(query) < 17 or query[4:6] != b"\0\1":
         return None
@@ -42,8 +48,11 @@ def dns_reply(query):
     addresses = {NAME.encode(): ADDRESS, b"relay.test": ADDRESS,
                  b"www.google.com": "198.51.100.43", b"github.com": "198.51.100.44"}
     address = addresses.get(b".".join(labels))
+    probe = probe_name(query)
+    if probe:
+        address = ADDRESS
     known = address is not None
     answer = known and qclass == 1 and qtype == 1
     header = query[:2] + struct.pack("!5H", 0x8180 if known else 0x8183, 1, int(answer), 0, 0)
-    rdata = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 1, 4) + socket.inet_aton(address or ADDRESS)
+    rdata = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 120 if probe else 1, 4) + socket.inet_aton(address or ADDRESS)
     return header + query[12:i+5] + (rdata if answer else b"")

@@ -21,7 +21,7 @@ test ! -e "$support"
 test ! -e '/Library/Application Support/NetworkRelayTun'
 ditto "clients/network-relay-tun/dist/Network Relay Tun.app" "$app"
 codesign --verify --deep --strict "$app"
-cp diagnostics/history-ui/{ordinary,clone,browser,public}.py "$stage/"
+cp diagnostics/history-ui/{ordinary,clone,browser,public,dnsbench}.py "$stage/"
 if [[ ! -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]]; then
     HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask google-chrome
 fi
@@ -122,8 +122,8 @@ installed)
             site=${spec%:*}
             curl --noproxy '*' --max-time 12 -sS -o /dev/null --connect-to "$site:443:127.0.0.1:${spec#*:}" "https://$site/" || echo "Uplink TLS control failed for $site"
         done
-        for check in ordinary clone browser public; do
-            [[ "$cycle" == 0 || "$check" == ordinary || "$check" == clone ]] || continue
+        for check in dnsbench ordinary clone browser public; do
+            [[ "$cycle" == 0 || "$check" == dnsbench || "$check" == ordinary || "$check" == clone ]] || continue
             echo "Cycle $cycle: $check"
             /usr/bin/python3 -u "$stage/$check.py" || touch "$stage/check-failed"
         done
